@@ -1,0 +1,179 @@
+# VoiceShield Model Card: AASIST-L (Integrated Spectro-Temporal Graph Attention Network)
+
+**Model Identifier**: `VoiceShield-AASIST-L-v0.1.0`  
+**Base Architecture**: AASIST-L (Lightweight Audio Anti-Spoofing using Integrated Spectro-Temporal Graph Attention Networks)  
+**Upstream Provenance**: Clova AI Research / NAVER Corp & University of Seoul (Jung et al., ICASSP 2022)  
+**Upstream Repository**: [`https://github.com/clovaai/aasist`](https://github.com/clovaai/aasist) (Pinned commit: `a04c9863f63d44471dde8a6abcb3b082b07cd1d1`)  
+**Licence**: MIT License (Upstream Clova AI) / Apache-2.0 / MIT (VoiceShield integration boundary)  
+**Model Type**: Binary Acoustic Anti-Spoofing / Synthetic Speech Detector  
+**Card Version**: `1.0.0` (Truthful Baseline)  
+**Date**: October 2026  
+
+---
+
+## 1. Model Overview & Architecture
+
+AASIST-L is an end-to-end deep neural network designed to discriminate authentic human speech (*bona fide*) from synthesized (*TTS*), voice-converted (*VC*), or computer-generated acoustic deepfakes directly from raw waveforms without lossy time-frequency hand-crafted representations.
+
+### 1.1 Structural Specification
+
+| Architectural Component | Specification | Technical Rationale |
+| :--- | :--- | :--- |
+| **Input Signal** | Raw 1D Audio Waveform | Bypasses fixed STFT/MFCC representations to preserve phase anomalies. |
+| **Input Length (`nb_samp`)** | 64,600 samples ($4.0375\text{ s}$ @ $16\text{ kHz}$) | Standard evaluation context window capturing phonemic transitions. |
+| **Front-End Feature Extractor** | SincNet (128 Mel-bandpass filter kernels) | Parameterized bandpass filters learning sub-band spectral boundaries. |
+| **Spectral Encoder** | Residual Blocks (`[70, [1, 32], [32, 32], [32, 24], [24, 24]]`) | Squeeze-and-Excitation 2D convolutions over spectro-temporal maps. |
+| **Graph Module** | Heterogeneous Spectro-Temporal Graph Attention (GAT) | Models long-range non-local relationships across frequency and time nodes. |
+| **Graph Dimensions (`gat_dims`)** | `[24, 32]` | Lightweight latent node projection. |
+| **Node Pooling (`pool_ratios`)** | `[0.4, 0.5, 0.7, 0.5]` | Top-$k$ hierarchical graph pooling. |
+| **Output Layer** | 2 linear projection logits (`spoof: 0`, `bonafide: 1`) | Binary hypothesis decision space. |
+| **Total Parameters** | **85,386 parameters (~341 KB FP32)** | Ultra-compact footprint optimized for local M3 edge execution. |
+
+---
+
+## 2. Preprocessing & Input Contract
+
+VoiceShield enforces a strict, deterministic preprocessing contract prior to model ingestion:
+
+```mermaid
+flowchart LR
+    Raw[Raw Audio File/Stream] --> Resample[Polyphase Resampler: 16 kHz]
+    Resample --> Mono[Channel Downmixing: Mono Mean]
+    Mono --> Quality[Signal Quality Diagnostics: Clip/SNR/VAD]
+    Quality --> Framing[Deterministic Pad/Crop: 64,600 samples]
+    Framing --> Ingestion[AASIST-L Forward Pass]
+```
+
+1. **Sampling Rate**: Strictly $16,000\text{ Hz}$. Non-matching rates are converted via Kaiser-windowed polyphase sinc resampling.
+2. **Channel Downmix**: Multi-channel audio (up to 8 channels) is downmixed to mono via arithmetic mean in float32: $x_{\text{mono}} = \frac{1}{C} \sum_{c=1}^C x_c$.
+3. **Amplitude Normalization**: Peak-normalized to $[-1.0, 1.0]$ if peak exceeds 1.0. Infinite (Inf) or NaN values are rejected immediately.
+4. **Deterministic Evaluation Framing (`pad_for_aasist`)**:
+   - Audio shorter than $64,600$ samples: Cyclically tiled until reaching $64,600$ samples.
+   - Audio longer than $64,600$ samples: Truncated to the leading $64,600$ samples.
+   - Zero silence padding, no random cropping, and no stochastic augmentations during inference.
+
+---
+
+## 3. Training & Adaptation Data
+
+VoiceShield uses the official pre-trained AASIST-L baseline trained by NAVER Clova AI on the **ASVspoof 2019 Logical Access (LA)** training split:
+
+### 3.1 Data Categories & Provenance
+
+| Split | Utterances | Bona Fide Speakers | Generators Included | Licensing & Distribution |
+| :--- | :---: | :---: | :--- | :--- |
+| **ASVspoof 2019 LA Train** | 25,380 | 20 (8 M, 12 F) | A01–A06 (Neural & vocoder TTS / VC) | Academic / Research Use Only (Interspeech Consortium) |
+| **ASVspoof 2019 LA Dev** | 24,844 | 20 (8 M, 12 F) | A01–A06 (Known in-set generators) | Academic / Research Use Only (Interspeech Consortium) |
+| **VoiceShield Adaptation** | **None** | N/A | **Not yet adapted** | Frozen upstream weights; no fine-tuning applied. |
+
+- **Zero Speaker Leakage**: Training, development, and evaluation partitions in ASVspoof 2019 LA are strictly speaker-disjoint.
+- **Generator Holdout**: Evaluation split contains unseen synthetic speech generators (A07–A19) not present in the training set.
+
+---
+
+## 4. Intended Use & Prohibited / Misleading Uses
+
+### 4.1 Permitted & Intended Uses
+
+- **Advisory Risk Indicator**: Real-time signal intelligence providing risk advisory flags during incoming VoIP or cellular calls.
+- **Offline Batch Auditing**: Scanning archived customer service or verification recordings for potential neural audio synthesis artifacts.
+- **Defense-in-Depth Telephony Screening**: A preliminary layer in a multi-factor verification pipeline that prompts human agents to execute independent out-of-band verification.
+
+### 4.2 Prohibited & Misleading Uses
+
+> [!CAUTION]
+> **Strict Operational Prohibition**  
+> VoiceShield is an **acoustic anomaly detector**, not a biometric identity verifier. Any deployment that violates the following prohibitions is unsupported and considered a dangerous misuse of the technology.
+
+1. **NO Identity Proof**: VoiceShield outputs do **NOT** prove or disprove caller identity. A real human speaker using a genuine phone can still be an unauthorized imposter, fraudster, or coerced victim.
+2. **NO Autonomous Call Blocking**: Systems must **never** automatically terminate phone calls, freeze bank accounts, or deny emergency services based solely on VoiceShield scores.
+3. **NO Claim of 100% Detection**: Never pitch or document VoiceShield as "flawless", "unhackable", or "100% deepfake prevention".
+4. **NO Legal Proof of Fraud**: VoiceShield scores are statistical likelihoods and do not constitute admissible forensic proof of criminal fraud without specialized expert witness corroboration.
+5. **NO Biometric Voiceprinting**: The system must not be used to build biometric speaker recognition profiles or track individual voices across calls.
+
+---
+
+## 5. Threat Model & Adversarial Environment
+
+```mermaid
+graph TD
+    subgraph InScope[Evaluated Attack Vectors]
+        A1[Known Text-to-Speech: A01-A06] --> D[AASIST-L Detector]
+        A2[Known Voice Conversion: A01-A06] --> D
+    end
+
+    subgraph OutOfScope[Known Evasion / Blind Spots]
+        B1[Zero-Shot Diffusion Voice Cloning] -.->|Evades Spectral GAT| Blind[Potential False Negative]
+        B2[Acoustic Room Replay] -.->|Alters Phase Response| Blind
+        B3[High-Compression Telephony: AMR/G.711] -.->|Strips High Frequencies| Blind
+        B4[Human Vocal Mimicry] -.->|No Neural Artifacts| Blind
+        B5[Adversarial FGSM Perturbations] -.->|Gradient Exploitation| Blind
+    end
+```
+
+VoiceShield operates in an adversarial environment where generative models continuously evolve. The threat model recognizes that:
+1. Attackers have access to state-of-the-art open-source zero-shot voice cloning tools (e.g. F5-TTS, CosyVoice, XTTSv2, StyleTTS2).
+2. Attackers can route synthesized audio through physical speakers, microphones, and low-bitrate VoIP codecs to mask synthesis artifacts.
+3. Attackers can inject gradient-based adversarial perturbations directly into raw PCM buffers.
+
+---
+
+## 6. Known Limitations & Technical Failure Modes
+
+| Failure Mode | Impact on Model | Engineering Mitigation |
+| :--- | :--- | :--- |
+| **Unseen Generative Models** | Generative models with modern neural vocoders (HiFi-GAN, BigVGAN) or diffusion backbones exhibit higher false negative rates than older training sets (A01–A06). | Temporal hysteresis policy requires sustained elevation across windows before raising alarms. |
+| **Telephony Codec Transcoding** | Low-bitrate codecs (AMR 4.75 kbps, G.711 A-law, Opus 8 kbps) discard spectral content above $3.4\text{ kHz}$ or introduce quantization noise, altering graph node features. | Audio contract validates signal quality and flags bandlimited conditions. |
+| **Acoustic Replay** | Replaying authentic audio through low-quality loudspeakers introduces physical room reverberation rather than neural synthesis signatures. | AASIST-L is trained primarily on logical access (LA) artifacts, not physical access (PA) replay. Replay detection is unverified. |
+| **Background Noise & Crosstalk** | Multi-speaker crosstalk or street noise corrupts the SincNet filterbank representation, leading to false positives. | Energy-based VAD gates out non-speech segments ($\ge 0.8\text{ s}$ speech required per 4.0s window). |
+| **Human Impersonation & Mimics** | Human voice actors mimicking another person's cadence produce bona fide acoustic waveforms. | AASIST-L detects neural synthesis artifacts, not behavioral imitation; mimics will correctly score as bona fide. |
+| **Short Utterances ($< 1.0\text{ s}$)** | Utterances with insufficient speech duration do not contain enough phonemic transitions for reliable graph attention. | Temporal policy issues an immediate `INSUFFICIENT_SPEECH_DURATION` abstention rather than guessing. |
+
+---
+
+## 7. Calibration & Threshold Provenance
+
+- **Scoring Formulation**:
+  $$P(\text{synthetic}) = \sigma(\text{logit}_0 - \text{logit}_1) = \frac{1}{1 + e^{-(\text{logit}_0 - \text{logit}_1)}}$$
+- **Default Operating Threshold**: **`0.65`** (calibrated synthetic likelihood ceiling).
+  - Selected defensively to prioritize low False Positive Rates (FPR) in real-time conversational streaming, ensuring benign human callers are not falsely suspected.
+- **Empirical Temperature Scaling Status**: **Not yet evaluated on local development partition**. The parameter $T=1.0$ is currently utilized until a local ASVspoof development partition is processed and verified.
+
+---
+
+## 8. Latency & Hardware Profile (Apple MacBook Pro M3)
+
+Empirically measured using the VoiceShield Benchmark Suite on the host hardware:
+
+- **Host Device**: Apple MacBook Pro M3 (`Mac15,3`, 8 CPU cores, macOS 27.0.1, PyTorch 2.14.1).
+- **Execution Target**: Under $200\text{ ms}$ inference per 4.0-second window ($\text{RTF} < 0.050$).
+- **Benchmark Report Artefact**: [`reports/benchmarks/m3_benchmark_report.md`](file:///Users/Abhi/Downloads/projects/deepfake%20voice/reports/benchmarks/m3_benchmark_report.md) (Config SHA-256: `67427d513bead1064a39eddd4ab2a729e4eb41b13c763a84c9fec55ff59d2da9`).
+
+| Stage | Device | Steady p50 (Median) | Steady p95 | Real-Time Factor (RTF) | Throughput | Target (<200ms) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Stage 1: Decoding/Resampling** | CPU | 5.7 ms | 8.6 ms | 0.0014 | 140.6 win/s | N/A |
+| **Stage 2: VAD & Padding** | CPU | 0.05 ms | 0.05 ms | 0.0000 | 20,547 win/s | N/A |
+| **Stage 3: Model Inference** | CPU | 130.1 ms | 132.0 ms | 0.0325 | 7.6 win/s | ✅ MET |
+| **Stage 3: Model Inference** | **MPS (Metal)** | **30.4 ms** | **31.3 ms** | **0.0076** | **32.8 win/s** | **✅ MET** |
+| **Stage 4: Temporal Policy** | CPU | 0.00 ms | 0.01 ms | 0.0000 | 257,295 win/s | N/A |
+| **Stage 5: End-to-End Window** | **MPS (Metal)** | **34.7 ms** | **39.4 ms** | **0.0087** | **28.1 win/s** | **✅ MET** |
+
+> [!WARNING]
+> **Measurement Notice**: In accordance with project integrity standards, the above latency benchmarks were measured using architectural mock weights because the official weights file was not present locally. Latencies reflect exact mathematical FLOPs and tensor graph execution of AASIST-L, but real detection accuracy claims remain unverified until official weights are loaded.
+
+---
+
+## 9. Privacy, Retention & Governance
+
+1. **Volatile-Only Memory Processing**: Audio ingested via streaming WebSocket or file upload is processed strictly in volatile RAM (`io.BytesIO`, `AudioRingBuffer`). **No audio is written to disk.**
+2. **Zero Audio Logging**: System logging records only session identifiers, window counts, quality flags, and latency statistics. Audio waveforms, phonemes, and transcripts are never logged.
+3. **No Biometric Identification**: The model has no capability to recognize individual speakers, matching voices against a gallery, or storing speaker fingerprints.
+4. **Client-Side Microphone Control**: The React frontend captures audio via `AudioWorklet` with explicit user consent gesture, and immediately stops all browser media tracks (`track.stop()`) on disconnection.
+
+---
+
+## 10. Versioning & Rollback
+
+- **Model Checkpoint Pinning**: Fixed path `models/weights/AASIST-L.pth`.
+- **Integrity Gate**: In production deployments, `VOICESHIELD_EXPECTED_SHA256` must be set. Checkpoint loading fails immediately if the hash diverges.
+- **Rollback Procedure**: In the event of model regression or unhandled PyTorch MPS operator incompatibility, execution automatically falls back to CPU (`metadata["fallback_used"] = True`).

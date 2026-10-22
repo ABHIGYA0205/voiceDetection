@@ -1,0 +1,140 @@
+[project]
+name = "voiceshield"
+version = "0.1.0"
+description = "Real-time synthetic speech detection and advisory pipeline"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "numpy>=1.26.0,<2.3.0",
+    "scipy>=1.13.0",
+    "torch>=2.2.0",
+    "torchaudio>=2.2.0",
+    "soundfile>=0.12.1",
+    "pydantic>=2.6.0",
+    "pyyaml>=6.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.3.0",
+    "mypy>=1.9.0",
+    "pre-commit>=3.6.0",
+    "httpx>=0.27.0",
+    "types-PyYAML>=6.0.12",
+]
+training = [
+    "scikit-learn>=1.4.0",
+    "matplotlib>=3.8.0",
+]
+api = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.28.0",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.3.0",
+    "mypy>=1.9.0",
+    "pre-commit>=3.6.0",
+    "httpx>=0.27.0",
+    "types-PyYAML>=6.0.12",
+]
+training = [
+    "scikit-learn>=1.4.0",
+    "matplotlib>=3.8.0",
+]
+api = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.28.0",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27.0",
+]
+
+[project.scripts]
+voiceshield-infer = "voiceshield.pipeline.cli:main"
+voiceshield-data = "voiceshield.data.cli:main"
+voiceshield-eval = "voiceshield.evaluation.cli:main"
+voiceshield-benchmark = "voiceshield.benchmark.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voiceshield", "services/api"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["src/voiceshield/vendor"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+]
+ignore = ["E501", "N812"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+explicit_package_bases = true
+mypy_path = ["src", "."]
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_reexport = true
+
+[[tool.mypy.overrides]]
+module = [
+    "scipy.*",
+    "yaml.*",
+    "soundfile.*",
+    "sklearn.*",
+    "matplotlib.*",
+    "torchaudio.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "voiceshield.vendor.*",
+]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = [
+    "voiceshield.models.aasist_adapter",
+    "voiceshield.pipeline.cli",
+    "services.api.main",
+    "tests.test_aasist_adapter",
+    "tests.test_file_inference",
+]
+disallow_untyped_calls = false
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src", "services/api", "."]
+addopts = "-ra -q"
+asyncio_mode = "auto"

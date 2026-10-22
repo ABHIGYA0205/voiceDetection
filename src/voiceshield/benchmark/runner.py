@@ -1,0 +1,419 @@
+"""Main benchmark runner orchestrating stage evaluations, CPU vs MPS comparisons, and report generation."""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import os
+import platform
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from voiceshield.benchmark.schema import (
+    BenchmarkProvenance,
+    BenchmarkSuiteReport,
+    HardwareEnvironment,
+    SoakTestReport,
+    StageLatency,
+)
+from voiceshield.benchmark.soak import run_streaming_soak_test
+from voiceshield.benchmark.stages import (
+    benchmark_audio_decoding_and_resampling,
+    benchmark_calibration_and_temporal_policy,
+    benchmark_end_to_end_window_processing,
+    benchmark_feature_extraction,
+    benchmark_model_inference,
+)
+from voiceshield.config.schema import VoiceShieldConfig
+from voiceshield.core.device import resolve_device_status
+from voiceshield.models.aasist_adapter import (
+    AASIST_L_DEFAULT_CONFIG,
+    AASISTLDetector,
+)
+from voiceshield.reproducibility.metadata import _get_git_commit, _is_git_dirty
+from voiceshield.vendor.aasist import AASISTModel
+
+logger = logging.getLogger(__name__)
+
+
+def _query_sysctl(key: str) -> str:
+    """Safely query macOS sysctl string."""
+    try:
+        res = subprocess.run(
+            ["sysctl", "-n", key], capture_output=True, text=True, check=False, timeout=5.0
+        )
+        if res.returncode == 0:
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return "Unknown"
+
+
+def detect_hardware_environment() -> HardwareEnvironment:
+    """Inspect and collect macOS hardware and runtime platform information."""
+    mps_built = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_built())
+    mps_available = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+    dev_status = resolve_device_status()
+
+    hw_model = _query_sysctl("hw.model")
+    if hw_model == "Unknown":
+        hw_model = platform.machine()
+
+    cpu_brand = _query_sysctl("machdep.cpu.brand_string")
+    if cpu_brand == "Unknown":
+        cpu_brand = platform.processor() or "Apple Silicon"
+
+    return HardwareEnvironment(
+        macos_version=platform.mac_ver()[0] or platform.platform(),
+        hardware_model=hw_model,
+        cpu_brand=cpu_brand,
+        cpu_cores=os.cpu_count() or 1,
+        python_version=sys.version.split()[0],
+        torch_version=str(torch.__version__),
+        mps_built=mps_built,
+        mps_available=mps_available,
+        selected_device=dev_status.device_name,
+    )
+
+
+class BenchmarkRunner:
+    """Orchestrates comprehensive latency, throughput, and soak benchmarks."""
+
+    def __init__(
+        self,
+        config: VoiceShieldConfig | None = None,
+        checkpoint_path: str | Path | None = None,
+        iterations: int = 50,
+        warmup: int = 5,
+        devices: list[str] | None = None,
+        soak_duration_seconds: float = 0.0,
+    ) -> None:
+        self.config = config or VoiceShieldConfig()
+        self.checkpoint_path = (
+            Path(checkpoint_path) if checkpoint_path else Path("models/weights/AASIST-L.pth")
+        )
+        self.iterations = iterations
+        self.warmup = warmup
+        self.devices = devices or ["cpu", "mps"]
+        self.soak_duration = soak_duration_seconds
+
+    def _resolve_detector(self) -> tuple[AASISTLDetector, bool, str | None]:
+        """Instantiate detector with real checkpoint if present, otherwise mock model."""
+        if self.checkpoint_path.is_file():
+            hasher = hashlib.sha256()
+            with open(self.checkpoint_path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    hasher.update(chunk)
+            sha = hasher.hexdigest()
+            logger.info(
+                "Loaded official AASIST-L checkpoint: %s (SHA-256: %s)", self.checkpoint_path, sha
+            )
+            detector = AASISTLDetector(checkpoint_path=self.checkpoint_path)
+            return detector, False, sha
+
+        logger.warning(
+            "AASIST-L checkpoint not found at: %s. Running in MOCK weights mode for interface benchmarking.",
+            self.checkpoint_path,
+        )
+        mock_raw = AASISTModel(AASIST_L_DEFAULT_CONFIG)  # type: ignore[no-untyped-call]
+        detector = AASISTLDetector(_instantiated_model=mock_raw)
+        return detector, True, None
+
+    def run_suite(self) -> BenchmarkSuiteReport:
+        """Execute full benchmark suite across all stages, devices, and soak test."""
+        env = detect_hardware_environment()
+        detector, is_mock, ckpt_sha = self._resolve_detector()
+
+        mock_warning: str | None = None
+        if is_mock:
+            mock_warning = (
+                "[MOCK DETECTOR BENCHMARK - NOT FOR PITCH OR PRODUCTION CLAIMS] "
+                "Official AASIST-L.pth checkpoint was not present. Latencies reflect architectural "
+                "forward pass computation of the AASIST network, but must NOT be cited as verified detection claims."
+            )
+
+        provenance = BenchmarkProvenance(
+            timestamp_utc=datetime.now(UTC).isoformat(),
+            git_commit=_get_git_commit(),
+            git_dirty=_is_git_dirty(),
+            config_hash=self.config.compute_hash(),
+            checkpoint_path=str(self.checkpoint_path) if not is_mock else None,
+            checkpoint_sha256=ckpt_sha,
+            model_id="AASIST-L",
+            is_mock_weights=is_mock,
+        )
+
+        # 1. Run CPU Stages
+        stages_cpu: dict[str, StageLatency] = {}
+        cpu_dev = torch.device("cpu")
+
+        logger.info(
+            "Executing CPU stage benchmarks (warmup=%d, steady=%d)...", self.warmup, self.iterations
+        )
+        stages_cpu["audio_decoding"] = benchmark_audio_decoding_and_resampling(
+            iterations=self.iterations, warmup=self.warmup
+        )
+        stages_cpu["feature_extraction"] = benchmark_feature_extraction(
+            iterations=self.iterations, warmup=self.warmup
+        )
+        stages_cpu["model_inference"] = benchmark_model_inference(
+            detector=detector,
+            device=cpu_dev,
+            batch_size=1,
+            iterations=self.iterations,
+            warmup=self.warmup,
+        )
+        stages_cpu["calibration_and_policy"] = benchmark_calibration_and_temporal_policy(
+            iterations=self.iterations, warmup=self.warmup
+        )
+        stages_cpu["end_to_end"] = benchmark_end_to_end_window_processing(
+            detector=detector, device=cpu_dev, iterations=self.iterations, warmup=self.warmup
+        )
+
+        # 2. Run MPS Stages (if available and requested)
+        stages_mps: dict[str, StageLatency] | None = None
+        speedups: dict[str, float] = {}
+
+        if "mps" in self.devices and env.mps_available:
+            mps_dev = torch.device("mps")
+            logger.info("Executing MPS stage benchmarks on Apple Silicon Metal...")
+            stages_mps = {}
+
+            # Decoding and feature extraction remain CPU/numpy bound
+            stages_mps["audio_decoding"] = stages_cpu["audio_decoding"]
+            stages_mps["feature_extraction"] = stages_cpu["feature_extraction"]
+            stages_mps["model_inference"] = benchmark_model_inference(
+                detector=detector,
+                device=mps_dev,
+                batch_size=1,
+                iterations=self.iterations,
+                warmup=self.warmup,
+            )
+            stages_mps["calibration_and_policy"] = stages_cpu["calibration_and_policy"]
+            stages_mps["end_to_end"] = benchmark_end_to_end_window_processing(
+                detector=detector, device=mps_dev, iterations=self.iterations, warmup=self.warmup
+            )
+
+            # Compute speedup factors (CPU p50 / MPS p50)
+            if stages_mps["model_inference"].p50_ms > 0:
+                speedups["model_inference"] = round(
+                    stages_cpu["model_inference"].p50_ms / stages_mps["model_inference"].p50_ms, 2
+                )
+            if stages_mps["end_to_end"].p50_ms > 0:
+                speedups["end_to_end"] = round(
+                    stages_cpu["end_to_end"].p50_ms / stages_mps["end_to_end"].p50_ms, 2
+                )
+
+        # 3. Profiling summary: percentage of end-to-end time per stage
+        primary_stages = stages_mps if stages_mps is not None else stages_cpu
+        primary_e2e_ms = primary_stages["end_to_end"].p50_ms
+        profiling: dict[str, Any] = {
+            "primary_device": "mps" if stages_mps is not None else "cpu",
+            "end_to_end_p50_ms": primary_e2e_ms,
+            "stage_percentages": {
+                "audio_decoding_pct": round(
+                    (primary_stages["audio_decoding"].p50_ms / primary_e2e_ms) * 100.0, 1
+                ),
+                "feature_extraction_pct": round(
+                    (primary_stages["feature_extraction"].p50_ms / primary_e2e_ms) * 100.0, 1
+                ),
+                "model_inference_pct": round(
+                    (primary_stages["model_inference"].p50_ms / primary_e2e_ms) * 100.0, 1
+                ),
+                "calibration_and_policy_pct": round(
+                    (primary_stages["calibration_and_policy"].p50_ms / primary_e2e_ms) * 100.0, 1
+                ),
+            },
+            "inference_meets_target": primary_stages["model_inference"].meets_project_target,
+            "end_to_end_meets_target": primary_stages["end_to_end"].meets_project_target,
+        }
+
+        # 4. Optional Streaming Soak Test
+        soak_report: SoakTestReport | None = None
+        if self.soak_duration > 0:
+            target_dev = torch.device("mps") if env.mps_available else cpu_dev
+            logger.info("Executing streaming soak test for %.1f seconds...", self.soak_duration)
+            sample_interval = max(1.0, min(15.0, self.soak_duration / 20.0))
+            soak_report = run_streaming_soak_test(
+                detector=detector,
+                device=target_dev,
+                duration_seconds=self.soak_duration,
+                sample_interval_seconds=sample_interval,
+            )
+
+        return BenchmarkSuiteReport(
+            provenance=provenance,
+            environment=env,
+            warning_mock=mock_warning,
+            stages_cpu=stages_cpu,
+            stages_mps=stages_mps,
+            speedup_mps_vs_cpu=speedups,
+            soak_test=soak_report,
+            profiling_summary=profiling,
+        )
+
+    def generate_markdown_report(self, report: BenchmarkSuiteReport) -> str:
+        """Render markdown artifact report matching VoiceShield documentation standards."""
+        lines: list[str] = []
+
+        lines.append("# VoiceShield Benchmark Report: Apple MacBook Pro M3")
+        lines.append("")
+        lines.append(f"**Execution Timestamp (UTC)**: `{report.provenance.timestamp_utc}`  ")
+        lines.append(
+            f"**Hardware**: `{report.environment.cpu_brand}` (`{report.environment.hardware_model}`)  "
+        )
+        lines.append(
+            f"**macOS Version**: `{report.environment.macos_version}` | **CPU Cores**: `{report.environment.cpu_cores}`  "
+        )
+        lines.append(
+            f"**Python**: `{report.environment.python_version}` | **PyTorch**: `{report.environment.torch_version}`  "
+        )
+        lines.append(
+            f"**Apple MPS Metal Acceleration**: `Built={report.environment.mps_built}, Available={report.environment.mps_available}`  "
+        )
+        lines.append("")
+
+        lines.append("> [!IMPORTANT]")
+        lines.append(f"> **Engineering Target**: {report.target_description}")
+        lines.append("")
+
+        if report.warning_mock:
+            lines.append("> [!WARNING]")
+            lines.append(f"> **MOCK WEIGHTS NOTICE**: {report.warning_mock}")
+            lines.append("")
+
+        lines.append("## 1. Provenance & Hash Verification")
+        lines.append("")
+        lines.append("| Provenance Field | Value |")
+        lines.append("| :--- | :--- |")
+        lines.append(f"| **Model Architecture** | `{report.provenance.model_id}` |")
+        lines.append(f"| **Config Hash (SHA-256)** | `{report.provenance.config_hash}` |")
+        lines.append(
+            f"| **Checkpoint Path** | `{report.provenance.checkpoint_path or 'MOCK_WEIGHTS (NONE)'}` |"
+        )
+        lines.append(
+            f"| **Checkpoint SHA-256** | `{report.provenance.checkpoint_sha256 or 'MOCK_WEIGHTS (NONE)'}` |"
+        )
+        lines.append(
+            f"| **Git Commit** | `{report.provenance.git_commit or 'Uncommitted repo'}` (Dirty: `{report.provenance.git_dirty}`) |"
+        )
+        lines.append(
+            f"| **Weights Status** | `{'MOCK WEIGHTS' if report.provenance.is_mock_weights else 'REAL OFFICIAL AASIST-L'}` |"
+        )
+        lines.append("")
+
+        lines.append("## 2. Pipeline Stage Latency Breakdown (Batch Size 1)")
+        lines.append("")
+        lines.append(
+            "All metrics measure steady-state execution over 4.0-second audio windows, with initial warm-up recorded separately."
+        )
+        lines.append("")
+        lines.append(
+            "| Pipeline Stage | Device | Warm-up Mean | Steady p50 (Median) | Steady p95 | Steady p99 | Throughput | RTF | Target (<200ms) |"
+        )
+        lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+
+        for _key, st in report.stages_cpu.items():
+            tgt = "N/A"
+            if st.meets_project_target is not None:
+                tgt = "✅ MET" if st.meets_project_target else "❌ FAILED"
+            lines.append(
+                f"| `{st.stage_name}` | `CPU` | {st.warmup_mean_ms:.1f} ms | **{st.p50_ms:.1f} ms** | {st.p95_ms:.1f} ms | {st.p99_ms:.1f} ms | {st.throughput_hz:.1f} win/s | {st.real_time_factor:.4f} | {tgt} |"
+            )
+
+        if report.stages_mps:
+            for key in ["model_inference", "end_to_end"]:
+                if key in report.stages_mps:
+                    st = report.stages_mps[key]
+                    tgt = "✅ MET" if st.meets_project_target else "❌ FAILED"
+                    lines.append(
+                        f"| `{st.stage_name}` | `MPS` | {st.warmup_mean_ms:.1f} ms | **{st.p50_ms:.1f} ms** | {st.p95_ms:.1f} ms | {st.p99_ms:.1f} ms | {st.throughput_hz:.1f} win/s | {st.real_time_factor:.4f} | {tgt} |"
+                    )
+
+        lines.append("")
+
+        if report.speedup_mps_vs_cpu:
+            lines.append("## 3. Hardware Acceleration Comparison: Apple Silicon MPS vs. CPU")
+            lines.append("")
+            lines.append("| Workload | CPU p50 | MPS p50 | Metal Speedup |")
+            lines.append("| :--- | :---: | :---: | :---: |")
+            for k, sp in report.speedup_mps_vs_cpu.items():
+                c_p50 = report.stages_cpu[k].p50_ms
+                m_p50 = report.stages_mps[k].p50_ms if report.stages_mps else 0.0
+                lines.append(f"| `{k}` | {c_p50:.1f} ms | {m_p50:.1f} ms | **{sp:.2f}x faster** |")
+            lines.append("")
+
+        lines.append("## 4. Profiling & Bottleneck Analysis")
+        lines.append("")
+        prof = report.profiling_summary
+        lines.append(f"- **Primary Execution Device**: `{prof.get('primary_device')}`")
+        lines.append(f"- **End-to-End Window Latency (p50)**: `{prof.get('end_to_end_p50_ms')} ms`")
+        lines.append(
+            f"- **Real-Time Factor (RTF)**: `{report.stages_cpu['end_to_end'].real_time_factor}` (CPU) / `{(report.stages_mps['end_to_end'].real_time_factor if report.stages_mps else 'N/A')}` (MPS)"
+        )
+        lines.append("")
+        lines.append("### Stage Proportion Breakdown:")
+        pcts = prof.get("stage_percentages", {})
+        for s_name, s_pct in pcts.items():
+            lines.append(f"- **`{s_name}`**: {s_pct}%")
+        lines.append("")
+
+        inf_met = prof.get("inference_meets_target")
+        e2e_met = prof.get("end_to_end_meets_target")
+        lines.append("### Project Target Assessment (< 200 ms per 4-second window):")
+        lines.append(
+            f"- **Model Inference**: {'✅ Target Achieved' if inf_met else '❌ Target Missed'}"
+        )
+        lines.append(
+            f"- **End-to-End Processing**: {'✅ Target Achieved' if e2e_met else '❌ Target Missed'}"
+        )
+        lines.append("")
+
+        if report.soak_test:
+            soak = report.soak_test
+            lines.append("## 5. 10-Minute Streaming Soak Test Diagnostics")
+            lines.append("")
+            lines.append(
+                f"- **Duration**: `{soak.duration_seconds:.1f}s` ({soak.duration_seconds / 60:.1f} min)"
+            )
+            lines.append(f"- **Total Frames Ingested**: `{soak.total_frames_ingested}`")
+            lines.append(f"- **Total Windows Evaluated**: `{soak.total_windows_evaluated}`")
+            lines.append(f"- **Initial RSS Memory**: `{soak.initial_rss_mb:.2f} MB`")
+            lines.append(f"- **Peak RSS Memory**: `{soak.peak_rss_mb:.2f} MB`")
+            lines.append(f"- **Final RSS Memory**: `{soak.final_rss_mb:.2f} MB`")
+            lines.append(f"- **Net Memory Delta**: `{soak.net_growth_mb:+.2f} MB`")
+            lines.append(
+                f"- **Extrapolated Growth Rate**: `{soak.growth_rate_mb_per_hour:.2f} MB/hr`"
+            )
+            lines.append(
+                f"- **Maximum Backlog Observed**: `{soak.max_backlog_observed}` (Queue limit: 1)"
+            )
+            lines.append(f"- **Verdict**: `{soak.verdict}`")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def save_reports(
+        self, report: BenchmarkSuiteReport, output_dir: str | Path = "reports/benchmarks"
+    ) -> tuple[Path, Path]:
+        """Save markdown and JSON benchmark reports to output directory."""
+        out_path = Path(output_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        md_path = out_path / "m3_benchmark_report.md"
+        json_path = out_path / "m3_benchmark_report.json"
+
+        md_content = self.generate_markdown_report(report)
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(md_content)
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            f.write(report.model_dump_json(indent=2))
+
+        logger.info("Saved benchmark reports to %s and %s", md_path, json_path)
+        return md_path, json_path
