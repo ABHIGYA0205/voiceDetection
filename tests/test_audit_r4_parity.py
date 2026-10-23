@@ -21,6 +21,7 @@ import pytest
 import soundfile as sf
 import torch
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from services.api.main import app
 from voiceshield.config.schema import VoiceShieldConfig
@@ -664,6 +665,7 @@ class StrictBaseDetector(BaseDetector):
         synthetic_score: float = 0.85,
         delay: float = 0.0,
         should_fail: bool = False,
+        fail_after_calls: int | None = None,
     ) -> None:
         super().__init__()
         self.call_args: list[tuple[Any, ...]] = []
@@ -671,6 +673,7 @@ class StrictBaseDetector(BaseDetector):
         self.synthetic_score = synthetic_score
         self.delay = delay
         self.should_fail = should_fail
+        self.fail_after_calls = fail_after_calls
         self.current_concurrency = 0
         self.max_concurrency = 0
 
@@ -688,7 +691,9 @@ class StrictBaseDetector(BaseDetector):
 
             time.sleep(self.delay)
         self.current_concurrency -= 1
-        if self.should_fail:
+        if self.should_fail or (
+            self.fail_after_calls is not None and len(self.call_args) > self.fail_after_calls
+        ):
             raise RuntimeError("Simulated detector inference failure")
         return DetectorOutput(
             model_id="strict-mock-v1",
@@ -971,6 +976,59 @@ def test_websocket_stop_detector_failure() -> None:
             app.state.detector = orig_detector
 
 
+def test_websocket_stop_partial_success_then_detector_failure() -> None:
+    """Issue 2: Prior eligible success does not mask subsequent detector failure on graceful stop."""
+    detector = StrictBaseDetector(fail_after_calls=1)
+    with TestClient(app) as client:
+        orig_detector = getattr(app.state, "detector", None)
+        app.state.detector = detector
+        try:
+            with client.websocket_connect("/api/v1/stream") as ws:
+                ws.send_json(
+                    {"type": "start", "sample_rate": 16000, "channels": 1, "pcm_encoding": "int16"}
+                )
+                ack = ws.receive_json()
+                assert ack["type"] == "session_started"
+
+                # 5.0 seconds of audio @ 16 kHz: generates 2 windows (win 0: 0-4s, win 1: 1-5s)
+                pcm = make_pcm16_sine(5.0, 16000, 1)
+                chunk_size = 32000
+                for i in range(0, len(pcm), chunk_size):
+                    ws.send_bytes(pcm[i : i + chunk_size])
+
+                ws.send_json({"type": "stop"})
+                results = []
+                stop_ack = None
+                while True:
+                    msg = ws.receive_json()
+                    if msg["type"] == "session_stopped":
+                        stop_ack = msg
+                        break
+                    results.append(msg)
+
+                # Check events: exactly 1 window_result (from first successful window)
+                win_results = [m for m in results if m.get("type") == "window_result"]
+                assert len(win_results) == 1
+                assert win_results[0]["window_index"] == 0
+                assert win_results[0]["is_eligible"] is True
+
+                # Exactly 1 error event (from second failing window)
+                err_results = [m for m in results if m.get("type") == "error"]
+                assert len(err_results) == 1
+                assert err_results[0]["error_code"] == "MODEL_INFERENCE_ERROR"
+
+                # Stop ack reflects partial success + error status (error takes precedence)
+                assert stop_ack is not None
+                assert stop_ack["total_windows_generated"] == 2
+                assert stop_ack["total_windows_evaluated"] == 1
+                assert stop_ack["status"] == "error"
+                assert stop_ack["final_reason"] == "model_inference_error"
+
+                assert len(detector.call_args) == 2
+        finally:
+            app.state.detector = orig_detector
+
+
 # ==============================================================================
 # Blocker 2 Regression Tests: Effective Configuration Invariants
 # ==============================================================================
@@ -1067,6 +1125,54 @@ def test_evaluate_audio_custom_hop_scheduler_grid(tmp_path: Path) -> None:
     assert res.metadata["window_seconds"] == 4.0
 
 
+def test_evaluate_audio_rejects_negative_hop(tmp_path: Path) -> None:
+    """Issue 1: evaluate_audio rejects negative hop_seconds with zero detector calls."""
+    pcm = make_sine_mixture(4.0, 16000, 1)
+    wav_file = tmp_path / "valid.wav"
+    sf.write(str(wav_file), pcm, 16000)
+
+    detector = StrictBaseDetector()
+    with pytest.raises(ValidationError):
+        evaluate_audio(wav_file, detector=detector, hop_seconds=-1.0)
+    assert len(detector.call_args) == 0
+
+
+def test_evaluate_audio_rejects_negative_min_speech(tmp_path: Path) -> None:
+    """Issue 1: evaluate_audio rejects negative min_speech_seconds with zero detector calls."""
+    pcm = make_sine_mixture(4.0, 16000, 1)
+    wav_file = tmp_path / "valid.wav"
+    sf.write(str(wav_file), pcm, 16000)
+
+    detector = StrictBaseDetector()
+    with pytest.raises(ValidationError):
+        evaluate_audio(wav_file, detector=detector, min_speech_seconds=-0.5)
+    assert len(detector.call_args) == 0
+
+
+def test_evaluate_audio_rejects_threshold_greater_than_one(tmp_path: Path) -> None:
+    """Issue 1: evaluate_audio rejects threshold > 1.0 with zero detector calls."""
+    pcm = make_sine_mixture(4.0, 16000, 1)
+    wav_file = tmp_path / "valid.wav"
+    sf.write(str(wav_file), pcm, 16000)
+
+    detector = StrictBaseDetector()
+    with pytest.raises(ValidationError):
+        evaluate_audio(wav_file, detector=detector, threshold=2.0)
+    assert len(detector.call_args) == 0
+
+
+def test_evaluate_audio_rejects_threshold_nan(tmp_path: Path) -> None:
+    """Issue 1: evaluate_audio rejects NaN threshold with zero detector calls."""
+    pcm = make_sine_mixture(4.0, 16000, 1)
+    wav_file = tmp_path / "valid.wav"
+    sf.write(str(wav_file), pcm, 16000)
+
+    detector = StrictBaseDetector()
+    with pytest.raises(ValidationError):
+        evaluate_audio(wav_file, detector=detector, threshold=float("nan"))
+    assert len(detector.call_args) == 0
+
+
 # ==============================================================================
 # Blocker 3 Regression Tests: Resampler Kernel Explicit Constants
 # ==============================================================================
@@ -1078,14 +1184,34 @@ def test_canonical_resampler_kernel_explicit_constants(monkeypatch: pytest.Monke
     assert CANONICAL_ROLLOFF == 0.99
     assert CANONICAL_RESAMPLING_METHOD == "sinc_interp_hann"
 
+    import torchaudio.functional.functional as F_func
+
+    captured_calls: list[dict[str, Any]] = []
+    real_fn = F_func._get_sinc_resample_kernel
+
+    def spy_get_sinc_kernel(*args: Any, **kwargs: Any) -> Any:
+        captured_calls.append({"args": args, "kwargs": kwargs})
+        return real_fn(*args, **kwargs)
+
+    monkeypatch.setattr(F_func, "_get_sinc_resample_kernel", spy_get_sinc_kernel)
+
     # Successful call
     kernel, width = _get_sinc_kernel(44100, 16000, 100)
     assert isinstance(kernel, torch.Tensor)
     assert width > 0
 
-    # Test failure on missing function
-    import torchaudio.functional.functional as F_func
+    assert len(captured_calls) == 1
+    call_kwargs = captured_calls[0]["kwargs"]
+    assert call_kwargs["orig_freq"] == 44100
+    assert call_kwargs["new_freq"] == 16000
+    assert call_kwargs["gcd"] == 100
+    assert call_kwargs["lowpass_filter_width"] == 6
+    assert call_kwargs["rolloff"] == 0.99
+    assert call_kwargs["resampling_method"] == "sinc_interp_hann"
+    assert call_kwargs["beta"] is None
+    assert call_kwargs["dtype"] is None
 
+    # Test failure on missing function
     monkeypatch.delattr(F_func, "_get_sinc_resample_kernel", raising=False)
 
     with pytest.raises(

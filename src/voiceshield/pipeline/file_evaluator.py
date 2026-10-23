@@ -282,7 +282,44 @@ def evaluate_audio(
     """
     path_str = file_name or (str(source) if isinstance(source, (str, Path)) else "in_memory_audio")
 
-    # 1. Load audio via canonical preprocessor with strict amplitude validation (no silent normalization)
+    # 1. Build and validate effective WindowingConfig from plain Python data
+    base_window_data = (
+        config.windowing.model_dump(mode="python")
+        if config is not None
+        else WindowingConfig().model_dump(mode="python")
+    )
+    window_data = {
+        **base_window_data,
+        "window_seconds": float(window_seconds),
+        "hop_seconds": float(hop_seconds),
+    }
+    if min_speech_seconds is not None:
+        window_data["min_speech_seconds"] = float(min_speech_seconds)
+    effective_window_cfg = WindowingConfig.model_validate(window_data)
+
+    # 2. Build and validate effective TemporalPolicyConfig from plain Python data
+    base_policy_data = (
+        config.temporal_policy.model_dump(mode="python")
+        if config is not None
+        else TemporalPolicyConfig().model_dump(mode="python")
+    )
+    thresh_high = float(threshold)
+    thresh_low = float(base_policy_data.get("threshold_low", 0.35))
+    if thresh_low > thresh_high:
+        thresh_low = thresh_high
+    policy_data = {
+        **base_policy_data,
+        "threshold_high": thresh_high,
+        "threshold_low": thresh_low,
+    }
+    effective_policy_cfg = TemporalPolicyConfig.model_validate(policy_data)
+
+    policy = TemporalDecisionPolicy(
+        policy_config=effective_policy_cfg,
+        windowing_config=effective_window_cfg,
+    )
+
+    # 3. Load audio via canonical preprocessor with strict amplitude validation (no silent normalization)
     try:
         preprocessed = load_audio(
             source,
@@ -322,18 +359,6 @@ def evaluate_audio(
             disclaimers=Disclaimers(),
         )
 
-    # 2. Build validated effective WindowingConfig for the request
-    if config is not None:
-        effective_window_cfg = config.windowing.model_copy()
-    else:
-        effective_window_cfg = WindowingConfig()
-
-    effective_window_cfg.window_seconds = float(window_seconds)
-    effective_window_cfg.hop_seconds = float(hop_seconds)
-    if min_speech_seconds is not None:
-        effective_window_cfg.min_speech_seconds = float(min_speech_seconds)
-    effective_window_cfg = WindowingConfig.model_validate(effective_window_cfg)
-
     effective_min_speech = effective_window_cfg.min_speech_seconds
     vad_energy_thresh = effective_window_cfg.energy_threshold
     vad_subframe_sec = getattr(effective_window_cfg, "subframe_duration_seconds", 0.02)
@@ -343,26 +368,6 @@ def evaluate_audio(
     )
     # File-level total active speech calculated over the full canonical waveform for reporting
     total_active_speech = round(vad.compute_speech_duration(waveform, 16000), 2)
-
-    # 3. Build validated effective TemporalPolicyConfig for the request
-    if config is not None:
-        effective_policy_cfg = config.temporal_policy.model_copy()
-    else:
-        effective_policy_cfg = TemporalPolicyConfig()
-
-    thresh_high = float(threshold)
-    thresh_low = effective_policy_cfg.threshold_low
-    if thresh_low > thresh_high:
-        thresh_low = thresh_high
-
-    effective_policy_cfg.threshold_high = thresh_high
-    effective_policy_cfg.threshold_low = thresh_low
-    effective_policy_cfg = TemporalPolicyConfig.model_validate(effective_policy_cfg)
-
-    policy = TemporalDecisionPolicy(
-        policy_config=effective_policy_cfg,
-        windowing_config=effective_window_cfg,
-    )
 
     # 4. Canonical window scheduler
     window_samples = effective_window_cfg.window_samples(16000)

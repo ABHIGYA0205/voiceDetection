@@ -42,6 +42,7 @@ def _get_sinc_kernel(orig_sr: int, target_sr: int, gcd: int) -> tuple[torch.Tens
             rolloff=CANONICAL_ROLLOFF,
             resampling_method=CANONICAL_RESAMPLING_METHOD,
             beta=None,
+            dtype=None,
         )
         return kernel, width
     except Exception as exc:

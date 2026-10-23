@@ -285,7 +285,15 @@ When the client requests termination by sending `{"type": "stop"}`:
 }
 ```
 
-If the stream finalized with fewer than 64,000 canonical contiguous samples (< 4.0s), `ServerStopAck` indicates `status="insufficient_evidence"` and `final_reason="insufficient_contiguous_audio"`.
+#### Graceful-Stop Statuses and Reasons
+- `status="success"`, `final_reason=null`:
+  At least one eligible inference succeeded and no model inference failed.
+- `status="insufficient_evidence"`, `final_reason="insufficient_contiguous_audio"`:
+  No full logical window was generated (stream finalized with fewer than 64,000 canonical contiguous samples, < 4.0s).
+- `status="insufficient_evidence"`, `final_reason="insufficient_speech_duration"`:
+  One or more full logical windows exist, but every window abstained due to active speech duration falling below `min_speech_seconds`.
+- `status="error"`, `final_reason="model_inference_error"`:
+  Any model inference failed during the session or final drain (including sessions with partial successful evaluations).
 
 ---
 

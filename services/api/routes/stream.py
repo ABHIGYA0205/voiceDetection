@@ -570,15 +570,15 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
 
                     elapsed = asyncio.get_event_loop().time() - stream_start_time
 
-                    if session.total_windows_generated == 0:
+                    if had_model_inference_error:
+                        final_status = "error"
+                        final_reason = "model_inference_error"
+                    elif session.total_windows_generated == 0:
                         final_status = "insufficient_evidence"
                         final_reason = ReasonCode.INSUFFICIENT_CONTIGUOUS_AUDIO.value
                     elif total_eligible_evaluated > 0:
                         final_status = "success"
                         final_reason = None
-                    elif had_model_inference_error:
-                        final_status = "error"
-                        final_reason = "model_inference_error"
                     else:
                         final_status = "insufficient_evidence"
                         final_reason = ReasonCode.INSUFFICIENT_SPEECH_DURATION.value

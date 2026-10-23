@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -63,6 +64,13 @@ class WindowingConfig(BaseModel):
         ge=0,
         description="Root-mean-square (RMS) energy threshold for speech presence.",
     )
+
+    @field_validator("window_seconds", "hop_seconds", "min_speech_seconds", "energy_threshold")
+    @classmethod
+    def validate_finite_floats(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError(f"Value must be a finite number, got {v}")
+        return v
 
     @model_validator(mode="after")
     def validate_window_relationships(self) -> WindowingConfig:
@@ -188,6 +196,20 @@ class TemporalPolicyConfig(BaseModel):
         ],
         description="Active rule identifiers for temporal explanations.",
     )
+
+    @field_validator(
+        "alert_threshold",
+        "threshold_high",
+        "threshold_low",
+        "ewma_alpha",
+        "decay_factor",
+        "timing_gap_threshold_seconds",
+    )
+    @classmethod
+    def validate_finite_policy_floats(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError(f"Value must be a finite number, got {v}")
+        return v
 
     @model_validator(mode="after")
     def validate_policy_parameters(self) -> TemporalPolicyConfig:
