@@ -11,15 +11,15 @@ Verifies:
 - Oversized upload rejection (> 25MB).
 - Audio duration limits (> 300s).
 - Corrupt and empty audio rejection with structured errors.
-- Concurrency guard via local semaphore for Apple Silicon M3.
+- Concurrency guard via process-wide single-worker inference executor for Apple Silicon M3.
 - Compliance: Output is never called an identity or fraud score.
 """
 
 from __future__ import annotations
 
-import asyncio
 import io
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +27,6 @@ import numpy as np
 import pytest
 import soundfile as sf
 from fastapi.testclient import TestClient
-from httpx import ASGITransport, AsyncClient
 
 from services.api.main import app
 from services.api.routes.analyze_file import (
@@ -359,24 +358,31 @@ def test_api_upload_duration_limit(tmp_path: Path) -> None:
         assert "300.00s" in detail["message"]
 
 
-@pytest.mark.asyncio
-async def test_api_concurrent_requests_guarded(tmp_path: Path) -> None:
-    """Verify that multiple concurrent requests are serialized safely through the M3 semaphore."""
+def test_api_concurrent_requests_guarded(tmp_path: Path) -> None:
+    """Verify that multiple concurrent requests are serialized safely through the single-worker executor."""
     wav_path = create_synthetic_wav(tmp_path / "concurrent.wav", duration_s=4.0)
     wav_bytes = wav_path.read_bytes()
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        # Send 3 concurrent inference requests
-        async def send_req() -> Any:
-            return await ac.post(
+    with TestClient(app) as client:
+        results: list[dict[str, Any]] = []
+        lock = threading.Lock()
+
+        def send_req() -> None:
+            resp = client.post(
                 "/api/v1/analyze/file",
                 files={"file": ("concurrent.wav", io.BytesIO(wav_bytes), "audio/wav")},
             )
+            assert resp.status_code == 200
+            with lock:
+                results.append(resp.json())
 
-        responses = await asyncio.gather(send_req(), send_req(), send_req())
-        for r in responses:
-            assert r.status_code == 200
-            data = r.json()
+        threads = [threading.Thread(target=send_req) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(results) == 3
+        for data in results:
             assert data["status"] == "success"
             assert data["duration_seconds"] == 4.0

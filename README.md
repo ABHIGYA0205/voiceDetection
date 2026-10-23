@@ -161,7 +161,7 @@ The FastAPI service exposes an ephemeral file upload analysis route guarded by c
 - **File analysis**: `POST /api/v1/analyze/file` accepts `multipart/form-data` audio uploads.
   - **Constraints**: 25 MB max file size, 300.0s max audio duration, WAV/FLAC formats only.
   - **Zero audio retention**: Reads audio directly into ephemeral memory buffers; no audio is written to disk.
-  - **M3 concurrency guard**: Serialized via an `asyncio.Semaphore(1)` to prevent unified memory pressure or GPU contention.
+  - **M3 concurrency guard**: Serialized via a dedicated process-wide single-worker inference executor (`InferenceWorker`) to prevent unified memory pressure or GPU contention. Caller cancellation does not release physical execution capacity while a model call is running in the worker thread; subsequent jobs queue until the active call returns.
   - **Lifespan preloading**: Loads detector model once at service startup rather than per request.
 
 ---

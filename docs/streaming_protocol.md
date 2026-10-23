@@ -9,7 +9,7 @@ The VoiceShield streaming protocol provides real-time, low-latency synthetic spe
 - **Local Audio Only**: Designed for microphone or local audio feeds; does not intercept remote carrier cellular telephony.
 - **No Raw Audio Retention**: Audio is resampled and buffered strictly in volatile memory. No audio frames are written to disk.
 - **Engineering Parity**: VoiceShield establishes strict engineering parity between offline WAV/FLAC evaluation and real-time streaming: both paths use the single canonical stateful sinc resampler (with identical filter kernels, bounded FIR history, exact sample output length, and end-of-stream flush), sample-grid window scheduler, EnergyVAD, and TemporalDecisionPolicy. Engineering parity does **not** demonstrate detector accuracy, calibration, cross-dataset generalization, or production readiness.
-- **Remaining Limitation**: Abrupt disconnect and inference thread cancellation safety remains deferred for the separate H-04 audit repair.
+- **Lifecycle & Cancellation Safety**: Model inference is serialized process-wide through a dedicated single-worker executor (`InferenceWorker`). Caller cancellation (such as abrupt client disconnect) does not terminate or release the running Python detector thread; the worker remains occupied until physical execution completes, subsequent jobs remain queued without concurrency overlap, and detached results from disconnected sessions are abandoned without mutating session state or leaking WebSocket events. Lifespan shutdown uses bounded timeout waiting.
 
 ---
 

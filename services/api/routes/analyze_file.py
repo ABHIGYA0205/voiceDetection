@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import io
 import re
 import urllib.parse
@@ -12,6 +11,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, Field
 
+from services.api.inference_worker import InferenceWorker, InferenceWorkerClosedError
 from voiceshield.core.schema import Disclaimers
 from voiceshield.pipeline.file_evaluator import FileInferenceResult, evaluate_audio
 
@@ -94,7 +94,7 @@ async def analyze_audio_file(
 
     - Processes audio strictly in memory with no retention.
     - Evaluates 4.0-second sliding windows with deterministic feature extraction.
-    - Concurrency-protected via local semaphore suitable for Apple Silicon M3 unified memory.
+    - Concurrency-protected via process-wide single-worker inference executor suitable for Apple Silicon M3 unified memory.
     - Advisory output only: does NOT determine caller identity or fraud likelihood.
     """
     raw_filename = file.filename or "unknown.wav"
@@ -154,11 +154,19 @@ async def analyze_audio_file(
             ).model_dump(),
         )
 
-    # 4. Concurrency-guarded execution
-    semaphore: asyncio.Semaphore | None = getattr(request.app.state, "inference_semaphore", None)
+    # 4. Concurrency-guarded execution via process-wide single-worker executor
+    worker: InferenceWorker | None = getattr(request.app.state, "inference_worker", None)
+    if worker is None or not worker.accepting_jobs:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=ApiErrorDetail(
+                error_code="INFERENCE_WORKER_UNAVAILABLE",
+                message="VoiceShield inference worker is unavailable or shutting down.",
+            ).model_dump(),
+        )
 
-    async def _run_inference() -> FileInferenceResult:
-        return await asyncio.to_thread(
+    try:
+        result = await worker.execute(
             evaluate_audio,
             source=io.BytesIO(content),
             detector=detector,
@@ -167,12 +175,15 @@ async def analyze_audio_file(
             file_name=clean_name,
             max_duration_seconds=MAX_AUDIO_SECONDS,
         )
-
-    if semaphore is not None:
-        async with semaphore:
-            result = await _run_inference()
-    else:
-        result = await _run_inference()
+        assert isinstance(result, FileInferenceResult)
+    except InferenceWorkerClosedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=ApiErrorDetail(
+                error_code="INFERENCE_WORKER_UNAVAILABLE",
+                message=f"VoiceShield inference worker is closed: {exc}",
+            ).model_dump(),
+        ) from exc
 
     # 5. Result validation and error mapping
     if result.status == "error":

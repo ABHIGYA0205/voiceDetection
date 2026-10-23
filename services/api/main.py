@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from collections.abc import AsyncGenerator
@@ -13,6 +12,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 
+from services.api.inference_worker import InferenceWorker
 from services.api.routes.analyze_file import router as analyze_router
 from services.api.routes.stream import router as stream_router
 from voiceshield import __version__
@@ -30,8 +30,8 @@ logger = logging.getLogger("voiceshield.api")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Preload model detector once at startup and initialize concurrency guard for Apple Silicon M3."""
-    app.state.inference_semaphore = asyncio.Semaphore(1)
+    """Preload model detector once at startup and initialize concurrency worker for Apple Silicon M3."""
+    app.state.inference_worker = InferenceWorker()
     app.state.active_streaming_sessions = {}
     app.state.max_concurrent_sessions = int(os.getenv("VOICESHIELD_MAX_CONCURRENT_SESSIONS", "10"))
 
@@ -94,7 +94,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
-        logger.info("VoiceShield API shutting down. Releasing active streaming sessions...")
+        logger.info("VoiceShield API shutting down. Draining inference worker...")
+        worker: InferenceWorker | None = getattr(app.state, "inference_worker", None)
+        if worker is not None:
+            shutdown_timeout = float(os.getenv("VOICESHIELD_INFERENCE_SHUTDOWN_TIMEOUT", "5.0"))
+            drained = await worker.shutdown(timeout=shutdown_timeout)
+            if not drained:
+                logger.error(
+                    "Inference worker shutdown timeout (%.2fs) expired with jobs unresolved.",
+                    shutdown_timeout,
+                )
+
+        logger.info("Releasing active streaming sessions...")
         for _sid, sess in list(app.state.active_streaming_sessions.items()):
             try:
                 sess.reset()

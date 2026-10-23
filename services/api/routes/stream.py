@@ -11,6 +11,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
+from services.api.inference_worker import InferenceWorker, InferenceWorkerClosedError
 from voiceshield.core.schema import Disclaimers
 from voiceshield.dsp.exceptions import AudioPreprocessingError
 from voiceshield.models.base import BaseDetector
@@ -215,6 +216,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
     session_id = str(uuid.uuid4())
     session: StreamingSession | None = None
     inference_tasks: set[asyncio.Task[None]] = set()
+    is_closing = False
 
     # Timeouts and limits
     idle_timeout = DEFAULT_IDLE_TIMEOUT_SECONDS
@@ -395,7 +397,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
         )
         await websocket.send_json(start_ack.model_dump())
 
-        semaphore: asyncio.Semaphore | None = getattr(app.state, "inference_semaphore", None)
+        worker: InferenceWorker | None = getattr(app.state, "inference_worker", None)
 
         # 6. Audio Ingestion Loop
         stream_start_time = asyncio.get_event_loop().time()
@@ -409,18 +411,19 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
         async def _dispatch_inference(win: WindowForInference) -> None:
             nonlocal total_windows_evaluated, total_eligible_evaluated, had_model_inference_error
             try:
-                if detector is not None:
-                    # Model forward pass safely offloaded from the event loop
-                    if semaphore is not None:
-                        async with semaphore:
-                            output = await asyncio.to_thread(detector.predict, win.samples)
-                    else:
-                        output = await asyncio.to_thread(detector.predict, win.samples)
+                if worker is None:
+                    raise RuntimeError("VoiceShield inference worker is not initialized.")
+                if not worker.accepting_jobs:
+                    raise InferenceWorkerClosedError("VoiceShield inference worker is closed.")
+                if detector is None:
+                    raise RuntimeError("VoiceShield detector is not initialized.")
 
-                    synth_score = float(output.synthetic_score)
-                else:
-                    # Model fallback simulation
-                    synth_score = 0.5
+                output = await worker.execute(detector.predict, win.samples)
+                synth_score = float(output.synthetic_score)
+
+                if is_closing:
+                    logger.info("Discarding inference result for closing session %s", session_id)
+                    return
 
                 assert session is not None
                 decision = session.complete_inference(
@@ -457,7 +460,20 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     calibrated_score=None,
                     decision=decision.model_dump(),
                 )
-                await websocket.send_json(result_event.model_dump())
+                if not is_closing:
+                    await websocket.send_json(result_event.model_dump())
+
+            except asyncio.CancelledError:
+                # Disconnect cancellation is lifecycle cancellation, not a neural model failure.
+                logger.info(
+                    "Inference coroutine cancelled for session %s (window %d)",
+                    session_id,
+                    win.window_index,
+                )
+                if session is not None:
+                    session._in_flight_inference = False
+                    session._in_flight_window = None
+                raise
 
             except Exception as exc:
                 had_model_inference_error = True
@@ -465,20 +481,23 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                 if session is not None:
                     session._in_flight_inference = False
                     session._in_flight_window = None
-                try:
-                    await websocket.send_json(
-                        ServerErrorEvent(
-                            error_code="MODEL_INFERENCE_ERROR",
-                            message=f"Model evaluation failed: {exc}",
-                        ).model_dump()
-                    )
-                except Exception:
-                    pass
+                if not is_closing:
+                    try:
+                        await websocket.send_json(
+                            ServerErrorEvent(
+                                error_code="MODEL_INFERENCE_ERROR",
+                                message=f"Model evaluation failed: {exc}",
+                            ).model_dump()
+                        )
+                    except Exception:
+                        pass
 
             finally:
-                # If a fresher pending window was queued while inference was running, pop and process it
+                # If a fresher pending window was queued while inference was running, pop and process it,
+                # unless the session is closing/disconnected.
                 if (
-                    session is not None
+                    not is_closing
+                    and session is not None
                     and session.has_pending_window
                     and not session.in_flight_inference
                 ):
@@ -747,15 +766,19 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                         inference_tasks.add(task)
                         task.add_done_callback(inference_tasks.discard)
 
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, asyncio.CancelledError):
         logger.info("Session %s client disconnected.", session_id)
     except Exception as exc:
         logger.exception("Unexpected error in streaming session %s: %s", session_id, exc)
     finally:
-        # Cancel any pending inference background tasks
-        for task in inference_tasks:
+        is_closing = True
+        # Cancel any pending inference background tasks and await their unwinding
+        tasks_snapshot = list(inference_tasks)
+        for task in tasks_snapshot:
             if not task.done():
                 task.cancel()
+        if tasks_snapshot:
+            await asyncio.gather(*tasks_snapshot, return_exceptions=True)
 
         # Cleanly release session resources and remove from registry
         if session is not None:

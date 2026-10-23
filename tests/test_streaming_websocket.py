@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import io
+import threading
 import time
 from typing import Any
 
 import numpy as np
 import pytest
+import soundfile as sf
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 
@@ -481,3 +484,389 @@ def test_websocket_backpressure_drop_replace() -> None:
                     break
             assert stop_ack is not None
             assert stop_ack["total_windows_dropped"] > 0
+
+
+# ==============================================================================
+# 12. Audit H-04 Concurrency & Disconnect Integration Tests
+# ==============================================================================
+
+
+class BlockingControlledDetector(BaseDetector):
+    """Detector that blocks on call 1 and tracks physical execution concurrency."""
+
+    def __init__(self, raise_on_call_1: bool = False) -> None:
+        self.call1_started = threading.Event()
+        self.call1_release = threading.Event()
+        self.call2_started = threading.Event()
+        self.call_count = 0
+        self.active_count = 0
+        self.max_concurrency = 0
+        self.lock = threading.Lock()
+        self.raise_on_call_1 = raise_on_call_1
+
+    def _make_output(self, score: float, audio: Any) -> DetectorOutput:
+        n_samples = len(audio) if hasattr(audio, "__len__") else 64000
+        logit_spoof = float(np.log(max(score, 1e-6)))
+        logit_bonafide = float(np.log(max(1.0 - score, 1e-6)))
+        return DetectorOutput(
+            raw_logits=(logit_spoof, logit_bonafide),
+            bonafide_score=logit_bonafide - logit_spoof,
+            synthetic_score=score,
+            uncalibrated_synthetic_score=score,
+            is_synthetic_suspected=bool(score >= 0.65),
+            input_samples=n_samples,
+            device_used="cpu",
+            model_id="BlockingControlledDetector",
+        )
+
+    def predict(self, audio: Any) -> DetectorOutput:
+        with self.lock:
+            self.call_count += 1
+            call_idx = self.call_count
+            self.active_count += 1
+            self.max_concurrency = max(self.max_concurrency, self.active_count)
+
+        try:
+            if call_idx == 1:
+                self.call1_started.set()
+                self.call1_release.wait(timeout=5.0)
+                if self.raise_on_call_1:
+                    raise RuntimeError("Simulated failure after disconnect")
+                return self._make_output(0.88, audio)
+            else:
+                self.call2_started.set()
+                return self._make_output(0.12, audio)
+        finally:
+            with self.lock:
+                self.active_count -= 1
+
+    def predict_batch(self, batch: Any) -> list[DetectorOutput]:
+        return [self.predict(x) for x in batch]
+
+
+def test_abrupt_disconnect_followed_by_second_stream() -> None:
+    """Test A: Abrupt disconnect of stream A followed by stream B serialization.
+
+    Proves:
+    - Session A is removed from active sessions while call A is still physically running.
+    - Detector call B remains queued and cannot start until call A returns.
+    - Maximum physical detector concurrency strictly remains 1.
+    - Results from stream A never leak into or mutate stream B.
+    """
+    detector = BlockingControlledDetector()
+    orig_detector = getattr(app.state, "detector", None)
+
+    try:
+        with TestClient(app) as client:
+            app.state.detector = detector
+
+            # 1. Connect stream A and send enough audio to begin physical inference
+            session_id_a = None
+            with client.websocket_connect("/api/v1/stream") as ws_a:
+                ws_a.send_json(
+                    {"type": "start", "sample_rate": 16000, "channels": 1, "pcm_encoding": "int16"}
+                )
+                ack_a = ws_a.receive_json()
+                session_id_a = ack_a["session_id"]
+                assert session_id_a in app.state.active_streaming_sessions
+
+                # Send 4 seconds of audio to trigger window 0
+                for _ in range(4):
+                    ws_a.send_bytes(generate_pcm_sine(1.0, freq=440.0))
+
+                # Wait for detector call A to physically start
+                assert detector.call1_started.wait(timeout=5.0)
+                with detector.lock:
+                    assert detector.active_count == 1
+                    assert detector.max_concurrency == 1
+
+                # Abruptly disconnect stream A without sending stop message
+                ws_a.close()
+
+            # Wait briefly for server disconnect cleanup
+            time.sleep(0.05)
+
+            # Session A must be cleanly removed from active sessions while call A is still blocked!
+            assert session_id_a not in app.state.active_streaming_sessions
+            with detector.lock:
+                assert detector.active_count == 1
+                assert detector.max_concurrency == 1
+
+            # 2. Start stream B on the SAME TestClient lifespan and app worker
+            with client.websocket_connect("/api/v1/stream") as ws_b:
+                ws_b.send_json(
+                    {"type": "start", "sample_rate": 16000, "channels": 1, "pcm_encoding": "int16"}
+                )
+                ack_b = ws_b.receive_json()
+                session_id_b = ack_b["session_id"]
+                assert session_id_b != session_id_a
+
+                # Send 4 seconds of audio to request inference
+                for _ in range(4):
+                    ws_b.send_bytes(generate_pcm_sine(1.0, freq=440.0))
+
+                # Give event loop time to process ingestion and submit to worker
+                time.sleep(0.05)
+
+                # Before releasing call A, call B MUST NOT have physically started!
+                assert not detector.call2_started.is_set()
+                with detector.lock:
+                    assert detector.active_count == 1
+                    assert detector.max_concurrency == 1
+
+                # Now release call A
+                detector.call1_release.set()
+
+                # Stream B should now execute and receive its normal window result
+                window_result_b = None
+                while True:
+                    msg = ws_b.receive_json()
+                    if msg["type"] == "window_result":
+                        window_result_b = msg
+                        break
+
+                assert window_result_b is not None
+                assert window_result_b["session_id"] == session_id_b
+                # Score must be call 2's score (0.12), NOT call 1's detached score (0.88)
+                assert window_result_b["synthetic_score"] == pytest.approx(0.12, abs=1e-3)
+
+                # Gracefully stop stream B
+                ws_b.send_json({"type": "stop"})
+                while True:
+                    msg = ws_b.receive_json()
+                    if msg["type"] == "session_stopped":
+                        break
+
+            # Confirm max physical concurrency stayed exactly 1
+            with detector.lock:
+                assert detector.max_concurrency == 1
+                assert detector.active_count == 0
+
+    finally:
+        detector.call1_release.set()
+        app.state.detector = orig_detector
+
+
+def test_abrupt_disconnect_followed_by_file_analysis() -> None:
+    """Test B: Abrupt disconnect of stream A followed by file analysis request serialization.
+
+    Proves:
+    - File analysis submitted while streaming detector call is still blocked cannot overlap.
+    - Maximum physical detector concurrency strictly remains 1 across different API routes.
+    """
+    detector = BlockingControlledDetector()
+    orig_detector = getattr(app.state, "detector", None)
+
+    try:
+        with TestClient(app) as client:
+            app.state.detector = detector
+
+            # 1. Start streaming and begin detector execution
+            session_id_a = None
+            with client.websocket_connect("/api/v1/stream") as ws_a:
+                ws_a.send_json(
+                    {"type": "start", "sample_rate": 16000, "channels": 1, "pcm_encoding": "int16"}
+                )
+                ack_a = ws_a.receive_json()
+                session_id_a = ack_a["session_id"]
+
+                for _ in range(4):
+                    ws_a.send_bytes(generate_pcm_sine(1.0, freq=440.0))
+
+                assert detector.call1_started.wait(timeout=5.0)
+                ws_a.close()
+
+            # Disconnected stream A
+            time.sleep(0.05)
+            assert session_id_a not in app.state.active_streaming_sessions
+
+            # Generate synthetic 4.0s WAV bytes for file analysis
+            t = np.linspace(0, 4.0, 16000 * 4, endpoint=False, dtype=np.float32)
+            wav_samples = 0.5 * np.sin(2 * np.pi * 440.0 * t)
+            buf = io.BytesIO()
+            sf.write(buf, wav_samples, 16000, format="WAV", subtype="PCM_16")
+            wav_bytes = buf.getvalue()
+
+            file_response: dict[str, Any] = {}
+            file_error: list[Exception] = []
+
+            def _submit_file_request() -> None:
+                try:
+                    resp = client.post(
+                        "/api/v1/analyze/file",
+                        files={"file": ("test_file.wav", io.BytesIO(wav_bytes), "audio/wav")},
+                    )
+                    file_response["status_code"] = resp.status_code
+                    file_response["json"] = resp.json()
+                except Exception as exc:
+                    file_error.append(exc)
+
+            # Submit HTTP file analysis in a helper thread while call 1 is blocked
+            thread = threading.Thread(target=_submit_file_request)
+            thread.start()
+
+            # Allow time for HTTP request to reach the inference worker
+            time.sleep(0.08)
+
+            # File detector call MUST NOT have started while streaming call is physically running
+            assert not detector.call2_started.is_set()
+            with detector.lock:
+                assert detector.active_count == 1
+                assert detector.max_concurrency == 1
+
+            # Release streaming call
+            detector.call1_release.set()
+
+            # Join helper thread
+            thread.join(timeout=5.0)
+            assert not thread.is_alive()
+            assert not file_error
+
+            assert file_response.get("status_code") == 200
+            assert file_response["json"]["status"] == "success"
+
+            with detector.lock:
+                assert detector.max_concurrency == 1
+                assert detector.active_count == 0
+
+    finally:
+        detector.call1_release.set()
+        app.state.detector = orig_detector
+
+
+def test_abrupt_disconnect_detector_failure_after_release() -> None:
+    """Test E: A detached physical job raising an exception after disconnect is handled cleanly.
+
+    Proves:
+    - No exception is leaked or unhandled.
+    - No event is sent to closed socket.
+    - Worker remains usable for subsequent jobs.
+    - Maximum concurrency remains 1.
+    """
+    detector = BlockingControlledDetector(raise_on_call_1=True)
+    orig_detector = getattr(app.state, "detector", None)
+
+    try:
+        with TestClient(app) as client:
+            app.state.detector = detector
+
+            with client.websocket_connect("/api/v1/stream") as ws:
+                ws.send_json(
+                    {"type": "start", "sample_rate": 16000, "channels": 1, "pcm_encoding": "int16"}
+                )
+                ws.receive_json()
+                for _ in range(4):
+                    ws.send_bytes(generate_pcm_sine(1.0, freq=440.0))
+                assert detector.call1_started.wait(timeout=5.0)
+                ws.close()
+
+            # Disconnect occurred while detector is running
+            time.sleep(0.05)
+
+            # Release call 1 which will raise RuntimeError
+            detector.call1_release.set()
+            time.sleep(0.05)
+
+            # Worker must still be alive and usable
+            worker = getattr(app.state, "inference_worker", None)
+            assert worker is not None
+            assert worker.accepting_jobs
+            assert worker.outstanding_job_count == 0
+
+            # Next request succeeds
+            with client.websocket_connect("/api/v1/stream") as ws2:
+                ws2.send_json(
+                    {"type": "start", "sample_rate": 16000, "channels": 1, "pcm_encoding": "int16"}
+                )
+                ws2.receive_json()
+                for _ in range(4):
+                    ws2.send_bytes(generate_pcm_sine(1.0, freq=440.0))
+                msg = None
+                while True:
+                    m = ws2.receive_json()
+                    if m["type"] == "window_result":
+                        msg = m
+                        break
+                assert msg is not None
+                ws2.send_json({"type": "stop"})
+                while True:
+                    if ws2.receive_json()["type"] == "session_stopped":
+                        break
+
+            with detector.lock:
+                assert detector.max_concurrency == 1
+
+    finally:
+        detector.call1_release.set()
+        app.state.detector = orig_detector
+
+
+def test_abrupt_cleanup_ordering() -> None:
+    """Test C: Abrupt cleanup ordering guarantees.
+
+    Proves:
+    - Inference awaiting tasks are cancelled and gathered.
+    - Session reset/removal occurs.
+    - No pending window is launched for the disconnected session.
+    - The underlying physical job remains tracked until completion.
+    """
+    detector = BlockingControlledDetector()
+    orig_detector = getattr(app.state, "detector", None)
+
+    try:
+        with TestClient(app) as client:
+            app.state.detector = detector
+
+            with client.websocket_connect("/api/v1/stream") as ws:
+                ws.send_json(
+                    {"type": "start", "sample_rate": 16000, "channels": 1, "pcm_encoding": "int16"}
+                )
+                ack = ws.receive_json()
+                session_id = ack["session_id"]
+                session = app.state.active_streaming_sessions[session_id]
+
+                # Ingest 5 seconds: 4s triggers window 0 (inference starts and blocks),
+                # 5th second generates window 1 (becomes pending window)
+                for _ in range(5):
+                    ws.send_bytes(generate_pcm_sine(1.0, freq=440.0))
+
+                # Wait for window 0 to physically begin inference
+                assert detector.call1_started.wait(timeout=5.0)
+                # Allow ingestion loop to process the 5th second
+                time.sleep(0.05)
+
+                # Confirm window 1 is queued as pending window
+                assert session.has_pending_window
+
+                # Abrupt disconnect
+                ws.close()
+
+            # Wait briefly for server disconnect unwinding
+            time.sleep(0.08)
+
+            # 1. Session is removed from active sessions
+            assert session_id not in app.state.active_streaming_sessions
+
+            # 2. Worker still tracks the physical job running call 1
+            worker = getattr(app.state, "inference_worker", None)
+            assert worker is not None
+            assert worker.running_job_count == 1
+            assert worker.outstanding_job_count == 1
+
+            # 3. Pending window 1 was NOT launched
+            assert not detector.call2_started.is_set()
+
+            # Now release call 1
+            detector.call1_release.set()
+            time.sleep(0.05)
+
+            # 4. Physical job finished; call 2 was NEVER launched for disconnected session
+            assert worker.outstanding_job_count == 0
+            assert not detector.call2_started.is_set()
+            with detector.lock:
+                assert detector.max_concurrency == 1
+                assert detector.call_count == 1
+
+    finally:
+        detector.call1_release.set()
+        app.state.detector = orig_detector

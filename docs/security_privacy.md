@@ -40,7 +40,7 @@ flowchart TD
     Attacker -->|Cross-Site Origin| CORS[Browser / Web App]
 
     Upload -->|Decompression Bomb / Path Traversal| Core[Volatile Memory DSP]
-    WS -->|CSWSH / Queue Starvation| Streaming[Streaming Session & Semaphore]
+    WS -->|CSWSH / Queue Starvation| Streaming[Streaming Session & Inference Worker]
     Loader -->|Pickle RCE Payload| Model[PyTorch Forward Pass]
 
     Core -.->|Protected| SafeHost[Isolated Host Environment]
@@ -115,7 +115,12 @@ flowchart TD
 
 ### 3.7 Inference Denial of Service (DoS), Queue Starvation & Stale Drop Accounting
 
-- **Worker Concurrency Guard**: A process-wide `asyncio.Semaphore(1)` ensures that at most one model forward pass is executed at any moment, preventing unified memory thrashing and Out-Of-Memory (OOM) crashes on Apple Silicon M3 hardware.
+- **Process-Wide Single-Worker Inference Execution**:
+  A dedicated single-worker execution service (`InferenceWorker`, backed by a lifecycle-owned `ThreadPoolExecutor(max_workers=1)`) guarantees that exactly one synchronous inference callable executes at a time across both streaming WebSocket and offline file-analysis routes.
+  - **Cancellation Safety (Audit H-04)**: In Python, cancelling an awaiting coroutine does not terminate the underlying physical thread. Unlike cancellation-sensitive semaphores that release capacity upon caller cancellation while the detector thread is still executing, `InferenceWorker` tracks the physical `concurrent.futures.Future`. If a client disconnects or an HTTP request is cancelled while inference is physically running, the worker remains occupied until the physical callable returns, and subsequent jobs remain queued without overlapping.
+  - **Detached Result Abandonment**: Results from disconnected sessions are safely abandoned: they do not mutate the reset `StreamingSession`, update temporal policy, emit events, or launch pending windows. Any exception raised by an abandoned job is consumed and logged without unhandled future warnings.
+  - **Graceful Stop vs. Abrupt Disconnect**: Graceful stop (`stop` command) waits for active and pending inference jobs to drain before emitting `session_stopped`. Abrupt disconnect cancels awaiting coroutines, gathers unwinding tasks, resets session resources, and disconnects immediately, while physical model execution finishes cleanly in the background.
+  - **Bounded Shutdown**: Lifespan shutdown stops new job intake, cancels unstarted queued jobs, and awaits physically executing jobs up to a bounded timeout. Python cannot forcibly kill a running detector thread; if the timeout expires, an error is logged and the unresolved state is reported honestly rather than claiming forced termination.
 - **Bounded Streaming Queue Depth**: The streaming session enforces an O(1) bounded queue:
   - At most **one** window is in flight for model inference (`_in_flight_window`).
   - At most **one** fresher eligible window is held in the pending slot (`_pending_window`).
