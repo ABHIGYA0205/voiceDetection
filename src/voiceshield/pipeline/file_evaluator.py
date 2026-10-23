@@ -30,7 +30,8 @@ class WindowResult(BaseModel):
         default=None, description="Raw model logit for bonafide (index 1). Null when abstained."
     )
     raw_bonafide_score: float | None = Field(
-        default=None, description="Raw bona fide logit score (ASVspoof standard). Null when abstained."
+        default=None,
+        description="Raw bona fide logit score (ASVspoof standard). Null when abstained.",
     )
     synthetic_score: float | None = Field(
         default=None,
@@ -269,7 +270,9 @@ def evaluate_audio(
 
     # 1. Load and normalize audio via canonical preprocessor
     try:
-        preprocessed = load_audio(source, target_sr=16000, max_duration_seconds=max_duration_seconds)
+        preprocessed = load_audio(
+            source, target_sr=16000, max_duration_seconds=max_duration_seconds
+        )
     except AudioPreprocessingError as exc:
         return FileInferenceResult(
             file_path=path_str,
@@ -458,7 +461,9 @@ def evaluate_audio(
             if w.is_eligible and w.is_synthetic_suspected:
                 if current_consecutive > 0:
                     # Guard against near-duplicate or heavily overlapping non-hop windows
-                    hop_diff = w.start_seconds - (prev_start_sec if prev_start_sec is not None else 0.0)
+                    hop_diff = w.start_seconds - (
+                        prev_start_sec if prev_start_sec is not None else 0.0
+                    )
                     if hop_diff < (hop_seconds * 0.9):
                         continue
                 current_consecutive += 1

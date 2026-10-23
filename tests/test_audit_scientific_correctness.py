@@ -175,7 +175,7 @@ def test_api_analyze_file_threshold_behavior(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("duration_s", "expected_windows", "expect_partial"),
     [
-        (3.99, 1, True),   # < 4.0s: cyclically padded partial window
+        (3.99, 1, True),  # < 4.0s: cyclically padded partial window
         (4.00, 1, False),  # exactly 4.0s: 1 full window [0.0, 4.0]
         (4.01, 1, False),  # 4.01s: 1 full window [0.0, 4.0], NO near-duplicate tail window!
         (4.99, 1, False),  # 4.99s: 1 full window [0.0, 4.0] (hop 1.0s requires 5.0s for 2nd window)
@@ -254,7 +254,10 @@ def test_elevated_low_elevated_does_not_satisfy_two_consecutive(tmp_path: Path) 
 
     # Even though 2 total windows were elevated, they were separated by a low window!
     assert res_interrupted.is_synthetic_suspected is False
-    assert "consecutive elevated windows (max consecutive = 1, required = 2)" in res_interrupted.temporal_rule_explanation
+    assert (
+        "consecutive elevated windows (max consecutive = 1, required = 2)"
+        in res_interrupted.temporal_rule_explanation
+    )
 
     # Now verify that consecutive elevated windows DO trigger suspected
     det_consecutive = ProgrammableScoreDetector(scores=[0.80, 0.85, 0.20], internal_threshold=0.65)
@@ -264,7 +267,10 @@ def test_elevated_low_elevated_does_not_satisfy_two_consecutive(tmp_path: Path) 
     assert res_consecutive.windows[0].is_synthetic_suspected is True
     assert res_consecutive.windows[1].is_synthetic_suspected is True
     assert res_consecutive.is_synthetic_suspected is True
-    assert "Elevated synthetic anomaly score sustained across at least 2 consecutive windows" in res_consecutive.temporal_rule_explanation
+    assert (
+        "Elevated synthetic anomaly score sustained across at least 2 consecutive windows"
+        in res_consecutive.temporal_rule_explanation
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -396,13 +402,15 @@ def test_streaming_api_uncalibrated_score_semantics() -> None:
     with TestClient(app) as client:
         with client.websocket_connect("/api/v1/stream") as websocket:
             # 1. Start handshake
-            websocket.send_json({
-                "type": "start",
-                "sample_rate": 16000,
-                "protocol_version": "1.0",
-                "channels": 1,
-                "pcm_encoding": "int16",
-            })
+            websocket.send_json(
+                {
+                    "type": "start",
+                    "sample_rate": 16000,
+                    "protocol_version": "1.0",
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                }
+            )
             ack = websocket.receive_json()
             assert ack["type"] == "session_started"
 
@@ -511,13 +519,15 @@ def test_streaming_websocket_abstained_window_nested_decision_score_is_null() ->
     with TestClient(app) as client:
         with client.websocket_connect("/api/v1/stream") as websocket:
             # 1. Start handshake
-            websocket.send_json({
-                "type": "start",
-                "sample_rate": 16000,
-                "protocol_version": "1.0",
-                "channels": 1,
-                "pcm_encoding": "int16",
-            })
+            websocket.send_json(
+                {
+                    "type": "start",
+                    "sample_rate": 16000,
+                    "protocol_version": "1.0",
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                }
+            )
             ack = websocket.receive_json()
             assert ack["type"] == "session_started"
 

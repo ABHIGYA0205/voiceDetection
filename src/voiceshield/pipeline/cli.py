@@ -94,8 +94,12 @@ def format_cli_summary_table(results: list[FileInferenceResult]) -> str:
             fname = fname[:32] + "..."
         if res.status == "success":
             decision = "SUSPECTED" if res.is_synthetic_suspected else "LOW ANOMALY"
-            mean_str = f"{res.mean_synthetic_score:.3f}" if res.mean_synthetic_score is not None else "N/A"
-            max_str = f"{res.max_synthetic_score:.3f}" if res.max_synthetic_score is not None else "N/A"
+            mean_str = (
+                f"{res.mean_synthetic_score:.3f}" if res.mean_synthetic_score is not None else "N/A"
+            )
+            max_str = (
+                f"{res.max_synthetic_score:.3f}" if res.max_synthetic_score is not None else "N/A"
+            )
             lines.append(
                 f"{fname:<35} | {res.status:<10} | {res.duration_seconds:<8.1f} | "
                 f"{res.total_windows:<7} | {mean_str:<10} | "
@@ -150,10 +154,18 @@ def save_cli_results(results: list[FileInferenceResult], output_path: Path) -> N
                         "status": r.status,
                         "duration_seconds": r.duration_seconds,
                         "total_windows": r.total_windows,
-                        "mean_synthetic_score": r.mean_synthetic_score if r.mean_synthetic_score is not None else "N/A",
-                        "max_synthetic_score": r.max_synthetic_score if r.max_synthetic_score is not None else "N/A",
-                        "mean_synthetic_likelihood": r.mean_synthetic_likelihood if r.mean_synthetic_likelihood is not None else "N/A",
-                        "max_synthetic_likelihood": r.max_synthetic_likelihood if r.max_synthetic_likelihood is not None else "N/A",
+                        "mean_synthetic_score": r.mean_synthetic_score
+                        if r.mean_synthetic_score is not None
+                        else "N/A",
+                        "max_synthetic_score": r.max_synthetic_score
+                        if r.max_synthetic_score is not None
+                        else "N/A",
+                        "mean_synthetic_likelihood": r.mean_synthetic_likelihood
+                        if r.mean_synthetic_likelihood is not None
+                        else "N/A",
+                        "max_synthetic_likelihood": r.max_synthetic_likelihood
+                        if r.max_synthetic_likelihood is not None
+                        else "N/A",
                         "is_synthetic_suspected": r.is_synthetic_suspected,
                         "temporal_rule_explanation": r.temporal_rule_explanation,
                         "error_message": r.error_message or "",

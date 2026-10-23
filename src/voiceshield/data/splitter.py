@@ -335,8 +335,12 @@ def _partition_holdout(
 
         leftover = len(standard_comps) - len(needed_pos)
         if leftover > 0:
-            ideal: dict[SplitType, float] = {s: len(components) * target_ratios[s] for s in pos_splits}
-            current: dict[SplitType, int] = {s: assigned_counts[s] + standard_alloc[s] for s in pos_splits}
+            ideal: dict[SplitType, float] = {
+                s: len(components) * target_ratios[s] for s in pos_splits
+            }
+            current: dict[SplitType, int] = {
+                s: assigned_counts[s] + standard_alloc[s] for s in pos_splits
+            }
             split_order: tuple[SplitType, ...] = ("train", "dev", "test")
             for _ in range(leftover):
                 best_split = max(

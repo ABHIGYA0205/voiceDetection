@@ -1052,7 +1052,7 @@ def test_eval_cli_fails_cleanly_on_score_validation_errors(
             "Duplicate sample-level score ID",
         ),
         ("dup_json.json", '{"s1": 0.1, "s1": 0.2}', "Duplicate JSON object key found"),
-        ("nan_score.jsonl", '{"sample_id": "s1", "score": NaN}\n', "Invalid JSON"),
+        ("nan_score.jsonl", '{"sample_id": "s1", "score": NaN}\n', "Non-finite score value"),
         ("missing_score.jsonl", '{"sample_id": "s1"}\n', "Missing score"),
         ("malformed.jsonl", '{"sample_id": "s1", "score": 0.5\n', "Invalid JSON"),
     ]

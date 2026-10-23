@@ -140,7 +140,9 @@ class AASISTLDetector(BaseDetector):
                 _verify_checkpoint_sha256(self.checkpoint_path, target_sha.strip())
 
             self.model = UpstreamAASISTModel(self.config)
-            logger.info("Loading AASIST-L weights from %s (weights_only=True)", self.checkpoint_path)
+            logger.info(
+                "Loading AASIST-L weights from %s (weights_only=True)", self.checkpoint_path
+            )
             try:
                 state_dict = torch.load(self.checkpoint_path, map_location="cpu", weights_only=True)
             except Exception as exc:
