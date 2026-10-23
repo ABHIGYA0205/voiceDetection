@@ -77,6 +77,8 @@ apps/web/node_modules/
 apps/web/dist/
 apps/web/.vite/
 apps/web/*.tsbuildinfo
+apps/web/test-results/
+apps/web/playwright-report/
 node_modules/
 
 # IDE and OS files

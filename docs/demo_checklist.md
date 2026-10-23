@@ -135,7 +135,7 @@ When accessing `http://127.0.0.1:5173` for the first time:
    - **Connection & Mic**: Both pills show `connected` and `recording`.
    - **Speech Sufficiency**: Active speech gauge shows `≥ 0.8s / 4.0s (Sufficient)`.
    - **Audio Quality**: Signals indicate `Clean`, `Active Signal`, and `Continuous`.
-   - **Status Indicator**: Displays `[✓ LOW ANOMALY]` — *Consistent with Natural Speech*.
+   - **Status Indicator**: Displays `[✓ LOW ANOMALY]` — *Low acoustic anomaly score — does not authenticate speech*.
    - **Rolling Timeline**: Window entries appear sequentially every 1.0s hop.
 
 ### Test Case 2: Synthetic Voice Playback (or File Upload)
@@ -145,15 +145,16 @@ When accessing `http://127.0.0.1:5173` for the first time:
 2. **Via File Audio Analysis Tab**:
    - Switch to the **📁 File Audio Analysis** tab.
    - Drag and drop or select a consented synthetic WAV or FLAC file.
-   - Set hop step (default: `1.0s`) and threshold (default: `0.65`).
+   - Set hop step (default: `1.0s`) and threshold (default: `0.65`, unvalidated heuristic).
    - Click **⚡ Analyze Audio File**.
 3. **Observations to Verify**:
    - **High Anomaly Status**: Displays `[! HIGH ANOMALY]`.
    - **Action Directive Banner Appears**:
      > **ACTION DIRECTIVE**
      > *Pause and verify through a known independent channel.*
-   - **Window Table Breakdown**: Displays per-window bona fide scores and synthetic likelihoods.
-   - **Compliance Check**: Confirm no prohibited terms appear (no *"100% fake"*, *"fraud proven"*, or *"identity confirmed"*).
+   - **Threshold Provenance**: Displays effective threshold and source (`unvalidated heuristic`).
+   - **Window Table Breakdown**: Displays per-window bona fide scores and synthetic anomaly scores (shows `N/A` for abstained windows).
+   - **Compliance Check**: Confirm no prohibited terms appear (no *"100% fake"*, *"fraud proven"*, *"identity confirmed"*, *"Authentic"*, or *"Consistent with Natural Speech"*).
 
 ---
 

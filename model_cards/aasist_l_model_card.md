@@ -134,10 +134,14 @@ VoiceShield operates in an adversarial environment where generative models conti
 ## 7. Calibration & Threshold Provenance
 
 - **Scoring Formulation**:
-  $$P(\text{synthetic}) = \sigma(\text{logit}_0 - \text{logit}_1) = \frac{1}{1 + e^{-(\text{logit}_0 - \text{logit}_1)}}$$
-- **Default Operating Threshold**: **`0.65`** (calibrated synthetic likelihood ceiling).
-  - Selected defensively to prioritize low False Positive Rates (FPR) in real-time conversational streaming, ensuring benign human callers are not falsely suspected.
-- **Empirical Temperature Scaling Status**: **Not yet evaluated on local development partition**. The parameter $T=1.0$ is currently utilized until a local ASVspoof development partition is processed and verified.
+  AASIST-L produces linear logits $(\text{logit}_0, \text{logit}_1)$ where index 0 is spoof and index 1 is bona fide. The uncalibrated synthetic anomaly score is:
+  $$\text{score}_{\text{synthetic}} = \sigma(\text{logit}_0 - \text{logit}_1) = \frac{1}{1 + e^{-(\text{logit}_0 - \text{logit}_1)}}$$
+  This raw softmax output is an **uncalibrated acoustic anomaly score**, NOT a calibrated probability.
+- **Default Operating Threshold**: **`0.65`** (`operating_threshold_source: "unvalidated_heuristic"`).
+  - Selected heuristically as an unvalidated starting threshold for initial pipeline integration. It has not been calibrated or empirically optimized on an operational validation split.
+- **Probabilistic Calibration Status**: **Uncalibrated**.
+  - No empirical temperature scaling, Platt scaling, or isotonic calibration has been fitted to local target partitions.
+  - Runtime APIs output `calibrated_score: null` and `score_is_calibrated: false` until an empirically fitted calibrator is loaded. Decision reason details report *"Low acoustic anomaly score — does not authenticate speech"* when scores are low.
 
 ---
 

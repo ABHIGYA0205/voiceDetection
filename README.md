@@ -149,7 +149,7 @@ Key features:
 - **Canonical audio preprocessor**: Loads WAV and FLAC with sample rate normalization (16 kHz mono float32).
 - **Deterministic temporal windowing**: 4.0-second sliding windows with configurable hop step (default: 1.0s).
 - **Graceful degradation**: Reports unsupported files cleanly and continues past individual corrupt files without crashing.
-- **Detailed provenance**: Captures per-window raw spoof/bonafide logits, calibrated synthetic speech probabilities, speech duration, quality diagnostics, model/checkpoint hashes, and compliance disclaimers.
+- **Detailed provenance**: Captures per-window raw spoof/bonafide logits, uncalibrated synthetic acoustic anomaly scores (effective threshold and provenance source), active speech duration, quality diagnostics, model/checkpoint hashes, and compliance disclaimers.
 
 ---
 

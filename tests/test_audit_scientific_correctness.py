@@ -272,7 +272,7 @@ def test_elevated_low_elevated_does_not_satisfy_two_consecutive(tmp_path: Path) 
 
 
 def test_silence_returns_insufficient_evidence_abstention(tmp_path: Path) -> None:
-    """Requirement 6: Complete silence returns status='insufficient_evidence'."""
+    """Requirement 6: Complete silence returns status='insufficient_evidence' and null scores."""
     wav_path = make_test_wav(tmp_path / "silence.wav", duration_s=4.0, amplitude=0.0)
     det = ProgrammableScoreDetector(scores=[0.99], internal_threshold=0.65)
 
@@ -281,10 +281,54 @@ def test_silence_returns_insufficient_evidence_abstention(tmp_path: Path) -> Non
     assert result.abstain_reason == "insufficient_speech_duration"
     assert result.is_synthetic_suspected is False
     assert len(result.windows) == 1
-    assert result.windows[0].is_eligible is False
-    assert result.windows[0].abstain_reason == "insufficient_speech_duration"
-    # Model should not have been called for inference
+    # 1. Silence causes zero detector calls
     assert det.call_idx == 0
+
+    # 2. Abstained window score fields are null
+    win = result.windows[0]
+    assert win.is_eligible is False
+    assert win.abstain_reason == "insufficient_speech_duration"
+    assert win.synthetic_score is None
+    assert win.uncalibrated_synthetic_score is None
+    assert win.calibrated_synthetic_likelihood is None
+    assert win.synthetic_likelihood is None
+    assert win.raw_spoof_logit is None
+    assert win.raw_bonafide_logit is None
+    assert win.raw_bonafide_score is None
+
+    # 3. All-abstained file aggregate score fields are null
+    assert result.mean_synthetic_score is None
+    assert result.max_synthetic_score is None
+    assert result.mean_synthetic_likelihood is None
+    assert result.max_synthetic_likelihood is None
+
+
+def test_exact_zero_score_remains_numeric_zero(tmp_path: Path) -> None:
+    """Requirement: A real detector score of exactly 0.0 remains numeric 0.0 and is not converted to null."""
+    wav_path = make_test_wav(tmp_path / "zero_score.wav", duration_s=4.0, amplitude=0.5)
+    det = ProgrammableScoreDetector(scores=[0.0], internal_threshold=0.65)
+
+    result = evaluate_audio(wav_path, detector=det, threshold=0.65)
+    assert result.status == "success"
+    # Real detector was invoked
+    assert det.call_idx == 1
+    assert result.total_windows == 1
+    win = result.windows[0]
+    assert win.is_eligible is True
+    assert win.synthetic_score == 0.0
+    assert win.uncalibrated_synthetic_score == 0.0
+    assert win.synthetic_likelihood == 0.0
+    assert isinstance(win.synthetic_score, float)
+    assert win.raw_spoof_logit is not None
+    assert win.raw_bonafide_logit is not None
+    assert win.raw_bonafide_score is not None
+
+    # Aggregates must remain numeric 0.0
+    assert result.mean_synthetic_score == 0.0
+    assert result.max_synthetic_score == 0.0
+    assert result.mean_synthetic_likelihood == 0.0
+    assert result.max_synthetic_likelihood == 0.0
+    assert isinstance(result.mean_synthetic_score, float)
 
 
 def test_insufficient_speech_abstention(tmp_path: Path) -> None:

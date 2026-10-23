@@ -110,10 +110,17 @@ test.describe('VoiceShield Real-Time Microphone Dashboard', () => {
                   window_end_sec: 4.0,
                   speech_seconds: 3.8,
                   is_eligible: true,
-                  calibrated_score: 0.87,
+                  synthetic_score: 0.87,
+                  uncalibrated_synthetic_score: 0.87,
+                  score_is_calibrated: false,
+                  calibrated_score: null,
+                  operating_threshold: 0.65,
+                  operating_threshold_source: 'unvalidated_heuristic',
                   decision: {
                     state: 'high',
-                    calibrated_score: 0.87,
+                    synthetic_score: 0.87,
+                    score_is_calibrated: false,
+                    calibrated_score: null,
                     smoothed_score: 0.85,
                     reason: 'sustained_anomaly_elevation',
                     reason_details:
@@ -156,8 +163,8 @@ test.describe('VoiceShield Real-Time Microphone Dashboard', () => {
     await expect(page.locator('p.brand-subtitle')).toContainText(
       'Local input only — does not capture cellular telephony'
     );
-    await expect(page.locator('.privacy-card')).toContainText(
-      'Audio is processed in volatile memory and never stored in your browser or on the server.'
+    await expect(page.locator('#compliance-banner')).toContainText(
+      'Audio is processed in volatile memory and immediately discarded. Audio is never stored in your browser or on the server.'
     );
 
     // Initial status should be insufficient speech / awaiting activation
@@ -181,12 +188,12 @@ test.describe('VoiceShield Real-Time Microphone Dashboard', () => {
     await expect(stopButton).toBeVisible();
 
     // 4. Await streaming window inference result from mock WebSocket
-    // Expect status to transition to HIGH synthetic likelihood
+    // Expect status to transition to HIGH synthetic anomaly score
     await expect(page.locator('#accessible-status-indicator')).toHaveText('[! HIGH ANOMALY]', {
       timeout: 10000,
     });
-    await expect(page.locator('#status-heading')).toHaveText('High Synthetic Likelihood');
-    await expect(page.locator('#calibrated-probability-value')).toHaveText('87.0%');
+    await expect(page.locator('#status-heading')).toHaveText('High Acoustic Anomaly Score');
+    await expect(page.locator('#raw-score-value')).toContainText('0.870');
 
     // 5. Verify REQUIRED High Anomaly Action Directive Banner is visible
     const actionBanner = page.locator('#high-status-action-banner');
@@ -199,13 +206,16 @@ test.describe('VoiceShield Real-Time Microphone Dashboard', () => {
     const timelineCard = page.locator('.timeline-card').first();
     await expect(timelineCard).toBeVisible();
     await expect(timelineCard.locator('.timeline-idx')).toHaveText('Window #0');
-    await expect(timelineCard.locator('.timeline-score')).toContainText('Prob: 87.0%');
+    await expect(timelineCard.locator('.timeline-score')).toContainText('Score: 0.870');
 
     // 7. Verify Compliance: forbidden claims are NEVER present
     const content = await page.content();
     expect(content).not.toContain('identity verified');
     expect(content).not.toContain('fraud detected');
     expect(content).not.toContain('100% real');
+    expect(content).not.toContain('Calibrated Synthetic Probability');
+    expect(content).not.toContain('Consistent with Natural Speech');
+    expect(content).not.toContain('Authentic');
 
     // 8. Click Stop Stream & Disconnect
     await stopButton.click();

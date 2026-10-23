@@ -147,19 +147,29 @@ Emitted every 1.0-second hop once a 4.0-second window is evaluated:
   "window_end_sec": 8.0,
   "speech_seconds": 3.75,
   "is_eligible": true,
+  "synthetic_score": 0.82,
+  "uncalibrated_synthetic_score": 0.82,
+  "score_is_calibrated": false,
+  "operating_threshold": 0.65,
+  "operating_threshold_source": "unvalidated_heuristic",
   "raw_score": 0.82,
-  "calibrated_score": 0.82,
+  "calibrated_score": null,
   "decision": {
     "state": "high",
-    "calibrated_score": 0.82,
+    "synthetic_score": 0.82,
+    "score_is_calibrated": false,
+    "calibrated_score": null,
     "smoothed_score": 0.79,
     "reason": "sustained_anomaly_elevation",
-    "reason_details": "Elevated to HIGH: 3 of last 3 windows exceeded high threshold (0.65).",
+    "reason_details": "Elevated to HIGH: 3 of last 3 windows exceeded high threshold (0.65, unvalidated heuristic).",
     "window_index": 4,
     "history_scores": [0.71, 0.76, 0.79]
   }
 }
 ```
+
+> [!NOTE]
+> `calibrated_score` is strictly `null` and `score_is_calibrated` is `false` until an empirical calibrator is fitted and loaded. The threshold `0.65` is an unvalidated heuristic. When scores are low, the decision reason details report: *"Low acoustic anomaly score — does not authenticate speech."*
 
 #### Abstained Window (Active Speech $< 0.8$s)
 ```json
@@ -171,14 +181,19 @@ Emitted every 1.0-second hop once a 4.0-second window is evaluated:
   "window_end_sec": 9.0,
   "speech_seconds": 0.32,
   "is_eligible": false,
+  "synthetic_score": null,
+  "uncalibrated_synthetic_score": null,
+  "score_is_calibrated": false,
   "raw_score": null,
   "calibrated_score": null,
   "decision": {
     "state": "insufficient_evidence",
-    "calibrated_score": 0.0,
+    "synthetic_score": null,
+    "score_is_calibrated": false,
+    "calibrated_score": null,
     "smoothed_score": 0.79,
     "reason": "insufficient_speech_duration",
-    "reason_details": "Active speech (0.32s) is below required minimum threshold (0.80s).",
+    "reason_details": "Active speech (0.32s) is below required minimum threshold (0.80s). Decision abstained.",
     "window_index": 5,
     "history_scores": [0.71, 0.76, 0.79]
   }

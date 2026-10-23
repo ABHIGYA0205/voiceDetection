@@ -23,20 +23,26 @@ class WindowResult(BaseModel):
     window_index: int = Field(description="Zero-indexed window sequence number.")
     start_seconds: float = Field(description="Window start offset in seconds.")
     end_seconds: float = Field(description="Window end offset in seconds.")
-    raw_spoof_logit: float = Field(description="Raw model logit for spoof (index 0).")
-    raw_bonafide_logit: float = Field(description="Raw model logit for bonafide (index 1).")
-    raw_bonafide_score: float = Field(description="Raw bona fide logit score (ASVspoof standard).")
-    synthetic_score: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description="Uncalibrated acoustic anomaly score for synthetic/spoof speech in [0.0, 1.0].",
+    raw_spoof_logit: float | None = Field(
+        default=None, description="Raw model logit for spoof (index 0). Null when abstained."
     )
-    uncalibrated_synthetic_score: float = Field(
-        default=0.0,
+    raw_bonafide_logit: float | None = Field(
+        default=None, description="Raw model logit for bonafide (index 1). Null when abstained."
+    )
+    raw_bonafide_score: float | None = Field(
+        default=None, description="Raw bona fide logit score (ASVspoof standard). Null when abstained."
+    )
+    synthetic_score: float | None = Field(
+        default=None,
         ge=0.0,
         le=1.0,
-        description="Uncalibrated acoustic anomaly score for synthetic/spoof speech.",
+        description="Uncalibrated acoustic anomaly score for synthetic/spoof speech. Null when abstained.",
+    )
+    uncalibrated_synthetic_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Uncalibrated acoustic anomaly score for synthetic/spoof speech. Null when abstained.",
     )
     score_is_calibrated: bool = Field(
         default=False,
@@ -45,6 +51,12 @@ class WindowResult(BaseModel):
     calibrated_synthetic_likelihood: float | None = Field(
         default=None,
         description="Deprecated compatibility alias. Null when no calibrator is loaded.",
+    )
+    synthetic_likelihood: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Deprecated compatibility alias for synthetic_score. Null when abstained.",
     )
     effective_threshold: float = Field(
         default=0.65,
@@ -73,13 +85,18 @@ class WindowResult(BaseModel):
     def sync_window_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
             score = data.get("synthetic_score")
-            if score is None:
+            if score is None and "uncalibrated_synthetic_score" in data:
                 score = data.get("uncalibrated_synthetic_score")
-            if score is None:
-                score = data.get("calibrated_synthetic_likelihood")
+            if score is None and "synthetic_likelihood" in data:
+                score = data.get("synthetic_likelihood")
             if score is not None:
                 data.setdefault("synthetic_score", score)
                 data.setdefault("uncalibrated_synthetic_score", score)
+                data.setdefault("synthetic_likelihood", score)
+            else:
+                data.setdefault("synthetic_score", None)
+                data.setdefault("uncalibrated_synthetic_score", None)
+                data.setdefault("synthetic_likelihood", None)
         return data
 
 
@@ -107,29 +124,29 @@ class FileInferenceResult(BaseModel):
     eligible_windows: int = Field(
         default=0, description="Number of windows with sufficient active speech."
     )
-    mean_synthetic_score: float = Field(
-        default=0.0,
+    mean_synthetic_score: float | None = Field(
+        default=None,
         ge=0.0,
         le=1.0,
-        description="Average synthetic score across eligible analyzed windows.",
+        description="Average synthetic score across eligible analyzed windows. Null when abstained.",
     )
-    max_synthetic_score: float = Field(
-        default=0.0,
+    max_synthetic_score: float | None = Field(
+        default=None,
         ge=0.0,
         le=1.0,
-        description="Peak synthetic score observed across eligible analyzed windows.",
+        description="Peak synthetic score observed across eligible analyzed windows. Null when abstained.",
     )
-    mean_synthetic_likelihood: float = Field(
-        default=0.0,
+    mean_synthetic_likelihood: float | None = Field(
+        default=None,
         ge=0.0,
         le=1.0,
-        description="Deprecated alias for mean_synthetic_score. Uncalibrated score, not probability.",
+        description="Deprecated alias for mean_synthetic_score. Null when abstained.",
     )
-    max_synthetic_likelihood: float = Field(
-        default=0.0,
+    max_synthetic_likelihood: float | None = Field(
+        default=None,
         ge=0.0,
         le=1.0,
-        description="Deprecated alias for max_synthetic_score. Uncalibrated score, not probability.",
+        description="Deprecated alias for max_synthetic_score. Null when abstained.",
     )
     score_is_calibrated: bool = Field(
         default=False,
@@ -171,17 +188,31 @@ class FileInferenceResult(BaseModel):
     @classmethod
     def sync_file_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            mean_s = data.get("mean_synthetic_score")
-            if mean_s is None:
-                mean_s = data.get("mean_synthetic_likelihood", 0.0)
-            data.setdefault("mean_synthetic_score", mean_s)
-            data.setdefault("mean_synthetic_likelihood", mean_s)
+            # Check mean_synthetic_score vs mean_synthetic_likelihood
+            if "mean_synthetic_score" in data and data["mean_synthetic_score"] is None:
+                data["mean_synthetic_likelihood"] = None
+            elif "mean_synthetic_likelihood" in data and data["mean_synthetic_likelihood"] is None:
+                data["mean_synthetic_score"] = None
+            else:
+                mean_s = data.get("mean_synthetic_score")
+                if mean_s is None and "mean_synthetic_likelihood" in data:
+                    mean_s = data.get("mean_synthetic_likelihood")
+                if mean_s is not None:
+                    data.setdefault("mean_synthetic_score", mean_s)
+                    data.setdefault("mean_synthetic_likelihood", mean_s)
 
-            max_s = data.get("max_synthetic_score")
-            if max_s is None:
-                max_s = data.get("max_synthetic_likelihood", 0.0)
-            data.setdefault("max_synthetic_score", max_s)
-            data.setdefault("max_synthetic_likelihood", max_s)
+            # Check max_synthetic_score vs max_synthetic_likelihood
+            if "max_synthetic_score" in data and data["max_synthetic_score"] is None:
+                data["max_synthetic_likelihood"] = None
+            elif "max_synthetic_likelihood" in data and data["max_synthetic_likelihood"] is None:
+                data["max_synthetic_score"] = None
+            else:
+                max_s = data.get("max_synthetic_score")
+                if max_s is None and "max_synthetic_likelihood" in data:
+                    max_s = data.get("max_synthetic_likelihood")
+                if max_s is not None:
+                    data.setdefault("max_synthetic_score", max_s)
+                    data.setdefault("max_synthetic_likelihood", max_s)
         return data
 
 
@@ -308,11 +339,12 @@ def evaluate_audio(
                     window_index=idx,
                     start_seconds=start_sec,
                     end_seconds=end_sec,
-                    raw_spoof_logit=0.0,
-                    raw_bonafide_logit=0.0,
-                    raw_bonafide_score=0.0,
-                    synthetic_score=0.0,
-                    uncalibrated_synthetic_score=0.0,
+                    raw_spoof_logit=None,
+                    raw_bonafide_logit=None,
+                    raw_bonafide_score=None,
+                    synthetic_score=None,
+                    uncalibrated_synthetic_score=None,
+                    synthetic_likelihood=None,
                     score_is_calibrated=False,
                     calibrated_synthetic_likelihood=None,
                     effective_threshold=threshold,
@@ -394,10 +426,10 @@ def evaluate_audio(
             original_channels=metadata.original_channels,
             total_windows=num_windows,
             eligible_windows=0,
-            mean_synthetic_score=0.0,
-            max_synthetic_score=0.0,
-            mean_synthetic_likelihood=0.0,
-            max_synthetic_likelihood=0.0,
+            mean_synthetic_score=None,
+            max_synthetic_score=None,
+            mean_synthetic_likelihood=None,
+            max_synthetic_likelihood=None,
             score_is_calibrated=False,
             effective_threshold=threshold,
             operating_threshold_source="unvalidated_heuristic",
@@ -409,8 +441,9 @@ def evaluate_audio(
             disclaimers=Disclaimers(),
         )
 
-    mean_score = float(np.mean([w.synthetic_score for w in eligible_windows]))
-    max_score = float(np.max([w.synthetic_score for w in eligible_windows]))
+    valid_scores = [w.synthetic_score for w in eligible_windows if w.synthetic_score is not None]
+    mean_score = float(np.mean(valid_scores)) if valid_scores else 0.0
+    max_score = float(np.max(valid_scores)) if valid_scores else 0.0
 
     # Task D: Actual consecutive-window logic
     # Requires at least 2 consecutive sustained hop-aligned windows if multiple windows exist,

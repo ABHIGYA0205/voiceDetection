@@ -194,6 +194,7 @@ def test_cli_deterministic_window_aggregation(tmp_path: Path) -> None:
     for w in result.windows:
         assert w.raw_spoof_logit is not None
         assert w.raw_bonafide_logit is not None
+        assert w.synthetic_score is not None
         assert 0.0 <= w.synthetic_score <= 1.0
         assert w.calibrated_synthetic_likelihood is None
         assert w.score_is_calibrated is False

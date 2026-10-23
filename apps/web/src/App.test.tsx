@@ -82,14 +82,25 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
         }),
       },
     });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({ is_mock_detector: false, device: 'cpu' }),
+      })
+    );
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('renders initial state with strict privacy and scope disclaimers', () => {
-    render(<App />);
+  it('renders initial state with strict privacy and scope disclaimers', async () => {
+    await act(async () => {
+      render(<App />);
+    });
 
     // Brand and Scope verification
     expect(screen.getByRole('heading', { level: 1, name: /VoiceShield/i })).toBeDefined();
@@ -422,6 +433,192 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
     expect(screen.getByText(/\[MOCK DETECTOR - TEST MODE\]/i)).toBeDefined();
   });
 
+  it('displays N/A for abstained file evaluation and does not render LOW or HIGH badge', async () => {
+    const abstainedResult = {
+      filename: 'silence.wav',
+      duration_seconds: 4.0,
+      total_windows: 1,
+      eligible_windows: 0,
+      mean_synthetic_score: null,
+      max_synthetic_score: null,
+      effective_threshold: 0.65,
+      operating_threshold_source: 'unvalidated_heuristic',
+      consecutive_windows_required: 2,
+      max_consecutive_high_windows: 0,
+      is_synthetic_suspected: false,
+      status: 'insufficient_evidence',
+      temporal_rule_explanation: 'Insufficient active speech across file windows.',
+      is_mock_detector: false,
+      windows: [
+        {
+          window_index: 1,
+          start_seconds: 0.0,
+          end_seconds: 4.0,
+          active_speech_seconds: 0.0,
+          is_eligible: false,
+          raw_spoof_logit: null,
+          raw_bonafide_logit: null,
+          raw_bonafide_score: null,
+          synthetic_score: null,
+          uncalibrated_synthetic_score: null,
+          is_synthetic_suspected: false,
+          reason: 'insufficient_speech',
+        },
+      ],
+    };
+
+    vi.mocked(fetch).mockImplementation((url: RequestInfo | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/api/v1/ready')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ is_mock_detector: false, device: 'cpu' }),
+        } as Response);
+      }
+      if (urlStr.includes('/api/v1/analyze/file')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve(abstainedResult),
+        } as Response);
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) } as Response);
+    });
+
+    render(<App />);
+
+    // Switch to file tab
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+    });
+
+    // Upload mock file
+    const file = new File(['dummy audio content'], 'silence.wav', { type: 'audio/wav' });
+    const fileInput = document.getElementById('audio-file-input') as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(fileInput, { target: { files: [file] } });
+    });
+
+    // Submit form
+    const submitBtn = screen.getByRole('button', { name: /Analyze Audio File/i });
+    await act(async () => {
+      fireEvent.click(submitBtn);
+    });
+
+    // Verify aggregate scores display "N/A — inference not performed"
+    const meanScoreEl = document.getElementById('file-mean-score');
+    const peakScoreEl = document.getElementById('file-peak-score');
+    expect(meanScoreEl?.textContent).toBe('N/A — inference not performed');
+    expect(peakScoreEl?.textContent).toBe('N/A — inference not performed');
+
+    // Verify per-window table displays "N/A"
+    const tableCells = screen.getAllByRole('cell');
+    const cellTexts = tableCells.map((c) => c.textContent);
+    expect(cellTexts).toContain('N/A');
+
+    // Verify window badge is ABSTAINED (badge-insufficient_evidence) and NOT LOW or HIGH badge
+    const badge = document.querySelector('.window-table .timeline-badge');
+    expect(badge).toBeDefined();
+    expect(badge?.textContent).toBe('ABSTAINED');
+    expect(badge?.classList.contains('badge-insufficient_evidence')).toBe(true);
+    expect(badge?.classList.contains('badge-low')).toBe(false);
+    expect(badge?.classList.contains('badge-high')).toBe(false);
+    expect(screen.getByText(/\[\.\.\. INSUFFICIENT SPEECH\]/i)).toBeDefined();
+  });
+
+  it('displays 0.000 for a real detector score of exactly 0.0', async () => {
+    const zeroScoreResult = {
+      filename: 'clean_zero.wav',
+      duration_seconds: 4.0,
+      total_windows: 1,
+      eligible_windows: 1,
+      mean_synthetic_score: 0.0,
+      max_synthetic_score: 0.0,
+      effective_threshold: 0.65,
+      operating_threshold_source: 'unvalidated_heuristic',
+      consecutive_windows_required: 2,
+      max_consecutive_high_windows: 0,
+      is_synthetic_suspected: false,
+      status: 'low',
+      temporal_rule_explanation: 'Low acoustic anomaly score — does not authenticate speech.',
+      is_mock_detector: false,
+      windows: [
+        {
+          window_index: 1,
+          start_seconds: 0.0,
+          end_seconds: 4.0,
+          active_speech_seconds: 3.5,
+          is_eligible: true,
+          raw_spoof_logit: -10.0,
+          raw_bonafide_logit: 10.0,
+          raw_bonafide_score: 1.0,
+          synthetic_score: 0.0,
+          uncalibrated_synthetic_score: 0.0,
+          is_synthetic_suspected: false,
+          reason: 'low_anomaly',
+        },
+      ],
+    };
+
+    vi.mocked(fetch).mockImplementation((url: RequestInfo | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/api/v1/ready')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ is_mock_detector: false, device: 'cpu' }),
+        } as Response);
+      }
+      if (urlStr.includes('/api/v1/analyze/file')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve(zeroScoreResult),
+        } as Response);
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) } as Response);
+    });
+
+    render(<App />);
+
+    // Switch to file tab
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+    });
+
+    // Upload mock file
+    const file = new File(['dummy audio content'], 'clean_zero.wav', { type: 'audio/wav' });
+    const fileInput = document.getElementById('audio-file-input') as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(fileInput, { target: { files: [file] } });
+    });
+
+    // Submit form
+    const submitBtn = screen.getByRole('button', { name: /Analyze Audio File/i });
+    await act(async () => {
+      fireEvent.click(submitBtn);
+    });
+
+    // Verify aggregate scores display "0.000" and NOT "N/A"
+    const meanScoreEl = document.getElementById('file-mean-score');
+    const peakScoreEl = document.getElementById('file-peak-score');
+    expect(meanScoreEl?.textContent).toBe('0.000');
+    expect(peakScoreEl?.textContent).toBe('0.000');
+
+    // Verify per-window table displays "0.000"
+    const tableCells = screen.getAllByRole('cell');
+    const cellTexts = tableCells.map((c) => c.textContent);
+    expect(cellTexts).toContain('0.000');
+
+    // Verify window badge is LOW ANOMALY
+    const badge = document.querySelector('.window-table .timeline-badge');
+    expect(badge).toBeDefined();
+    expect(badge?.textContent).toBe('LOW ANOMALY');
+    expect(badge?.classList.contains('badge-low')).toBe(true);
+    expect(screen.getByText(/\[✓ LOW ANOMALY\]/i)).toBeDefined();
+  });
+
   it('switches between stream and file analysis tabs seamlessly', async () => {
     render(<App />);
 
@@ -447,3 +644,5 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
     expect(screen.getByRole('button', { name: /Start Microphone Stream/i })).toBeDefined();
   });
 });
+
+

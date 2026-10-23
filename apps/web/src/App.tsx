@@ -833,15 +833,19 @@ export function App(): React.JSX.Element {
 
                 <div className="verdict-stat">
                   <div className="verdict-stat-label">Mean Synthetic Score</div>
-                  <div className="verdict-stat-value">
-                    {fileResult.mean_synthetic_score.toFixed(3)}
+                  <div className="verdict-stat-value" id="file-mean-score">
+                    {fileResult.mean_synthetic_score !== null
+                      ? fileResult.mean_synthetic_score.toFixed(3)
+                      : 'N/A — inference not performed'}
                   </div>
                 </div>
 
                 <div className="verdict-stat">
                   <div className="verdict-stat-label">Peak Window Score</div>
-                  <div className="verdict-stat-value">
-                    {fileResult.max_synthetic_score.toFixed(3)}
+                  <div className="verdict-stat-value" id="file-peak-score">
+                    {fileResult.max_synthetic_score !== null
+                      ? fileResult.max_synthetic_score.toFixed(3)
+                      : 'N/A — inference not performed'}
                   </div>
                 </div>
 
@@ -916,8 +920,8 @@ export function App(): React.JSX.Element {
                         <td>
                           {win.start_seconds.toFixed(1)}s - {win.end_seconds.toFixed(1)}s
                         </td>
-                        <td>{win.raw_bonafide_score.toFixed(3)}</td>
-                        <td>{win.synthetic_score.toFixed(3)}</td>
+                        <td>{win.raw_bonafide_score !== null ? win.raw_bonafide_score.toFixed(3) : 'N/A'}</td>
+                        <td>{win.synthetic_score !== null ? win.synthetic_score.toFixed(3) : 'N/A'}</td>
                         <td>{win.active_speech_seconds.toFixed(2)}s</td>
                         <td>
                           <span
