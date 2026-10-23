@@ -108,34 +108,38 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "split":
         print(f"Partitioning {len(records)} records using mode='{args.mode}'...")
-        if args.mode == "speaker_disjoint":
-            split_records = speaker_disjoint_split(
-                records,
-                train_ratio=args.train_ratio,
-                dev_ratio=args.dev_ratio,
-                test_ratio=args.test_ratio,
-                seed=args.seed,
-            )
-        elif args.mode == "generator_holdout":
-            split_records = generator_holdout_split(
-                records,
-                holdout_generators=args.holdouts,
-                train_ratio=args.train_ratio,
-                dev_ratio=args.dev_ratio,
-                test_ratio=args.test_ratio,
-                seed=args.seed,
-            )
-        elif args.mode == "codec_holdout":
-            split_records = codec_holdout_split(
-                records,
-                holdout_codecs=args.holdouts,
-                train_ratio=args.train_ratio,
-                dev_ratio=args.dev_ratio,
-                test_ratio=args.test_ratio,
-                seed=args.seed,
-            )
-        else:
-            sys.stderr.write(f"Unknown split mode: {args.mode}\n")
+        try:
+            if args.mode == "speaker_disjoint":
+                split_records = speaker_disjoint_split(
+                    records,
+                    train_ratio=args.train_ratio,
+                    dev_ratio=args.dev_ratio,
+                    test_ratio=args.test_ratio,
+                    seed=args.seed,
+                )
+            elif args.mode == "generator_holdout":
+                split_records = generator_holdout_split(
+                    records,
+                    holdout_generators=args.holdouts,
+                    train_ratio=args.train_ratio,
+                    dev_ratio=args.dev_ratio,
+                    test_ratio=args.test_ratio,
+                    seed=args.seed,
+                )
+            elif args.mode == "codec_holdout":
+                split_records = codec_holdout_split(
+                    records,
+                    holdout_codecs=args.holdouts,
+                    train_ratio=args.train_ratio,
+                    dev_ratio=args.dev_ratio,
+                    test_ratio=args.test_ratio,
+                    seed=args.seed,
+                )
+            else:
+                sys.stderr.write(f"Unknown split mode: {args.mode}\n")
+                return 1
+        except ValueError as exc:
+            sys.stderr.write(f"ERROR: Split validation failure: {exc}\n")
             return 1
 
         # Check leakage immediately on generated partition

@@ -45,15 +45,22 @@ If Condition A is placed in `train` and Condition B is placed in `test`, the mod
 
 ---
 
-## 4. Leakage Vectors & Automated Prevention
+## 4. Leakage Vectors & Atomic Connected-Component Splitting
+
+All split strategies (`speaker_disjoint_split`, `generator_holdout_split`, and `codec_holdout_split`) operate on **atomic connected components** built over the entire manifest:
+
+- **Connectivity Criteria**: Two records belong to the same component if they share any non-empty value of `speaker_id`, `source_utterance_id`, or exact `sha256` audio checksum.
+- **Transitivity**: Connectivity is strictly transitive (if A shares speaker with B, and B shares source utterance with C, then A, B, and C form one atomic component).
+- **Holdout Isolation**: In generator or codec holdout splits, if any record in a component uses a designated holdout generator or codec, the **entire component** is forbidden from `train` and assigned atomically to `dev` or `test`. Non-holdout records transitively linked to holdout records remain outside `train`.
+- **Ratio Approximation**: Exact split ratios may be approximate because atomic components cannot be divided. Ratios are distributed via the Hare-Niemeyer largest-remainder method without splitting components.
 
 | Leakage Dimension | Definition | Mitigation in VoiceShield Data Layer |
 | :--- | :--- | :--- |
-| **Speaker Leakage** | Same human speaker appears in both `train` and `dev`/`test`. | `speaker_disjoint_split` groups all records by `speaker_id` and places the entire speaker cluster into a single split. |
-| **Source Utterance Leakage** | Voice-converted (VC) speech or synthesis prompt uses the same transcript/recording as bona fide audio in another split. | `check_leakage` tracks `source_utterance_id` and verifies zero intersection between splits. |
-| **Generator Leakage** | The model is evaluated on the exact same vocoder or synthesis engine seen in training, masking failure on novel architectures. | `generator_holdout_split` isolates designated generator families exclusively for `dev` and `test`. |
-| **Codec Leakage** | Telephony codec artifacts are present in training, preventing true zero-shot channel evaluation. | `codec_holdout_split` isolates designated transmission codecs for evaluation splits. |
-| **Duplicate Audio** | Identical recordings labeled under different filenames or IDs. | `sha256` hashing is computed on all raw files and checked for duplicates across the entire manifest. |
+| **Speaker Leakage** | Same human speaker appears in both `train` and `dev`/`test`. | `speaker_disjoint_split` groups all transitively connected records into atomic components and assigns whole components to a single split. |
+| **Source Utterance Leakage** | Voice-converted (VC) speech or synthesis prompt uses the same transcript/recording as bona fide audio in another split. | `build_connected_components` transitively links records sharing `source_utterance_id`; `check_leakage` validates zero cross-split intersection. |
+| **Generator Leakage** | The model is evaluated on the exact same vocoder or synthesis engine seen in training, masking failure on novel architectures. | `generator_holdout_split` isolates entire connected components containing holdout generators strictly to `dev` or `test`. |
+| **Codec Leakage** | Telephony codec artifacts are present in training, preventing true zero-shot channel evaluation. | `codec_holdout_split` isolates entire connected components containing holdout codecs strictly to `dev` or `test`. |
+| **Duplicate Audio** | Identical recordings labeled under different filenames or IDs. | `sha256` hashing is computed on all raw files; exact checksum matches form connected components and are checked for integrity. |
 
 ---
 
@@ -90,4 +97,7 @@ Every sample is tracked in a standardized `.csv` or `.jsonl` manifest:
 ## 6. Evaluation Protocol Rules
 
 1. **Frozen Checkpoints**: Models evaluated on the `test` split must have weights frozen before evaluation.
-2. **No Post-Test Tuning**: Threshold selection, score calibration (temperature scaling), and early stopping must be conducted strictly on the `dev` split. The final `test` split is evaluated exactly once for final reporting.
+2. **Threshold Isolation**: Threshold selection (e.g. EER threshold) must be conducted strictly on the `dev` split (or `train` split only if no dev split exists). The `test` split is NEVER used for threshold optimization. Manifests with pure test records or unassigned records require an explicit deployment threshold.
+3. **Complete Score Coverage**: Evaluator requires 100% complete score coverage across all manifest sample IDs by default. Unknown score IDs are strictly rejected. Partial evaluation requires explicit opt-in (`--allow-partial-scores`) and is prominently reported with missing ID lists and coverage fractions.
+4. **Fail-Closed Calibration**: Raw/softmax scores bounded in $[0, 1]$ are still uncalibrated. Brier score, ECE, and reliability diagrams are unavailable (`N/A`) until a fitted, identified calibrator artifact is supplied and integrated.
+5. **Single-Class Guardrails**: If evaluation subsets contain only a single class, metrics dependent on two classes are marked undefined (`None`) rather than fabricating zero values.

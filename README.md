@@ -168,7 +168,7 @@ The FastAPI service exposes an ephemeral file upload analysis route guarded by c
 
 ## 9. Scientific Evaluation Toolkit
 
-VoiceShield provides an evaluation toolkit for benchmark analysis:
+VoiceShield provides a scientifically rigorous evaluation toolkit for benchmark analysis:
 
 ```bash
 # Evaluate model predictions against a canonical manifest
@@ -178,18 +178,28 @@ uv run voiceshield-eval \
   --direction higher_is_spoof \
   --threshold 0.65 \
   --output-dir reports/evaluation/
+
+# Allow explicit partial-score evaluation when some scores are missing
+uv run voiceshield-eval \
+  --manifest data/manifests/eval.jsonl \
+  --scores reports/runs/partial_predictions.jsonl \
+  --allow-partial-scores \
+  --output-dir reports/evaluation/
 ```
 
-Key capabilities:
-- **Discrimination metrics**: Linear-interpolated Equal Error Rate (EER), ROC-AUC, PR-AUC, minDCF with configurable costs ($C_{\text{miss}}, C_{\text{fa}}$) and prior $P_{\text{target}}$, operating FPR at target TPR levels (90%, 95%, 99%).
-- **Operating point metrics**: Confusion matrix (TP, FP, TN, FN), Precision, Recall, Specificity, F1 Score, and Balanced Accuracy.
-- **Probabilistic calibration**: Brier score and Expected Calibration Error (ECE) evaluated on calibrated probabilities.
-- **Clustered bootstrap inference**: 95% confidence intervals clustered by speaker ID or source utterance to prevent overconfident standard errors from overlapping windows.
-- **Multi-slice reporting**: Breakdown by generator family, source dataset, language, codec/channel condition, replay condition, and duration bucket.
-- **Cross-condition evaluation**: Matched, unseen-generator, unseen-channel, and external-test generalization tables.
-- **Latency profiling**: Median (p50), 95th percentile (p95), mean latency, and Real-Time Factor (RTF).
-- **Publication-quality artifacts**: Auto-generates Markdown summary tables, machine-readable `metrics.csv`, and figures (`roc_curve.png`, `score_distributions.png`, `calibration_curve.png`).
-- **Scientific guardrails**: Refuses to tune decision thresholds on splits marked `test`; clearly labels single-class metrics as undefined without fabricating zero values.
+Key capabilities and scientific guardrails:
+- **Connected-Component Partitioning**: Dataset splits are atomic connected components across declared `speaker_id`, `source_utterance_id`, and exact `sha256` checksum links. Holdout constraints operate on whole components. Split ratios may be approximate because atomic components cannot be divided.
+- **Strict Score Ingestion**: Preserves exact `0.0` detection scores without Boolean fallback; strictly rejects duplicate IDs, empty values, Boolean types, non-numeric values, and NaN/Inf scores.
+- **Complete Score Coverage by Default**: Default evaluation requires 100% complete score coverage across all unique manifest sample IDs. Unknown score IDs are refused. Partial evaluation requires explicit opt-in (`--allow-partial-scores`) and is prominently flagged in reports.
+- **Threshold-Selection Isolation**: Decision thresholds are selected on `dev` split only (or on `train` split only when no dev split is present); test splits and unassigned mixtures are never used for threshold optimization.
+- **Fail-Closed Calibration**: Raw/softmax scores are uncalibrated and do not produce Brier scores, Expected Calibration Error (ECE), or reliability diagrams without an identified, fitted calibrator artifact.
+- **Discrimination Metrics**: Linear-interpolated Equal Error Rate (EER), ROC-AUC, PR-AUC, minDCF with configurable costs ($C_{\text{miss}}, C_{\text{fa}}$) and prior $P_{\text{target}}$, operating FPR at target TPR levels (90%, 95%, 99%).
+- **Operating Point Metrics**: Confusion matrix (TP, FP, TN, FN), Precision, Recall, Specificity, F1 Score, and Balanced Accuracy.
+- **Clustered Bootstrap Inference**: 95% confidence intervals clustered by speaker ID or source utterance to prevent overconfident standard errors from repeated speakers.
+- **Multi-Slice Reporting**: Breakdown by generator family, source dataset, language, codec/channel condition, replay condition, and duration bucket.
+- **Cross-Condition Evaluation**: Matched, unseen-generator, unseen-channel, and external-test generalization tables.
+- **Latency Profiling**: Median (p50), 95th percentile (p95), mean latency, and Real-Time Factor (RTF).
+- **Publication-Quality Artifacts**: Auto-generates Markdown summary tables, machine-readable `metrics.csv`, and figures (`roc_curve.png`, `score_distributions.png`).
 
 
 

@@ -8,6 +8,7 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from voiceshield.config.loader import load_config
 from voiceshield.evaluation.aggregation import AggregationRule, WindowScoreRecord
@@ -64,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Aggregation rule if window scores are provided (default: mean).",
     )
     parser.add_argument(
+        "--allow-partial-scores",
+        action="store_true",
+        default=False,
+        help="Permit partial score evaluation when some manifest sample IDs are missing from scores (default: False).",
+    )
+    parser.add_argument(
         "--config",
         type=Path,
         default=None,
@@ -72,76 +79,288 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+SCORE_CANDIDATE_KEYS = [
+    "synthetic_score",
+    "uncalibrated_synthetic_score",
+    "score",
+    "mean_synthetic_likelihood",
+    "synthetic_likelihood",
+    "calibrated_synthetic_likelihood",
+]
+ID_CANDIDATE_KEYS = ["sample_id", "file_path", "path"]
+WINDOW_SCORE_KEYS = [
+    "synthetic_score",
+    "uncalibrated_synthetic_score",
+    "score",
+    "calibrated_synthetic_likelihood",
+    "raw_spoof_logit",
+]
+
+
+def _extract_sample_id(data: dict[str, Any], context: str = "") -> str:
+    for k in ID_CANDIDATE_KEYS:
+        if k in data:
+            val = data[k]
+            if val is None or (isinstance(val, str) and not val.strip()):
+                raise ValueError(
+                    f"Empty or missing sample identifier for key '{k}' {context}".strip()
+                )
+            if isinstance(val, str):
+                return val.strip()
+            return str(val).strip()
+    raise ValueError(
+        f"Missing sample identifier {context} (checked {ID_CANDIDATE_KEYS}) in: {data}".strip()
+    )
+
+
+def _extract_numeric_value(val: Any, key_name: str, context: str = "") -> float:
+    if val is None:
+        raise ValueError(f"Null score value for key '{key_name}' {context}".strip())
+    if isinstance(val, str) and not val.strip():
+        raise ValueError(f"Empty score value for key '{key_name}' {context}".strip())
+    if isinstance(val, bool):
+        raise ValueError(
+            f"Boolean score values are not permitted for key '{key_name}' {context}: {val}".strip()
+        )
+    try:
+        num = float(val)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"Non-numeric score value for key '{key_name}' {context}: {val}".strip()
+        ) from exc
+    import numpy as np
+
+    if not np.isfinite(num):
+        raise ValueError(
+            f"Non-finite score value (NaN or Inf) for key '{key_name}' {context}: {num}".strip()
+        )
+    return num
+
+
+def _extract_score(data: dict[str, Any], context: str = "") -> float:
+    for k in SCORE_CANDIDATE_KEYS:
+        if k in data:
+            return _extract_numeric_value(data[k], key_name=k, context=context)
+    raise ValueError(
+        f"Missing score {context} (checked keys: {SCORE_CANDIDATE_KEYS}) in: {data}".strip()
+    )
+
+
+def _extract_window_score(data: dict[str, Any], context: str = "") -> float:
+    for k in WINDOW_SCORE_KEYS:
+        if k in data:
+            return _extract_numeric_value(data[k], key_name=k, context=context)
+    raise ValueError(
+        f"Missing window score {context} (checked keys: {WINDOW_SCORE_KEYS}) in: {data}".strip()
+    )
+
+
 def load_scores_file(
     path: Path,
 ) -> tuple[dict[str, float] | list[WindowScoreRecord], dict[str, float] | None]:
-    """Parse scores and optional latency timings from JSONL, JSON, or CSV."""
+    """Parse scores and optional latency timings from JSONL, JSON, or CSV with strict validation."""
+    import numpy as np
+
     suffix = path.suffix.lower()
     sample_scores: dict[str, float] = {}
     window_records: list[WindowScoreRecord] = []
     timing_data: dict[str, float] = {}
+    seen_window_keys: set[tuple[str, int]] = set()
 
     if suffix == ".jsonl":
         with open(path, encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
+            for line_num, line in enumerate(f, start=1):
+                line_str = line.strip()
+                if not line_str:
                     continue
-                obj = json.loads(line)
-                sid = obj.get("sample_id") or obj.get("file_path") or obj.get("path")
-                if not sid:
-                    continue
-                # Check if it has window records
-                if "windows" in obj and isinstance(obj["windows"], list):
-                    for w in obj["windows"]:
+                try:
+                    obj = json.loads(line_str)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Invalid JSON at line {line_num} in {path}: {exc}") from exc
+                if not isinstance(obj, dict):
+                    raise ValueError(
+                        f"JSONL line {line_num} in {path} must be a JSON object, got {type(obj)}"
+                    )
+
+                sid = _extract_sample_id(obj, context=f"at line {line_num}")
+
+                has_windows = "windows" in obj and isinstance(obj["windows"], list)
+                has_sample_score = any(k in obj for k in SCORE_CANDIDATE_KEYS)
+
+                if has_windows and has_sample_score:
+                    raise ValueError(
+                        f"Ambiguous mixture at line {line_num}: sample '{sid}' contains both "
+                        "sample-level score and window-level scores ('windows')."
+                    )
+
+                if has_windows:
+                    win_list = obj["windows"]
+                    if not win_list:
+                        raise ValueError(
+                            f"Empty 'windows' list for sample '{sid}' at line {line_num}"
+                        )
+                    for w_idx, w in enumerate(win_list):
+                        if not isinstance(w, dict):
+                            raise ValueError(
+                                f"Window item {w_idx} for sample '{sid}' at line {line_num} must be a dict"
+                            )
+                        actual_idx = w.get("window_index", w_idx)
+                        if isinstance(actual_idx, bool) or not isinstance(actual_idx, int):
+                            raise ValueError(
+                                f"Invalid window_index for sample '{sid}' at line {line_num}: {actual_idx}"
+                            )
+                        win_key = (sid, actual_idx)
+                        if win_key in seen_window_keys:
+                            raise ValueError(
+                                f"Duplicate (sample_id, window_index) window record: {win_key}"
+                            )
+                        seen_window_keys.add(win_key)
+
+                        w_score = _extract_window_score(
+                            w, context=f"for sample '{sid}', window {actual_idx}"
+                        )
+                        start_sec = float(w.get("start_seconds", 0.0))
+                        end_sec = float(w.get("end_seconds", 4.0))
                         window_records.append(
                             WindowScoreRecord(
                                 sample_id=sid,
-                                window_index=w.get("window_index", 0),
-                                score=float(
-                                    w.get(
-                                        "calibrated_synthetic_likelihood",
-                                        w.get("raw_spoof_logit", 0.0),
-                                    )
-                                ),
-                                duration_seconds=float(w.get("end_seconds", 4.0))
-                                - float(w.get("start_seconds", 0.0)),
+                                window_index=actual_idx,
+                                score=w_score,
+                                duration_seconds=max(0.0, end_sec - start_sec),
                             )
                         )
-                # Check sample-level score
-                score = (
-                    obj.get("mean_synthetic_likelihood")
-                    or obj.get("synthetic_likelihood")
-                    or obj.get("score")
-                    or obj.get("calibrated_synthetic_likelihood")
-                )
-                if score is not None:
-                    sample_scores[sid] = float(score)
+                elif has_sample_score:
+                    score_val = _extract_score(
+                        obj, context=f"for sample '{sid}' at line {line_num}"
+                    )
+                    if sid in sample_scores:
+                        raise ValueError(
+                            f"Duplicate sample-level score ID '{sid}' at line {line_num}"
+                        )
+                    sample_scores[sid] = score_val
+                else:
+                    raise ValueError(f"Missing score for sample '{sid}' at line {line_num}")
 
                 if "duration_seconds" in obj and "latency_seconds" in obj:
-                    timing_data[sid] = float(obj["latency_seconds"])
+                    lat = obj["latency_seconds"]
+                    if lat is not None and not isinstance(lat, bool):
+                        try:
+                            lat_f = float(lat)
+                            if np.isfinite(lat_f):
+                                timing_data[sid] = lat_f
+                        except (ValueError, TypeError):
+                            pass
+
+        if len(window_records) > 0 and len(sample_scores) > 0:
+            raise ValueError(
+                f"Ambiguous mixture of sample-level scores ({len(sample_scores)} samples) and "
+                f"window-level scores ({len(window_records)} windows) in {path}."
+            )
 
     elif suffix == ".json":
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
             if isinstance(data, dict):
-                sample_scores = {k: float(v) for k, v in data.items()}
+                for k, v in data.items():
+                    if not isinstance(k, str) or not k.strip():
+                        raise ValueError(f"Empty or invalid sample ID key in JSON mapping: {k!r}")
+                    sc = _extract_numeric_value(v, key_name=k, context="in JSON dictionary")
+                    sample_scores[k.strip()] = sc
             elif isinstance(data, list):
-                for item in data:
-                    sid = item.get("sample_id") or item.get("file_path")
-                    if sid and "score" in item:
-                        sample_scores[sid] = float(item["score"])
+                for idx, item in enumerate(data, start=1):
+                    if not isinstance(item, dict):
+                        raise ValueError(
+                            f"Item {idx} in JSON list must be an object, got {type(item)}"
+                        )
+                    sid = _extract_sample_id(item, context=f"at item {idx}")
+                    has_windows = "windows" in item and isinstance(item["windows"], list)
+                    has_sample_score = any(k in item for k in SCORE_CANDIDATE_KEYS)
+                    if has_windows and has_sample_score:
+                        raise ValueError(
+                            f"Ambiguous mixture at item {idx}: sample '{sid}' contains both "
+                            "sample score and windows."
+                        )
+                    if has_windows:
+                        win_list = item["windows"]
+                        if not win_list:
+                            raise ValueError(
+                                f"Empty 'windows' list for sample '{sid}' at item {idx}"
+                            )
+                        for w_idx, w in enumerate(win_list):
+                            if not isinstance(w, dict):
+                                raise ValueError(
+                                    f"Window item {w_idx} for sample '{sid}' must be a dict"
+                                )
+                            actual_idx = w.get("window_index", w_idx)
+                            if isinstance(actual_idx, bool) or not isinstance(actual_idx, int):
+                                raise ValueError(
+                                    f"Invalid window_index for sample '{sid}': {actual_idx}"
+                                )
+                            win_key = (sid, actual_idx)
+                            if win_key in seen_window_keys:
+                                raise ValueError(
+                                    f"Duplicate (sample_id, window_index) window record: {win_key}"
+                                )
+                            seen_window_keys.add(win_key)
+                            w_score = _extract_window_score(
+                                w, context=f"for sample '{sid}', window {actual_idx}"
+                            )
+                            start_sec = float(w.get("start_seconds", 0.0))
+                            end_sec = float(w.get("end_seconds", 4.0))
+                            window_records.append(
+                                WindowScoreRecord(
+                                    sample_id=sid,
+                                    window_index=actual_idx,
+                                    score=w_score,
+                                    duration_seconds=max(0.0, end_sec - start_sec),
+                                )
+                            )
+                    elif has_sample_score:
+                        score_val = _extract_score(
+                            item, context=f"for sample '{sid}' at item {idx}"
+                        )
+                        if sid in sample_scores:
+                            raise ValueError(
+                                f"Duplicate sample-level score ID '{sid}' at item {idx}"
+                            )
+                        sample_scores[sid] = score_val
+                    else:
+                        raise ValueError(f"Missing score for sample '{sid}' at item {idx}")
+            else:
+                raise ValueError(
+                    f"JSON file {path} must contain a JSON object or list, got {type(data)}"
+                )
+
+        if len(window_records) > 0 and len(sample_scores) > 0:
+            raise ValueError(
+                f"Ambiguous mixture of sample-level scores ({len(sample_scores)} samples) and "
+                f"window-level scores ({len(window_records)} windows) in {path}."
+            )
+
     elif suffix == ".csv":
         with open(path, encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            for row in reader:
-                sid = row.get("sample_id") or row.get("file_path")
-                score_str = (
-                    row.get("score")
-                    or row.get("mean_synthetic_likelihood")
-                    or row.get("synthetic_likelihood")
-                )
-                if sid and score_str:
-                    sample_scores[sid] = float(score_str)
+            if not reader.fieldnames:
+                raise ValueError(f"CSV file is empty or missing headers: {path}")
+            for row_num, row in enumerate(reader, start=2):
+                sid = _extract_sample_id(row, context=f"at CSV row {row_num}")
+                if sid in sample_scores:
+                    raise ValueError(
+                        f"Duplicate sample-level score ID: '{sid}' at CSV row {row_num}"
+                    )
+                score_val = _extract_score(row, context=f"at CSV row {row_num}")
+                sample_scores[sid] = score_val
+                if "latency_seconds" in row and row["latency_seconds"]:
+                    try:
+                        lat_val = float(row["latency_seconds"])
+                        if np.isfinite(lat_val):
+                            timing_data[sid] = lat_val
+                    except ValueError:
+                        pass
+    else:
+        raise ValueError(
+            f"Unsupported score file extension '{suffix}'. Expected .jsonl, .json, or .csv"
+        )
 
     scores_out: dict[str, float] | list[WindowScoreRecord]
     if len(window_records) > 0 and len(sample_scores) == 0:
@@ -179,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
             direction=dir_enum,
             deployment_threshold=args.threshold,
             aggregation_rule=agg_enum,
+            allow_partial_scores=args.allow_partial_scores,
             config=cfg,
             timing_data=timings,
         )

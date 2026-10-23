@@ -47,14 +47,46 @@ def _fmt_ci(ci: tuple[float, float] | None, pct: bool = False) -> str:
 
 def generate_markdown_summary(report: FullEvaluationReport) -> str:
     """Generate human-readable Markdown summary report with comprehensive tables."""
+    cov = report.score_coverage
+    partial_warn_block = ""
+    if cov.partial_scores_allowed and cov.missing_score_count > 0:
+        partial_warn_block = (
+            "\n> ⚠️ **WARNING**: Evaluation was conducted with partial score coverage "
+            f"({cov.coverage_fraction:.1%}). "
+            f"{cov.missing_score_count} manifest record(s) were missing scores. "
+            "Reported metrics DO NOT represent the complete manifest.\n"
+        )
+
+    brier_val = (
+        _fmt(report.overall.curves.brier_score)
+        if report.overall.curves.brier_score is not None
+        else "N/A (no calibrator artifact supplied)"
+    )
+    ece_val = (
+        _fmt(report.overall.curves.ece, pct=True)
+        if report.overall.curves.ece is not None
+        else "N/A (no calibrator artifact supplied)"
+    )
+
     lines: list[str] = [
         "# VoiceShield Scientific Detection Evaluation Report",
         "",
         "> **Notice**: VoiceShield produces acoustic anomaly and synthetic speech likelihood metrics. "
         "Outputs do **NOT** prove caller identity and do **NOT** constitute fraud probabilities. "
         "Recommend independent secondary verification before taking advisory action.",
+        partial_warn_block,
+        "## 1. Score Coverage & Manifest Accounting",
         "",
-        "## 1. Provenance & Evaluation Metadata",
+        f"- **Manifest Total Records**: `{cov.manifest_record_count}`",
+        f"- **Manifest Unique Sample IDs**: `{cov.manifest_unique_id_count}`",
+        f"- **Provided Scores**: `{cov.provided_score_count}`",
+        f"- **Matched Scores**: `{cov.matched_score_count}`",
+        f"- **Missing Scores**: `{cov.missing_score_count}`",
+        f"- **Unknown Scores**: `{cov.unknown_score_count}`",
+        f"- **Coverage Fraction**: `{cov.coverage_fraction:.2%}`",
+        f"- **Partial Scores Allowed**: `{cov.partial_scores_allowed}`",
+        "",
+        "## 2. Provenance & Evaluation Metadata",
         "",
         f"- **Operating Decision Threshold**: `{report.operating_threshold}` ({report.deployment_threshold_source})",
         f"- **Score Direction**: `{report.metadata.get('score_direction', 'unknown')}`",
@@ -66,7 +98,7 @@ def generate_markdown_summary(report: FullEvaluationReport) -> str:
         "",
         "---",
         "",
-        "## 2. Overall Discrimination & Calibration Performance",
+        "## 3. Overall Discrimination & Calibration Performance",
         "",
         "| Metric | Value | 95% Clustered Bootstrap CI | Description |",
         "| :--- | :--- | :--- | :--- |",
@@ -80,8 +112,8 @@ def generate_markdown_summary(report: FullEvaluationReport) -> str:
         f"| **Recall (TPR)** | `{_fmt(report.overall.classification.recall, pct=True)}` | — | Correctly detected spoofs |",
         f"| **Specificity (TNR)** | `{_fmt(report.overall.classification.specificity, pct=True)}` | — | Correctly accepted bona fide |",
         f"| **False Positive Rate** | `{_fmt(report.overall.classification.fpr, pct=True)}` | — | False alarms on authentic speech |",
-        f"| **Brier Score** | `{_fmt(report.overall.curves.brier_score)}` | — | Probability calibration accuracy |",
-        f"| **Expected Calibration Error** | `{_fmt(report.overall.curves.ece, pct=True)}` | — | Expected calibration deviation |",
+        f"| **Brier Score** | `{brier_val}` | — | Probability calibration accuracy (N/A: no calibrator artifact supplied) |",
+        f"| **Expected Calibration Error** | `{ece_val}` | — | Expected calibration deviation (N/A: no calibrator artifact supplied) |",
         "",
     ]
 
@@ -274,6 +306,7 @@ def generate_evaluation_plots(
     scores_dict: dict[str, float],
     direction: ScoreDirection,
     output_dir: Path,
+    calibrated_spoof_probabilities: dict[str, float] | None = None,
 ) -> dict[str, Path]:
     """Generate and save publication-quality evaluation plots (ROC, DET, Score Distributions, Reliability)."""
     plot_dir = output_dir / "plots"
@@ -352,35 +385,43 @@ def generate_evaluation_plots(
     plt.close(fig)
     generated_plots["score_distributions"] = dist_path
 
-    # 3. Calibration Reliability Diagram (if scores are bounded probabilities)
-    min_s, max_s = float(np.min(raw_scores)), float(np.max(raw_scores))
-    if min_s >= -1e-5 and max_s <= 1.0 + 1e-5:
-        probs = np.clip(raw_scores, 0.0, 1.0)
-        bin_edges = np.linspace(0.0, 1.0, 11)
-        bin_confs: list[float] = []
-        bin_accs: list[float] = []
-        for i in range(10):
-            low, high = bin_edges[i], bin_edges[i + 1]
-            in_b = (probs >= low) & (probs <= high if i == 9 else probs < high)
-            if np.sum(in_b) > 0:
-                bin_confs.append(float(np.mean(probs[in_b])))
-                bin_accs.append(float(np.mean(y_arr[in_b])))
+    # 3. Calibration Reliability Diagram (ONLY if calibrated_spoof_probabilities is explicitly provided)
+    # Raw or bounded detector scores must NOT produce calibration claims or plots without a calibrator artifact.
+    if calibrated_spoof_probabilities is not None:
+        cal_prob_list = [
+            calibrated_spoof_probabilities[r.sample_id]
+            for r in records
+            if r.sample_id in calibrated_spoof_probabilities and r.sample_id in scores_dict
+        ]
+        if len(cal_prob_list) == len(y_arr):
+            probs = np.clip(np.array(cal_prob_list, dtype=np.float64), 0.0, 1.0)
+            bin_edges = np.linspace(0.0, 1.0, 11)
+            bin_confs: list[float] = []
+            bin_accs: list[float] = []
+            for i in range(10):
+                low, high = bin_edges[i], bin_edges[i + 1]
+                in_b = (probs >= low) & (probs <= high if i == 9 else probs < high)
+                if np.sum(in_b) > 0:
+                    bin_confs.append(float(np.mean(probs[in_b])))
+                    bin_accs.append(float(np.mean(y_arr[in_b])))
 
-        fig, ax = plt.subplots(figsize=(5.5, 5), dpi=150)
-        ax.plot([0, 1], [0, 1], color="#94a3b8", linestyle="--", label="Perfect Calibration")
-        ax.plot(bin_confs, bin_accs, marker="s", color="#7c3aed", lw=2, label="Model Confidence")
-        ax.set_xlabel("Mean Predicted Probability")
-        ax.set_ylabel("Empirical Spoof Proportion")
-        ax.set_title("Calibration Reliability Diagram")
-        ax.set_xlim((0.0, 1.0))
-        ax.set_ylim((0.0, 1.0))
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        cal_path = plot_dir / "calibration_curve.png"
-        fig.tight_layout()
-        fig.savefig(cal_path)
-        plt.close(fig)
-        generated_plots["calibration_curve"] = cal_path
+            fig, ax = plt.subplots(figsize=(5.5, 5), dpi=150)
+            ax.plot([0, 1], [0, 1], color="#94a3b8", linestyle="--", label="Perfect Calibration")
+            ax.plot(
+                bin_confs, bin_accs, marker="s", color="#7c3aed", lw=2, label="Model Confidence"
+            )
+            ax.set_xlabel("Mean Predicted Probability")
+            ax.set_ylabel("Empirical Spoof Proportion")
+            ax.set_title("Calibration Reliability Diagram")
+            ax.set_xlim((0.0, 1.0))
+            ax.set_ylim((0.0, 1.0))
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            cal_path = plot_dir / "calibration_curve.png"
+            fig.tight_layout()
+            fig.savefig(cal_path)
+            plt.close(fig)
+            generated_plots["calibration_curve"] = cal_path
 
     return generated_plots
 
@@ -391,6 +432,7 @@ def save_evaluation_report(
     records: list[ManifestRecord] | None = None,
     scores_dict: dict[str, float] | None = None,
     direction: ScoreDirection = ScoreDirection.HIGHER_IS_SPOOF,
+    calibrated_spoof_probabilities: dict[str, float] | None = None,
 ) -> Path:
     """Save complete evaluation report (summary.md, metrics.csv, and plots) to a versioned directory."""
     target_dir = Path(output_dir)
@@ -407,6 +449,12 @@ def save_evaluation_report(
 
     # 3. Save plots if raw data provided
     if records is not None and scores_dict is not None:
-        generate_evaluation_plots(records, scores_dict, direction, target_dir)
+        generate_evaluation_plots(
+            records=records,
+            scores_dict=scores_dict,
+            direction=direction,
+            output_dir=target_dir,
+            calibrated_spoof_probabilities=calibrated_spoof_probabilities,
+        )
 
     return target_dir

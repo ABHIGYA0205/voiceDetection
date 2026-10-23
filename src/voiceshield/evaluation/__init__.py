@@ -12,6 +12,7 @@ from voiceshield.evaluation.evaluator import (
     FullEvaluationReport,
     GroupEvaluationResult,
     LatencyMetrics,
+    ScoreCoverage,
     ThresholdOptimizationError,
     evaluate_deepfake_detector,
 )
@@ -27,6 +28,7 @@ from voiceshield.evaluation.metrics import (
     compute_eer_interpolated,
     compute_fpr_at_target_tprs,
     compute_min_dcf,
+    normalize_calibrated_probabilities,
     normalize_scores_to_higher_is_spoof,
     validate_score_direction,
 )
@@ -45,6 +47,7 @@ __all__ = [
     "FullEvaluationReport",
     "GroupEvaluationResult",
     "LatencyMetrics",
+    "ScoreCoverage",
     "ScoreDirection",
     "ThresholdOptimizationError",
     "WindowScoreRecord",
@@ -61,6 +64,7 @@ __all__ = [
     "export_metrics_csv",
     "generate_evaluation_plots",
     "generate_markdown_summary",
+    "normalize_calibrated_probabilities",
     "normalize_scores_to_higher_is_spoof",
     "save_evaluation_report",
     "validate_score_direction",

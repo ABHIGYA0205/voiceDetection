@@ -86,6 +86,19 @@ def load_manifest(path: str | Path) -> list[ManifestRecord]:
             f"Validation failed for manifest {file_path} with {len(errors)} error(s):\n  - {summary}{more}"
         )
 
+    # Validate uniqueness of sample_id values
+    seen_sids: set[str] = set()
+    dup_sids: list[str] = []
+    for r in records:
+        if r.sample_id in seen_sids and r.sample_id not in dup_sids:
+            dup_sids.append(r.sample_id)
+        seen_sids.add(r.sample_id)
+
+    if dup_sids:
+        raise ManifestIOError(
+            f"Duplicate sample_id found in manifest {file_path}: {dup_sids[:5]} (total {len(dup_sids)} duplicate(s))."
+        )
+
     return records
 
 

@@ -333,6 +333,29 @@ def compute_min_dcf(
     return round(float(c_norm[best_idx]), 4), round(float(thresholds[best_idx]), 6)
 
 
+def normalize_calibrated_probabilities(
+    probs: np.ndarray[Any, np.dtype[np.float64]] | list[float],
+    direction: ScoreDirection = ScoreDirection.HIGHER_IS_SPOOF,
+) -> np.ndarray[Any, np.dtype[np.float64]]:
+    """Normalize calibrated probabilities so that output represents P(spoof).
+
+    Binary labels: 0 = bona fide, 1 = spoof.
+    If direction == HIGHER_IS_BONAFIDE, input is P(bona fide) and is converted via P(spoof) = 1 - P(bona fide).
+
+    Raises:
+        ValueError: If probabilities contain NaN, Inf, or values outside [0.0, 1.0].
+    """
+    arr = np.asarray(probs, dtype=np.float64)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("Calibrated probabilities must be finite (no NaN or Inf).")
+    if np.any(arr < -1e-6) or np.any(arr > 1.0 + 1e-6):
+        raise ValueError("Calibrated probabilities must be bounded in [0.0, 1.0].")
+    clipped = np.clip(arr, 0.0, 1.0)
+    if direction == ScoreDirection.HIGHER_IS_BONAFIDE:
+        return 1.0 - clipped
+    return clipped
+
+
 def compute_brier_and_ece(
     y_true: np.ndarray[Any, np.dtype[np.int_]],
     scores: np.ndarray[Any, np.dtype[np.float64]],
@@ -379,12 +402,13 @@ def compute_brier_and_ece(
 def compute_all_curve_metrics(
     y_true: np.ndarray[Any, np.dtype[np.int_]],
     scores_higher_spoof: np.ndarray[Any, np.dtype[np.float64]],
-    raw_scores: np.ndarray[Any, np.dtype[np.float64]],
+    raw_scores: np.ndarray[Any, np.dtype[np.float64]] | None = None,
     target_tprs: list[float] | None = None,
     c_miss: float = 1.0,
     c_fa: float = 10.0,
     p_target: float = 0.05,
     ece_bins: int = 10,
+    calibrated_spoof_probabilities: np.ndarray[Any, np.dtype[np.float64]] | None = None,
 ) -> CurveMetrics:
     """Compute complete set of threshold-independent discrimination and calibration metrics."""
     if target_tprs is None:
@@ -423,8 +447,14 @@ def compute_all_curve_metrics(
         y_true, scores_higher_spoof, c_miss=c_miss, c_fa=c_fa, p_target=p_target
     )
 
-    # Calibration: check if raw_scores is a valid probability distribution
-    brier, ece = compute_brier_and_ece(y_true, raw_scores, num_bins=ece_bins)
+    # Calibration: compute ONLY when calibrated_spoof_probabilities is explicitly provided.
+    # Raw/softmax scores must NOT produce calibration claims merely because they are bounded.
+    brier: float | None = None
+    ece: float | None = None
+    if calibrated_spoof_probabilities is not None:
+        brier, ece = compute_brier_and_ece(
+            y_true, calibrated_spoof_probabilities, num_bins=ece_bins
+        )
 
     return CurveMetrics(
         roc_auc=roc_auc,

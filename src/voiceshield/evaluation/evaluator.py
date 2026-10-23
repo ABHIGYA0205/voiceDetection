@@ -61,10 +61,26 @@ class GroupEvaluationResult(BaseModel):
     bootstrap_cis_95: dict[str, tuple[float, float] | None] = Field(default_factory=dict)
 
 
+class ScoreCoverage(BaseModel):
+    """Structured accounting of manifest records and ingested prediction scores."""
+
+    manifest_record_count: int
+    manifest_unique_id_count: int
+    provided_score_count: int
+    matched_score_count: int
+    missing_score_count: int
+    unknown_score_count: int
+    coverage_fraction: float
+    missing_sample_ids: list[str] = Field(default_factory=list)
+    unknown_sample_ids: list[str] = Field(default_factory=list)
+    partial_scores_allowed: bool = False
+
+
 class FullEvaluationReport(BaseModel):
     """Complete evaluation report containing overall, sliced, cross-condition, and latency results."""
 
     overall: GroupEvaluationResult
+    score_coverage: ScoreCoverage
     by_generator: list[GroupEvaluationResult] = Field(default_factory=list)
     by_source_dataset: list[GroupEvaluationResult] = Field(default_factory=list)
     by_language: list[GroupEvaluationResult] = Field(default_factory=list)
@@ -76,7 +92,7 @@ class FullEvaluationReport(BaseModel):
         description="Cross-condition results: 'matched', 'unseen_generator', 'unseen_channel', 'external_test'.",
     )
     deployment_threshold_source: str = Field(
-        description="Source of deployment threshold ('explicit', 'selected_on_dev')."
+        description="Source of deployment threshold ('explicit', 'selected_on_dev_eer', 'selected_on_train_eer')."
     )
     operating_threshold: float
     latency: LatencyMetrics | None = None
@@ -104,6 +120,7 @@ def evaluate_sample_group(
     threshold: float,
     config: VoiceShieldConfig | None = None,
     compute_bootstrap: bool = True,
+    calibrated_spoof_probabilities: dict[str, float] | None = None,
 ) -> GroupEvaluationResult:
     """Evaluate discrimination and calibration metrics for a specific subset of manifest records."""
     eval_cfg = config.evaluation if config else None
@@ -115,10 +132,11 @@ def evaluate_sample_group(
     boot_ci = eval_cfg.bootstrap_ci_level if eval_cfg else 0.95
     ece_bins = eval_cfg.ece_num_bins if eval_cfg else 10
 
-    # Collect labels, raw scores, and cluster IDs
+    # Collect labels, raw scores, cluster IDs, and optional calibrated probabilities
     y_list: list[int] = []
     raw_score_list: list[float] = []
     cluster_list: list[str] = []
+    cal_prob_list: list[float] = []
 
     for r in records:
         if r.sample_id in scores_dict:
@@ -126,10 +144,18 @@ def evaluate_sample_group(
             raw_score_list.append(scores_dict[r.sample_id])
             # Grouping key for bootstrap: speaker_id if available, else sample_id
             cluster_list.append(r.speaker_id if r.speaker_id else r.sample_id)
+            if (
+                calibrated_spoof_probabilities is not None
+                and r.sample_id in calibrated_spoof_probabilities
+            ):
+                cal_prob_list.append(calibrated_spoof_probabilities[r.sample_id])
 
     y_arr = np.array(y_list, dtype=int)
     raw_scores = np.array(raw_score_list, dtype=np.float64)
     cluster_arr = np.array(cluster_list)
+    cal_probs_arr: np.ndarray[Any, np.dtype[np.float64]] | None = None
+    if calibrated_spoof_probabilities is not None and len(cal_prob_list) == len(y_list):
+        cal_probs_arr = np.array(cal_prob_list, dtype=np.float64)
 
     if len(y_arr) == 0:
         # Empty group
@@ -176,6 +202,7 @@ def evaluate_sample_group(
         y_true=y_arr,
         scores_higher_spoof=scores_norm,
         raw_scores=raw_scores,
+        calibrated_spoof_probabilities=cal_probs_arr,
         target_tprs=target_tprs,
         c_miss=c_miss,
         c_fa=c_fa,
@@ -246,9 +273,11 @@ def evaluate_deepfake_detector(
     direction: ScoreDirection = ScoreDirection.HIGHER_IS_SPOOF,
     deployment_threshold: float | None = None,
     aggregation_rule: AggregationRule = AggregationRule.MEAN,
+    allow_partial_scores: bool = False,
     config: VoiceShieldConfig | None = None,
     timing_data: dict[str, float] | None = None,
     metadata: dict[str, Any] | None = None,
+    calibrated_spoof_probabilities: dict[str, float] | None = None,
 ) -> FullEvaluationReport:
     """Evaluate deepfake detector with scientific rigor, guardrails, and detailed slicing.
 
@@ -258,18 +287,32 @@ def evaluate_deepfake_detector(
         direction: Declared score direction (higher_is_spoof or higher_is_bonafide).
         deployment_threshold: Optional external deployment threshold.
         aggregation_rule: Aggregation strategy if window scores are supplied.
+        allow_partial_scores: If True, allow missing scores for manifest records (default: False).
         config: VoiceShieldConfig object with evaluation and DCF settings.
         timing_data: Optional mapping of sample_id to elapsed inference seconds.
         metadata: Optional dictionary with run/model/commit hashes.
+        calibrated_spoof_probabilities: Optional mapping of sample_id to calibrated spoof probabilities.
 
     Returns:
-        FullEvaluationReport with overall, sliced, cross-condition, and latency metrics.
+        FullEvaluationReport with overall, score coverage, sliced, cross-condition, and latency metrics.
 
     Raises:
-        ThresholdOptimizationError: If asked to optimize a threshold on a test split.
-        ValueError: If empirical scores contradict declared score direction.
+        ThresholdOptimizationError: If asked to optimize a threshold on a test split, an unassigned manifest,
+            or if the optimization split lacks classes or defined EER.
+        ValueError: If manifest or scores violate integrity, coverage, or empirical direction constraints.
     """
-    # 1. Load manifest records if path provided
+    # 0. Validate explicit deployment threshold if provided
+    if deployment_threshold is not None:
+        if (
+            isinstance(deployment_threshold, bool)
+            or not isinstance(deployment_threshold, (int, float))
+            or not np.isfinite(deployment_threshold)
+        ):
+            raise ValueError(
+                f"Explicit deployment threshold must be a finite number, got {deployment_threshold}"
+            )
+
+    # 1. Load manifest records if path provided and check uniqueness
     records: list[ManifestRecord]
     if isinstance(manifest, (str, Path)):
         records = load_manifest(Path(manifest))
@@ -279,14 +322,99 @@ def evaluate_deepfake_detector(
     if not records:
         raise ValueError("Cannot evaluate an empty manifest.")
 
-    # 2. Aggregate window scores if necessary
+    seen_manifest_ids: set[str] = set()
+    dup_manifest_ids: list[str] = []
+    for r in records:
+        if r.sample_id in seen_manifest_ids:
+            dup_manifest_ids.append(r.sample_id)
+        seen_manifest_ids.add(r.sample_id)
+    if dup_manifest_ids:
+        raise ValueError(f"Duplicate sample_id found in manifest: {sorted(set(dup_manifest_ids))}")
+
+    # 2. Ingest and validate scores
     scores_dict: dict[str, float]
     if isinstance(scores, list):
+        # Validate window records
+        seen_win_keys: set[tuple[str, int]] = set()
+        for w in scores:
+            if not isinstance(w.sample_id, str) or not w.sample_id.strip():
+                raise ValueError("Window record missing or empty sample_id.")
+            if (
+                isinstance(w.score, bool)
+                or not isinstance(w.score, (int, float))
+                or not np.isfinite(w.score)
+            ):
+                raise ValueError(
+                    f"Window score for sample '{w.sample_id}', window {w.window_index} "
+                    f"must be a finite number, got {w.score}"
+                )
+            win_key = (w.sample_id, w.window_index)
+            if win_key in seen_win_keys:
+                raise ValueError(f"Duplicate (sample_id, window_index) window record: {win_key}")
+            seen_win_keys.add(win_key)
         scores_dict = aggregate_window_scores(scores, rule=aggregation_rule)
+    elif isinstance(scores, dict):
+        scores_dict = {}
+        for sid, sc in scores.items():
+            if not isinstance(sid, str) or not sid.strip():
+                raise ValueError("Missing or empty sample_id in scores mapping.")
+            if isinstance(sc, bool) or not isinstance(sc, (int, float)) or not np.isfinite(sc):
+                raise ValueError(f"Score for sample '{sid}' must be a finite number, got {sc}")
+            scores_dict[sid] = float(sc)
     else:
-        scores_dict = scores
+        raise ValueError(
+            f"Scores must be a dict mapping sample_id to float or a list of WindowScoreRecord, got {type(scores)}"
+        )
 
-    # 3. Test score direction
+    # 3. Score Coverage Accounting
+    manifest_unique_ids = seen_manifest_ids
+    provided_ids = set(scores_dict.keys())
+    matched_ids = manifest_unique_ids.intersection(provided_ids)
+    missing_ids = sorted(manifest_unique_ids - matched_ids)
+    unknown_ids = sorted(provided_ids - manifest_unique_ids)
+
+    manifest_record_count = len(records)
+    manifest_unique_id_count = len(manifest_unique_ids)
+    provided_score_count = len(scores_dict)
+    matched_score_count = len(matched_ids)
+    missing_score_count = len(missing_ids)
+    unknown_score_count = len(unknown_ids)
+    coverage_fraction = (
+        matched_score_count / manifest_unique_id_count if manifest_unique_id_count > 0 else 0.0
+    )
+
+    # Unknown score IDs are strictly rejected in all modes
+    if unknown_score_count > 0:
+        raise ValueError(
+            f"Provided scores contain {unknown_score_count} unknown sample ID(s) not present in manifest: "
+            f"{unknown_ids[:10]}"
+        )
+
+    # Incomplete score coverage fails by default
+    if not allow_partial_scores and missing_score_count > 0:
+        raise ValueError(
+            f"Incomplete score coverage: {missing_score_count} of {manifest_unique_id_count} manifest sample(s) "
+            f"are missing scores ({coverage_fraction:.1%} coverage). Missing sample IDs: {missing_ids[:10]}. "
+            "Use allow_partial_scores=True / --allow-partial-scores to explicitly permit partial evaluation."
+        )
+
+    if matched_score_count == 0:
+        raise ValueError("No manifest samples matched the provided scores.")
+
+    score_coverage = ScoreCoverage(
+        manifest_record_count=manifest_record_count,
+        manifest_unique_id_count=manifest_unique_id_count,
+        provided_score_count=provided_score_count,
+        matched_score_count=matched_score_count,
+        missing_score_count=missing_score_count,
+        unknown_score_count=unknown_score_count,
+        coverage_fraction=coverage_fraction,
+        missing_sample_ids=missing_ids,
+        unknown_sample_ids=unknown_ids,
+        partial_scores_allowed=allow_partial_scores,
+    )
+
+    # 4. Test score direction on matched records
     matched_y: list[int] = []
     matched_scores: list[float] = []
     for r in records:
@@ -294,57 +422,91 @@ def evaluate_deepfake_detector(
             matched_y.append(1 if r.label == "spoof" else 0)
             matched_scores.append(scores_dict[r.sample_id])
 
-    if len(matched_y) == 0:
-        raise ValueError("No manifest samples matched the provided scores.")
-
     validate_score_direction(
         y_true=np.array(matched_y, dtype=int),
         scores=np.array(matched_scores, dtype=np.float64),
         direction=direction,
     )
 
-    # 4. Enforce Threshold Guardrail: Never optimize threshold on a test split
-    is_pure_test_split = all(r.split == "test" for r in records if r.split is not None)
-    has_dev_split = any(r.split == "dev" for r in records)
-
+    # 5. Enforce Threshold Guardrail: Test-Set Isolation and Split Policies
     operating_threshold: float
     threshold_source: str
 
     if deployment_threshold is not None:
-        operating_threshold = deployment_threshold
+        operating_threshold = float(deployment_threshold)
         threshold_source = "explicit_deployment_threshold"
     else:
-        if is_pure_test_split:
+        splits_present = {r.split for r in records}
+        non_none_splits = {s for s in splits_present if s is not None}
+
+        # 5.a. All records unassigned: refuse optimization
+        if not non_none_splits:
+            raise ThresholdOptimizationError(
+                "Scientific Guardrail Violation: All records in manifest are unassigned (split=None). "
+                "Refusing to optimize decision threshold over an unknown mixture. "
+                "An explicit deployment threshold must be supplied."
+            )
+
+        # 5.b. Pure test manifest: refuse optimization
+        if non_none_splits == {"test"}:
             raise ThresholdOptimizationError(
                 "Scientific Guardrail Violation: Refusing to optimize decision threshold on split marked 'test'. "
-                "The deployment threshold must be supplied explicitly or selected on a separate 'dev' split."
+                "The deployment threshold must be supplied explicitly or selected on a separate dev/train split."
             )
-        elif has_dev_split:
-            # Fit threshold on 'dev' split using EER
-            dev_records = [r for r in records if r.split == "dev"]
-            dev_y = np.array(
-                [1 if r.label == "spoof" else 0 for r in dev_records if r.sample_id in scores_dict]
-            )
-            dev_s = np.array(
-                [scores_dict[r.sample_id] for r in dev_records if r.sample_id in scores_dict]
-            )
-            dev_norm = normalize_scores_to_higher_is_spoof(dev_s, direction)
 
-            eer_val, eer_th = compute_eer_interpolated(dev_y, dev_norm)
-            if eer_th is None:
-                operating_threshold = 0.5
-            else:
-                operating_threshold = float(eer_th)
-            threshold_source = f"selected_on_dev_eer (threshold={operating_threshold:.4f})"
+        candidate_records: list[ManifestRecord]
+        source_prefix: str
+        source_split_name: str
+
+        if "dev" in splits_present:
+            candidate_records = [r for r in records if r.split == "dev"]
+            source_prefix = "selected_on_dev_eer"
+            source_split_name = "dev"
+        elif "train" in splits_present:
+            candidate_records = [r for r in records if r.split == "train"]
+            source_prefix = "selected_on_train_eer"
+            source_split_name = "train"
         else:
-            # If split is 'train' or unassigned, optimize on train/dev
-            all_y = np.array(matched_y, dtype=int)
-            all_s = normalize_scores_to_higher_is_spoof(np.array(matched_scores), direction)
-            _, opt_th = compute_eer_interpolated(all_y, all_s)
-            operating_threshold = float(opt_th) if opt_th is not None else 0.5
-            threshold_source = f"selected_on_train_eer (threshold={operating_threshold:.4f})"
+            raise ThresholdOptimizationError(
+                f"No valid 'dev' or 'train' split available for threshold optimization (found: {sorted(str(s) for s in non_none_splits)}). "
+                "An explicit deployment threshold must be supplied."
+            )
 
-    # 5. Overall evaluation
+        # 5.c. Selection split must have complete score coverage
+        missing_in_thresh = [
+            r.sample_id for r in candidate_records if r.sample_id not in scores_dict
+        ]
+        if missing_in_thresh:
+            raise ThresholdOptimizationError(
+                f"Threshold selection split '{source_split_name}' has incomplete score coverage: "
+                f"{len(missing_in_thresh)} of {len(candidate_records)} records missing scores. "
+                "Threshold optimization requires complete score coverage on the selection split."
+            )
+
+        # 5.d. Selection split must contain both classes
+        thresh_labels = {r.label for r in candidate_records}
+        if len(thresh_labels) < 2:
+            raise ThresholdOptimizationError(
+                f"Threshold selection split '{source_split_name}' contains only one class ({thresh_labels}). "
+                "Both bona-fide and spoof classes are required to optimize an operating threshold."
+            )
+
+        # 5.e. Compute interpolated EER on selection split
+        thresh_y = np.array([1 if r.label == "spoof" else 0 for r in candidate_records], dtype=int)
+        thresh_s = np.array([scores_dict[r.sample_id] for r in candidate_records], dtype=np.float64)
+        thresh_norm = normalize_scores_to_higher_is_spoof(thresh_s, direction)
+
+        eer_val, eer_th = compute_eer_interpolated(thresh_y, thresh_norm)
+        if eer_th is None or not np.isfinite(eer_th):
+            raise ThresholdOptimizationError(
+                f"EER threshold optimization is undefined on '{source_split_name}' split. "
+                "Cannot determine operating threshold."
+            )
+
+        operating_threshold = float(eer_th)
+        threshold_source = f"{source_prefix} (threshold={operating_threshold:.4f})"
+
+    # 6. Overall evaluation
     overall_res = evaluate_sample_group(
         group_name="Overall",
         records=records,
@@ -353,6 +515,7 @@ def evaluate_deepfake_detector(
         threshold=operating_threshold,
         config=config,
         compute_bootstrap=True,
+        calibrated_spoof_probabilities=calibrated_spoof_probabilities,
     )
 
     # 6. Breakdown by Generator
@@ -551,6 +714,7 @@ def evaluate_deepfake_detector(
 
     return FullEvaluationReport(
         overall=overall_res,
+        score_coverage=score_coverage,
         by_generator=by_generator,
         by_source_dataset=by_source,
         by_language=by_language,

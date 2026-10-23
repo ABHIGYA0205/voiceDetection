@@ -556,10 +556,13 @@ def test_full_evaluation_report_and_export(tmp_path: Path) -> None:
     assert (out_dir / "metrics.csv").exists()
     assert (out_dir / "plots" / "roc_curve.png").exists()
     assert (out_dir / "plots" / "score_distributions.png").exists()
-    assert (out_dir / "plots" / "calibration_curve.png").exists()
+    # Calibration plot must NOT be generated from raw bounded scores without an explicit calibrator artifact
+    assert not (out_dir / "plots" / "calibration_curve.png").exists()
 
     md_content = (out_dir / "summary.md").read_text(encoding="utf-8")
     assert "VoiceShield Scientific Detection Evaluation Report" in md_content
+    assert "Score Coverage & Manifest Accounting" in md_content
+    assert "N/A: no calibrator artifact supplied" in md_content
     assert "ROC-AUC" in md_content
     assert "minDCF" in md_content
     assert "Breakdown by Synthesis / Voice Conversion Generator" in md_content
