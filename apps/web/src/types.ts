@@ -75,7 +75,7 @@ export interface ServerWindowResult {
   calibrated_score?: number | null;
   decision: {
     state: string;
-    synthetic_score?: number;
+    synthetic_score?: number | null;
     score_is_calibrated?: boolean;
     calibrated_score?: number | null;
     smoothed_score: number;

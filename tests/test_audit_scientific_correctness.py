@@ -32,6 +32,7 @@ from voiceshield.models.aasist_adapter import (
 )
 from voiceshield.models.base import BaseDetector, DetectorOutput
 from voiceshield.pipeline.file_evaluator import evaluate_audio
+from voiceshield.streaming.policy import DecisionState, TemporalDecisionPolicy
 from voiceshield.vendor.aasist import AASISTModel
 
 
@@ -437,6 +438,118 @@ def test_streaming_api_uncalibrated_score_semantics() -> None:
             assert received_window, "Expected at least one window_result from streaming WebSocket"
 
             # Stop
+            websocket.send_json({"type": "stop"})
+            stop_ack = websocket.receive_json()
+            assert stop_ack["type"] == "session_stopped"
+
+
+def test_temporal_decision_insufficient_speech_synthetic_score_is_none() -> None:
+    """Requirement: An insufficient-speech TemporalDecision has synthetic_score is None."""
+    policy = TemporalDecisionPolicy()
+
+    # 1. Direct evaluate_insufficient_speech call
+    d_direct = policy.evaluate_insufficient_speech(
+        window_index=0,
+        window_start_sec=0.0,
+        window_end_sec=4.0,
+        speech_seconds=0.2,
+    )
+    assert d_direct.state == DecisionState.INSUFFICIENT_EVIDENCE
+    assert d_direct.synthetic_score is None
+    assert d_direct.calibrated_score is None
+    assert d_direct.score_is_calibrated is False
+    assert d_direct.smoothed_score == 0.0
+
+    # 2. History smoothing retention when earlier window was evaluated
+    d_prev = policy.evaluate(
+        synthetic_score=0.75,
+        speech_seconds=2.5,
+        window_index=1,
+        window_start_sec=1.0,
+        window_end_sec=5.0,
+    )
+    assert d_prev.synthetic_score == 0.75
+    prev_smoothed = d_prev.smoothed_score
+
+    # Abstained window evaluates insufficient speech and preserves previous smoothed score
+    d_abstained = policy.evaluate(
+        synthetic_score=0.99,  # Even if a raw score is passed, low speech must abstain
+        speech_seconds=0.1,
+        window_index=2,
+        window_start_sec=2.0,
+        window_end_sec=6.0,
+    )
+    assert d_abstained.state == DecisionState.INSUFFICIENT_EVIDENCE
+    assert d_abstained.synthetic_score is None
+    assert d_abstained.calibrated_score is None
+    assert d_abstained.score_is_calibrated is False
+    # Smoothed score retains previous history without being overwritten by absent score
+    assert d_abstained.smoothed_score == prev_smoothed
+
+
+def test_temporal_decision_exact_zero_score_remains_numeric_zero() -> None:
+    """Requirement: A real inferred score of exactly 0.0 remains numeric 0.0."""
+    policy = TemporalDecisionPolicy()
+
+    decision = policy.evaluate(
+        synthetic_score=0.0,
+        speech_seconds=3.0,
+        window_index=0,
+        window_start_sec=0.0,
+        window_end_sec=4.0,
+    )
+    assert decision.synthetic_score is not None
+    assert decision.synthetic_score == 0.0
+    assert isinstance(decision.synthetic_score, float)
+    assert decision.score_is_calibrated is False
+    assert decision.calibrated_score is None
+    assert decision.state == DecisionState.LOW
+
+
+def test_streaming_websocket_abstained_window_nested_decision_score_is_null() -> None:
+    """Requirement: Abstained WebSocket window has top-level and nested synthetic_score is None."""
+    with TestClient(app) as client:
+        with client.websocket_connect("/api/v1/stream") as websocket:
+            # 1. Start handshake
+            websocket.send_json({
+                "type": "start",
+                "sample_rate": 16000,
+                "protocol_version": "1.0",
+                "channels": 1,
+                "pcm_encoding": "int16",
+            })
+            ack = websocket.receive_json()
+            assert ack["type"] == "session_started"
+
+            # 2. Send 4.0 seconds of silence PCM audio (4 x 1-second chunks)
+            for _ in range(4):
+                websocket.send_bytes(bytes(16000 * 2))
+
+            # Wait for window result message
+            received_window = False
+            for _ in range(30):
+                msg = websocket.receive_json()
+                if msg["type"] == "quality_update":
+                    continue
+                if msg["type"] == "window_result":
+                    received_window = True
+                    # Top-level abstained fields
+                    assert msg["is_eligible"] is False
+                    assert msg["synthetic_score"] is None
+                    assert msg["uncalibrated_synthetic_score"] is None
+                    assert msg["calibrated_score"] is None
+                    assert msg["score_is_calibrated"] is False
+
+                    # Nested decision abstained fields
+                    decision = msg["decision"]
+                    assert decision["state"] == "insufficient_evidence"
+                    assert decision["synthetic_score"] is None
+                    assert decision["calibrated_score"] is None
+                    assert decision["score_is_calibrated"] is False
+                    break
+
+            assert received_window, "Expected abstained window_result for silence stream"
+
             websocket.send_json({"type": "stop"})
             stop_ack = websocket.receive_json()
             assert stop_ack["type"] == "session_stopped"

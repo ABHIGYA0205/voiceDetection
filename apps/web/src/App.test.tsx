@@ -644,5 +644,3 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
     expect(screen.getByRole('button', { name: /Start Microphone Stream/i })).toBeDefined();
   });
 });
-
-

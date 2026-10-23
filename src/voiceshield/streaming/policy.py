@@ -39,9 +39,9 @@ class TemporalDecision(BaseModel):
     state: DecisionState = Field(
         description="Advisory decision level (low, uncertain, high, insufficient_evidence)."
     )
-    synthetic_score: float = Field(
-        default=0.0,
-        description="Uncalibrated acoustic anomaly score for this window.",
+    synthetic_score: float | None = Field(
+        default=None,
+        description="Uncalibrated acoustic anomaly score for this window. Null when abstained.",
     )
     score_is_calibrated: bool = Field(
         default=False,
@@ -134,7 +134,7 @@ class TemporalDecisionPolicy:
         self.window_count += 1
         return TemporalDecision(
             state=DecisionState.INSUFFICIENT_EVIDENCE,
-            synthetic_score=0.0,
+            synthetic_score=None,
             score_is_calibrated=False,
             calibrated_score=None,
             smoothed_score=self.smoothed_history[-1] if self.smoothed_history else 0.0,
