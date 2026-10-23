@@ -37,9 +37,20 @@ class BaseVAD(ABC):
         """Check if audio contains at least the required minimum duration of active speech."""
         return self.compute_speech_duration(samples, sample_rate) >= min_duration_seconds
 
+    def reset(self) -> None:  # noqa: B027
+        """Reset internal state for stateful VAD implementations.
+
+        Default implementation is an intentional no-op for stateless VADs.
+        """
+        pass
+
 
 class EnergyVAD(BaseVAD):
     """Frame-level Root-Mean-Square (RMS) energy-based Voice Activity Detector."""
+
+    def reset(self) -> None:
+        """Reset internal state. EnergyVAD is stateless, so this is a no-op."""
+        pass
 
     def __init__(
         self,

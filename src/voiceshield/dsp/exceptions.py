@@ -15,13 +15,13 @@ class CorruptAudioError(AudioPreprocessingError):
     """Raised when audio file headers or containers cannot be decoded."""
 
 
+class AudioDecodingError(CorruptAudioError):
+    """Raised when raw PCM audio bytes cannot be decoded, aligned, or framed."""
+
+
 class InvalidAudioValueError(AudioPreprocessingError):
     """Raised when audio contains NaN, Infinite, or out-of-domain numeric values."""
 
 
 class UnsupportedAudioError(AudioPreprocessingError):
     """Raised when an audio format, channel configuration, or sample rate is not supported."""
-
-
-class AudioDecodingError(AudioPreprocessingError):
-    """Raised when raw PCM audio bytes cannot be decoded, aligned, or framed."""

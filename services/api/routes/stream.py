@@ -458,6 +458,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                 logger.error("Inference execution failed in session %s: %s", session_id, exc)
                 if session is not None:
                     session._in_flight_inference = False
+                    session._in_flight_window = None
                 try:
                     await websocket.send_json(
                         ServerErrorEvent(

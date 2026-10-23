@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.dsp.exceptions import (
+    AudioDecodingError,
     CorruptAudioError,
     EmptyAudioError,
     InvalidAudioValueError,
@@ -25,7 +26,7 @@ from voiceshield.streaming.resampler import (
     MAX_SUPPORTED_SAMPLE_RATE,
     MIN_SUPPORTED_SAMPLE_RATE,
     StatefulResampler,
-    compute_raw_frame_count,
+    validate_and_decode_pcm,
 )
 from voiceshield.streaming.ring_buffer import AudioRingBuffer
 from voiceshield.streaming.vad import BaseVAD, EnergyVAD
@@ -167,6 +168,8 @@ class StreamingSession:
 
         # Concurrency & bounded backpressure: at most 1 in-flight and 1 pending window
         self._in_flight_inference: bool = False
+        self._in_flight_window: WindowForInference | None = None
+        self._in_flight_window_stale: bool = False
         self._pending_window: WindowForInference | None = None
 
         # Cumulative quality flags
@@ -176,6 +179,11 @@ class StreamingSession:
     def in_flight_inference(self) -> bool:
         """Return whether model inference is currently in flight for this session."""
         return self._in_flight_inference
+
+    @property
+    def in_flight_window(self) -> WindowForInference | None:
+        """Return the WindowForInference currently being processed by model inference."""
+        return self._in_flight_window
 
     @property
     def has_pending_window(self) -> bool:
@@ -188,6 +196,7 @@ class StreamingSession:
         if self._resampler is not None:
             self._resampler.reset()
         self.temporal_policy.reset()
+        self.vad.reset()
 
         self.segment_samples_written = 0
         self.total_canonical_samples_written = 0
@@ -209,6 +218,8 @@ class StreamingSession:
         self._declared_dtype = None
 
         self._in_flight_inference = False
+        self._in_flight_window = None
+        self._in_flight_window_stale = False
         self._pending_window = None
 
         self.quality_flags = AudioQualityFlags()
@@ -236,15 +247,8 @@ class StreamingSession:
         Returns:
             IngestResult summarizing ingestion status, window availability, and quality flags.
         """
-        frame_flags = AudioQualityFlags(
-            clipping_count=self.quality_flags.clipping_count,
-            gap_count=self.quality_flags.gap_count,
-        )
-        windows_dropped_this_ingest = 0
-
-        # 1. Validation & unsupported input detection
+        # 1. Non-mutating validation & unsupported input detection
         if sample_rate < MIN_SUPPORTED_SAMPLE_RATE or sample_rate > MAX_SUPPORTED_SAMPLE_RATE:
-            frame_flags.unsupported_input = True
             self.quality_flags.unsupported_input = True
             raise UnsupportedAudioError(
                 f"Unsupported sampling rate: {sample_rate} Hz. "
@@ -252,7 +256,6 @@ class StreamingSession:
             )
 
         if channels not in (1, 2):
-            frame_flags.unsupported_input = True
             self.quality_flags.unsupported_input = True
             raise UnsupportedAudioError(
                 f"Unsupported channel count: {channels}. Permitted channels are 1 or 2."
@@ -260,7 +263,6 @@ class StreamingSession:
 
         norm_dtype = str(dtype).lower()
         if norm_dtype not in ("int16", "int32", "float32", "float"):
-            frame_flags.unsupported_input = True
             self.quality_flags.unsupported_input = True
             raise UnsupportedAudioError(f"Unsupported PCM encoding: {dtype!r}.")
 
@@ -271,34 +273,40 @@ class StreamingSession:
                 or channels != self._declared_channels
                 or norm_dtype != self._declared_dtype
             ):
-                frame_flags.unsupported_input = True
                 self.quality_flags.unsupported_input = True
                 raise UnsupportedAudioError(
                     f"Mid-stream audio format change rejected. Session locked to "
                     f"{self._declared_sr} Hz, {self._declared_channels} ch, {self._declared_dtype}; "
                     f"received {sample_rate} Hz, {channels} ch, {norm_dtype}."
                 )
-        else:
-            self._declared_sr = sample_rate
-            self._declared_channels = channels
-            self._declared_dtype = norm_dtype
 
-        # Compute raw sample frame count consistently
+        # Strictly validate and decode input without mutating accepted session state
         try:
-            num_raw_samples = compute_raw_frame_count(pcm_data, channels=channels, dtype=norm_dtype)
-        except (InvalidAudioValueError, UnsupportedAudioError, EmptyAudioError, CorruptAudioError):
-            frame_flags.unsupported_input = True
+            mono_tensor, num_raw_samples = validate_and_decode_pcm(
+                pcm_data, channels=channels, dtype=norm_dtype
+            )
+        except (
+            InvalidAudioValueError,
+            UnsupportedAudioError,
+            EmptyAudioError,
+            CorruptAudioError,
+            AudioDecodingError,
+        ):
             self.quality_flags.unsupported_input = True
             raise
         except Exception as exc:
-            frame_flags.unsupported_input = True
             self.quality_flags.unsupported_input = True
-            raise CorruptAudioError(f"Failed to inspect audio frame: {exc}") from exc
+            raise AudioDecodingError(f"Failed to inspect audio frame: {exc}") from exc
 
         if num_raw_samples == 0:
-            frame_flags.unsupported_input = True
             self.quality_flags.unsupported_input = True
             raise EmptyAudioError("Incoming audio frame contains zero samples.")
+
+        # Input is valid: lock format on first accepted frame
+        if self._declared_sr is None:
+            self._declared_sr = sample_rate
+            self._declared_channels = channels
+            self._declared_dtype = norm_dtype
 
         # 2. Timing gap & discontinuity detection
         gap_threshold = self.config.temporal_policy.timing_gap_threshold_seconds
@@ -328,6 +336,12 @@ class StreamingSession:
                     # Materially overlapping timestamp
                     is_discontinuity = True
 
+        windows_dropped_this_ingest = 0
+        frame_flags = AudioQualityFlags(
+            clipping_count=self.quality_flags.clipping_count,
+            gap_count=self.quality_flags.gap_count,
+        )
+
         if is_discontinuity:
             frame_flags.has_timing_gap = True
             self.quality_flags.has_timing_gap = True
@@ -339,11 +353,18 @@ class StreamingSession:
             if self._resampler is not None:
                 self._resampler.reset()
             self.temporal_policy.reset()
+            self.vad.reset()
 
             self.segment_samples_written = 0
             self.next_window_end_sample = self.window_samples
 
-            # Discard stale pending window
+            # Discard and count stale in-flight window
+            if self._in_flight_window is not None and not self._in_flight_window_stale:
+                self.total_windows_dropped += 1
+                windows_dropped_this_ingest += 1
+                self._in_flight_window_stale = True
+
+            # Discard and count stale pending window
             if self._pending_window is not None:
                 self.total_windows_dropped += 1
                 windows_dropped_this_ingest += 1
@@ -355,7 +376,7 @@ class StreamingSession:
             else:
                 self._segment_start_timestamp = self._expected_next_timestamp or 0.0
 
-        # Update expected timestamp for next frame (always performed even if 0 output produced)
+        # Update expected timestamp for next frame
         frame_duration = num_raw_samples / sample_rate
         if timestamp is not None and math.isfinite(timestamp):
             self._last_frame_timestamp = timestamp
@@ -373,16 +394,7 @@ class StreamingSession:
             )
 
         # 4. Stateful resampling to canonical 16 kHz mono float32
-        try:
-            resampled = self._resampler.process(pcm_data, channels=channels, dtype=norm_dtype)
-        except (InvalidAudioValueError, UnsupportedAudioError, EmptyAudioError, CorruptAudioError):
-            frame_flags.unsupported_input = True
-            self.quality_flags.unsupported_input = True
-            raise
-        except Exception as exc:
-            frame_flags.unsupported_input = True
-            self.quality_flags.unsupported_input = True
-            raise CorruptAudioError(f"Failed to process PCM frame: {exc}") from exc
+        resampled = self._resampler.process_tensor(mono_tensor)
 
         if resampled.size == 0:
             current_time = (
@@ -548,6 +560,8 @@ class StreamingSession:
 
         window = self._pending_window
         self._pending_window = None
+        self._in_flight_window = window
+        self._in_flight_window_stale = False
         self._in_flight_inference = True
         return window
 
@@ -572,10 +586,14 @@ class StreamingSession:
             Updated TemporalDecision from policy, or None if suppressed as stale.
         """
         self._in_flight_inference = False
+        self._in_flight_window = None
+        was_stale = self._in_flight_window_stale
+        self._in_flight_window_stale = False
+
         assert window is not None
 
         # Stale-result suppression across continuity segments
-        if window.continuity_segment_id != self.continuity_segment_id:
+        if was_stale or window.continuity_segment_id != self.continuity_segment_id:
             return None
 
         decision = self.temporal_policy.evaluate(

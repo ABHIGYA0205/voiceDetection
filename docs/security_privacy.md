@@ -105,15 +105,26 @@ flowchart TD
 - **Connection Concurrency**: Maximum concurrent streaming sessions are guarded by `VOICESHIELD_MAX_CONCURRENT_SESSIONS` (default: 10). Excess sessions receive a structured `CONCURRENCY_LIMIT_REACHED` error.
 - **Frame Size Ceiling**: Streaming audio frames are capped at `MAX_FRAME_BYTES_DEFAULT` (128 KB = 131,072 bytes). Client handshake metadata cannot increase this ceiling. Frames exceeding this limit trigger immediate closure with `WS_1009_MESSAGE_TOO_BIG`.
 - **Idle Timeout**: Inactive connections exceeding 30.0 seconds of silence/no-traffic are disconnected cleanly (`WS_1000_NORMAL_CLOSURE`).
-- **Deterministic Cleanup**: Session teardown (`finally:` block) guarantees cancellation of in-flight inference tasks, circular buffer memory reset (`session.reset()`), and removal from active session registries.
+- **Sampling Rate Limits**: Ingested audio must conform to the inclusive range `8,000 Hz <= sample_rate <= 192,000 Hz`. Out-of-bounds rates are rejected with `UnsupportedAudioError`.
+- **Explicit Little-Endian PCM Contract**: Streaming frames accept little-endian encodings: 16-bit signed integer (`<i2`), 32-bit signed integer (`<i4`), and 32-bit floating point (`<f4`).
+- **Byte and Interleaved-Frame Alignment**: Byte buffers must be strictly divisible by the sample width (2 bytes for int16, 4 bytes for int32/float32) and complete frame width (`bytes_per_sample * channels`). Partial samples or incomplete interleaved channel frames are rejected with `AudioDecodingError` (subclass of `CorruptAudioError`).
+- **Finite Float32 and Domain Validation**: Decoded floating-point samples are verified for finiteness (rejecting NaN, +Inf, -Inf) and bounded to the amplitude range `[-1.0, 1.0]`. Out-of-bounds values raise `InvalidAudioValueError`.
+- **Validation-Before-State-Mutation Guarantee**: Complete input validation (encoding, sample rate, channels, byte alignment, complete frame alignment, finiteness, amplitude range, and non-empty count) is executed strictly before mutating any session state. A malformed frame sets an input-error diagnostic flag but does NOT mutate accepted audio in the ring buffer, timestamps (`_last_frame_timestamp`, `_expected_next_timestamp`), declared stream format, continuity segment IDs, resampler state, VAD state, or temporal policy history. Format locking occurs only upon the first successfully validated and accepted frame.
+- **Recoverable Audio Decode Errors**: When a client transmits a malformed or misaligned frame, the WebSocket connection remains open, logs an advisory warning, and transmits an `AUDIO_DECODE_ERROR` event to the client. The session preserves all prior accepted audio and expected timestamps, allowing immediate resumption of contiguous streaming without false continuity resets.
+- **Deterministic Cleanup & VAD Reset**: Session teardown (`finally:` block) guarantees cancellation of in-flight inference tasks, circular buffer memory reset (`session.reset()`), invocation of the `BaseVAD.reset()` hook, and removal from active session registries.
 
-### 3.7 Inference Denial of Service (DoS) & Queue Starvation
+### 3.7 Inference Denial of Service (DoS), Queue Starvation & Stale Drop Accounting
 
 - **Worker Concurrency Guard**: A process-wide `asyncio.Semaphore(1)` ensures that at most one model forward pass is executed at any moment, preventing unified memory thrashing and Out-Of-Memory (OOM) crashes on Apple Silicon M3 hardware.
 - **Bounded Streaming Queue Depth**: The streaming session enforces an O(1) bounded queue:
-  - At most **one** window is in flight for model inference.
+  - At most **one** window is in flight for model inference (`_in_flight_window`).
   - At most **one** fresher eligible window is held in the pending slot (`_pending_window`).
-  - If a newer window arrives while inference is in flight, it **replaces** the older pending window rather than growing an unbounded queue.
+  - If a newer window arrives while inference is in flight, it **replaces** the older pending window rather than growing an unbounded queue. Replaced pending windows are immediately counted in `total_windows_dropped` and `windows_dropped_this_ingest`.
+- **Continuity Resets & Stale In-Flight Drop Accounting**: When a timing gap or discontinuity occurs (delta > threshold or out-of-order timestamps):
+  - Ring buffers, stateful resamplers, temporal policy state, and VAD state (`session.vad.reset()`) are reset, and the continuity segment ID increments.
+  - Any stale in-flight window currently executing on the model worker is accounted for immediately at continuity reset time: `total_windows_dropped` and `windows_dropped_this_ingest` increment by 1, and the updated drop total is immediately reported in the WebSocket quality event.
+  - When the stale inference call eventually completes, its score and decision are suppressed (`complete_inference` returns `None`), no score is recorded in temporal history, and the drop counter is **not** incremented a second time.
+  - A fresh post-gap pending window is immediately dispatched once the worker finishes.
 
 ### 3.8 Zero-Persistence Audio Privacy Policy
 
