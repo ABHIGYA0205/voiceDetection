@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -18,6 +19,7 @@ import pytest
 
 from voiceshield.data.cli import main as data_cli_main
 from voiceshield.data.io import ManifestIOError, load_manifest, save_manifest
+from voiceshield.data.leakage import check_leakage
 from voiceshield.data.schema import ManifestRecord
 from voiceshield.data.splitter import (
     codec_holdout_split,
@@ -29,13 +31,17 @@ from voiceshield.evaluation.cli import main as eval_cli_main
 from voiceshield.evaluation.evaluator import (
     ThresholdOptimizationError,
     evaluate_deepfake_detector,
+    evaluate_sample_group,
 )
 from voiceshield.evaluation.metrics import (
     ScoreDirection,
     compute_brier_and_ece,
     normalize_calibrated_probabilities,
 )
-from voiceshield.evaluation.reporting import generate_evaluation_plots
+from voiceshield.evaluation.reporting import (
+    generate_evaluation_plots,
+    save_evaluation_report,
+)
 
 
 def _make_rec(
@@ -101,6 +107,7 @@ def test_split_source_utterance_id_connected() -> None:
         _make_rec("s2", "spk2", label="bonafide", source_utterance_id="utt_shared"),
         _make_rec("s3", "spk3", label="bonafide", source_utterance_id="utt_other"),
         _make_rec("s4", "spk4", label="bonafide", source_utterance_id="utt_other"),
+        _make_rec("s5", "spk5", label="bonafide", source_utterance_id="utt_third"),
     ]
     partitioned = speaker_disjoint_split(
         records, train_ratio=0.5, dev_ratio=0.25, test_ratio=0.25, seed=123
@@ -214,12 +221,13 @@ def test_duplicate_sample_id_rejected_in_splitter() -> None:
 
 
 def test_impossible_constraints_rejected_in_splitter() -> None:
-    """Impossible assignments raise clear ValueError."""
+    """Impossible assignments raise clear ValueError when standard comps are empty but train is requested."""
     records = [
         _make_rec("s1", "spk1", label="spoof", attack_type="TTS", generator_family="ElevenLabs"),
+        _make_rec("s2", "spk2", label="spoof", attack_type="TTS", generator_family="ElevenLabs"),
+        _make_rec("s3", "spk3", label="spoof", attack_type="TTS", generator_family="ElevenLabs"),
     ]
-    # train_ratio > 0 but only holdout component exists
-    with pytest.raises(ValueError, match="Impossible split"):
+    with pytest.raises(ValueError, match="Impossible split: all records belong to generator"):
         generator_holdout_split(
             records,
             holdout_generators=["ElevenLabs"],
@@ -229,17 +237,203 @@ def test_impossible_constraints_rejected_in_splitter() -> None:
         )
 
 
-def test_data_cli_fails_before_saving_if_leaked(tmp_path: Path) -> None:
-    """CLI fails closed and does not save a leaked manifest."""
+def test_holdout_component_allocation_cursor_generator() -> None:
+    """1 holdout component plus 4 standard components assigns every sample without cursor bugs."""
+    records = [
+        _make_rec("h1", "spk_h", label="spoof", attack_type="TTS", generator_family="ElevenLabs"),
+        _make_rec("s1", "spk1", label="bonafide"),
+        _make_rec("s2", "spk2", label="bonafide"),
+        _make_rec("s3", "spk3", label="bonafide"),
+        _make_rec("s4", "spk4", label="bonafide"),
+    ]
+    partitioned = generator_holdout_split(
+        records,
+        holdout_generators=["ElevenLabs"],
+        train_ratio=0.6,
+        dev_ratio=0.2,
+        test_ratio=0.2,
+        seed=42,
+    )
+
+    # 1. Every input sample ID is assigned exactly once
+    assert len(partitioned) == len(records)
+    assert {r.sample_id for r in partitioned} == {r.sample_id for r in records}
+    assert all(r.split in ("train", "dev", "test") for r in partitioned)
+
+    # 2. No leakage
+    report = check_leakage(partitioned, holdout_generators=["ElevenLabs"])
+    assert not report.has_leakage
+
+    # 3. Holdout component strictly outside train
+    h_rec = next(r for r in partitioned if r.sample_id == "h1")
+    assert h_rec.split in ("dev", "test")
+
+    # 4. All splits have positive allocations
+    splits = {r.split for r in partitioned}
+    assert splits == {"train", "dev", "test"}
+
+
+def test_holdout_component_allocation_cursor_codec() -> None:
+    """1 holdout codec component plus 4 standard components assigns every sample without cursor bugs."""
+    records = [
+        _make_rec("h1", "spk_h", label="bonafide", codec="g711_alaw"),
+        _make_rec("s1", "spk1", label="bonafide", codec="pcm_clean"),
+        _make_rec("s2", "spk2", label="bonafide", codec="pcm_clean"),
+        _make_rec("s3", "spk3", label="bonafide", codec="pcm_clean"),
+        _make_rec("s4", "spk4", label="bonafide", codec="pcm_clean"),
+    ]
+    partitioned = codec_holdout_split(
+        records,
+        holdout_codecs=["g711_alaw"],
+        train_ratio=0.6,
+        dev_ratio=0.2,
+        test_ratio=0.2,
+        seed=42,
+    )
+
+    assert len(partitioned) == len(records)
+    assert {r.sample_id for r in partitioned} == {r.sample_id for r in records}
+    report = check_leakage(partitioned, holdout_codecs=["g711_alaw"])
+    assert not report.has_leakage
+
+    h_rec = next(r for r in partitioned if r.sample_id == "h1")
+    assert h_rec.split in ("dev", "test")
+    assert {r.split for r in partitioned} == {"train", "dev", "test"}
+
+
+def test_holdout_empty_list_rejected() -> None:
+    """Empty holdout lists are rejected."""
+    records = [
+        _make_rec("s1", "spk1", label="bonafide"),
+        _make_rec("s2", "spk2", label="bonafide"),
+        _make_rec("s3", "spk3", label="bonafide"),
+    ]
+    with pytest.raises(ValueError, match="holdout_generators list must not be empty"):
+        generator_holdout_split(records, holdout_generators=[])
+    with pytest.raises(ValueError, match="holdout_codecs list must not be empty"):
+        codec_holdout_split(records, holdout_codecs=[])
+
+
+def test_holdout_missing_selector_rejected() -> None:
+    """Holdout selectors matching zero manifest records are rejected with clear names."""
+    records = [
+        _make_rec("s1", "spk1", label="spoof", attack_type="TTS", generator_family="ElevenLabs"),
+        _make_rec("s2", "spk2", label="bonafide", codec="pcm_clean"),
+        _make_rec("s3", "spk3", label="bonafide", codec="pcm_clean"),
+    ]
+    with pytest.raises(ValueError, match="Requested holdout generator.*GhostGen"):
+        generator_holdout_split(records, holdout_generators=["GhostGen"])
+    with pytest.raises(ValueError, match="Requested holdout codec.*GhostCodec"):
+        codec_holdout_split(records, holdout_codecs=["GhostCodec"])
+
+
+def test_holdout_partially_missing_selector_rejected() -> None:
+    """Partially missing holdout lists fail and name all absent values."""
+    records = [
+        _make_rec("s1", "spk1", label="spoof", attack_type="TTS", generator_family="ElevenLabs"),
+        _make_rec("s2", "spk2", label="bonafide", codec="pcm_clean"),
+        _make_rec("s3", "spk3", label="bonafide", codec="pcm_clean"),
+    ]
+    with pytest.raises(ValueError) as excinfo:
+        generator_holdout_split(
+            records, holdout_generators=["ElevenLabs", "MissingGenA", "MissingGenB"]
+        )
+    assert "MissingGenA" in str(excinfo.value)
+    assert "MissingGenB" in str(excinfo.value)
+
+
+def test_too_few_components_for_positive_ratio_splits_rejected() -> None:
+    """Split request fails when fewer atomic components exist than positive-ratio splits."""
+    records = [
+        _make_rec("s1", "spk1", label="bonafide"),
+        _make_rec("s2", "spk2", label="bonafide"),
+    ]
+    # 2 components, 3 positive-ratio splits
+    with pytest.raises(ValueError, match="Too few atomic components.*2.*3"):
+        speaker_disjoint_split(records, train_ratio=0.7, dev_ratio=0.15, test_ratio=0.15)
+
+
+def test_holdout_reordered_input_identical_mapping() -> None:
+    """Reordering input records in holdout modes preserves sample_id-to-split mapping."""
+    records = [
+        _make_rec("h1", "spk_h", label="spoof", attack_type="TTS", generator_family="ElevenLabs"),
+        _make_rec("s1", "spk1", label="bonafide"),
+        _make_rec("s2", "spk2", label="bonafide"),
+        _make_rec("s3", "spk3", label="bonafide"),
+        _make_rec("s4", "spk4", label="bonafide"),
+    ]
+    reordered = [records[3], records[0], records[4], records[1], records[2]]
+
+    p1 = generator_holdout_split(records, holdout_generators=["ElevenLabs"], seed=42)
+    p2 = generator_holdout_split(reordered, holdout_generators=["ElevenLabs"], seed=42)
+
+    map1 = {r.sample_id: r.split for r in p1}
+    map2 = {r.sample_id: r.split for r in p2}
+    assert map1 == map2
+
+
+def test_split_direct_postcondition_keys() -> None:
+    """Test invariant: set(input sample IDs) == set(output sample IDs)."""
+    records = [
+        _make_rec("s1", "spk1", label="bonafide"),
+        _make_rec("s2", "spk2", label="bonafide"),
+        _make_rec("s3", "spk3", label="bonafide"),
+        _make_rec("s4", "spk4", label="bonafide"),
+    ]
+    out = speaker_disjoint_split(records, train_ratio=0.5, dev_ratio=0.25, test_ratio=0.25)
+    assert {r.sample_id for r in records} == {r.sample_id for r in out}
+
+
+def test_data_cli_fails_before_saving_if_checksum_integrity_violated(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """CLI fails closed and refuses to write manifest if post-split check finds duplicate checksums."""
+    raw_manifest = tmp_path / "raw.jsonl"
+    out_manifest = tmp_path / "partitioned.jsonl"
+    shared_sha = "d" * 64
+    records = [
+        _make_rec("s1", "spk1", label="bonafide", sha256=shared_sha),
+        _make_rec("s2", "spk2", label="bonafide", sha256=shared_sha),
+        _make_rec("s3", "spk3", label="bonafide"),
+        _make_rec("s4", "spk4", label="bonafide"),
+    ]
+    save_manifest(records, raw_manifest)
+
+    exit_code = data_cli_main(
+        [
+            "split",
+            "--manifest",
+            str(raw_manifest),
+            "--mode",
+            "speaker_disjoint",
+            "--train-ratio",
+            "0.5",
+            "--dev-ratio",
+            "0.25",
+            "--test-ratio",
+            "0.25",
+            "--output",
+            str(out_manifest),
+        ]
+    )
+    stderr = capsys.readouterr().err
+    assert exit_code != 0
+    assert not out_manifest.exists()
+    assert "Partition generated with leakage" in stderr
+    assert "DUPLICATE CHECKSUM" in stderr
+
+
+def test_data_cli_fails_before_saving_on_invalid_ratios(tmp_path: Path) -> None:
+    """CLI fails closed and does not save manifest when invalid ratios are supplied."""
     raw_manifest = tmp_path / "raw.jsonl"
     out_manifest = tmp_path / "partitioned.jsonl"
     records = [
         _make_rec("s1", "spk1", label="bonafide"),
         _make_rec("s2", "spk2", label="bonafide"),
+        _make_rec("s3", "spk3", label="bonafide"),
     ]
     save_manifest(records, raw_manifest)
 
-    # Trigger invalid ratio sum in CLI
     exit_code = data_cli_main(
         [
             "split",
@@ -818,3 +1012,117 @@ def test_eval_cli_workflow_partial_scores_flag(tmp_path: Path) -> None:
         ]
     )
     assert ok_code == 0
+
+
+def test_no_calibrated_spoof_probabilities_in_high_level_api() -> None:
+    """High-level evaluation APIs do not expose calibrated_spoof_probabilities parameters."""
+    for fn in (
+        evaluate_deepfake_detector,
+        evaluate_sample_group,
+        save_evaluation_report,
+        generate_evaluation_plots,
+    ):
+        sig = inspect.signature(fn)
+        assert "calibrated_spoof_probabilities" not in sig.parameters
+
+
+def test_eval_cli_fails_cleanly_on_score_validation_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """CLI prints concise VALIDATION ERROR to stderr, exits with 1, and creates no report."""
+    manifest_file = tmp_path / "manifest.jsonl"
+    records = [
+        _make_rec("s1", "spk1", label="bonafide", split="dev"),
+        _make_rec(
+            "s2",
+            "spk2",
+            label="spoof",
+            attack_type="TTS",
+            generator_family="ElevenLabs",
+            split="dev",
+        ),
+    ]
+    save_manifest(records, manifest_file)
+
+    test_cases = [
+        # (filename, content, expected_pattern)
+        (
+            "dup_jsonl.jsonl",
+            '{"sample_id": "s1", "score": 0.1}\n{"sample_id": "s1", "score": 0.2}\n',
+            "Duplicate sample-level score ID",
+        ),
+        ("dup_json.json", '{"s1": 0.1, "s1": 0.2}', "Duplicate JSON object key found"),
+        ("nan_score.jsonl", '{"sample_id": "s1", "score": NaN}\n', "Invalid JSON"),
+        ("missing_score.jsonl", '{"sample_id": "s1"}\n', "Missing score"),
+        ("malformed.jsonl", '{"sample_id": "s1", "score": 0.5\n', "Invalid JSON"),
+    ]
+
+    for fname, content, err_substr in test_cases:
+        score_file = tmp_path / fname
+        score_file.write_text(content, encoding="utf-8")
+        out_dir = tmp_path / f"out_{fname}"
+
+        exit_code = eval_cli_main(
+            [
+                "--manifest",
+                str(manifest_file),
+                "--scores",
+                str(score_file),
+                "--output-dir",
+                str(out_dir),
+            ]
+        )
+        stderr = capsys.readouterr().err
+        assert exit_code == 1, f"Failed for case {fname}"
+        assert "VALIDATION ERROR" in stderr, f"Failed for case {fname}"
+        assert err_substr in stderr, f"Failed for case {fname}"
+        assert not out_dir.exists(), f"Output dir was created for {fname}"
+
+
+def test_json_strict_duplicate_keys(tmp_path: Path) -> None:
+    """Strict JSON parser rejects duplicate object keys."""
+    # JSON mapping duplicate key
+    dup_map = tmp_path / "dup_map.json"
+    dup_map.write_text('{"s1": 0.1, "s1": 0.2}', encoding="utf-8")
+    with pytest.raises(ValueError, match="Duplicate JSON object key found.*'s1'"):
+        load_scores_file(dup_map)
+
+    # JSONL line duplicate key
+    dup_line = tmp_path / "dup_line.jsonl"
+    dup_line.write_text('{"sample_id": "s1", "score": 0.1, "score": 0.2}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="Duplicate JSON object key found.*'score'"):
+        load_scores_file(dup_line)
+
+
+def test_mean_synthetic_score_field_supported(tmp_path: Path) -> None:
+    """mean_synthetic_score is supported as a score field and preserves exact 0.0."""
+    scores_file = tmp_path / "mean_scores.jsonl"
+    scores_file.write_text(
+        json.dumps({"sample_id": "s1", "mean_synthetic_score": 0.0}) + "\n",
+        encoding="utf-8",
+    )
+    scores, _ = load_scores_file(scores_file)
+    assert isinstance(scores, dict)
+    assert scores["s1"] == 0.0
+
+
+def test_conflicting_score_fields_rejected(tmp_path: Path) -> None:
+    """Multiple recognized score fields with different values are rejected as ambiguous."""
+    # Conflicting values
+    conflict_file = tmp_path / "conflict.jsonl"
+    conflict_file.write_text(
+        json.dumps({"sample_id": "s1", "synthetic_score": 0.8, "score": 0.2}) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Conflicting score fields"):
+        load_scores_file(conflict_file)
+
+    # Identical values are accepted
+    identical_file = tmp_path / "identical.jsonl"
+    identical_file.write_text(
+        json.dumps({"sample_id": "s1", "synthetic_score": 0.8, "score": 0.8}) + "\n",
+        encoding="utf-8",
+    )
+    scores, _ = load_scores_file(identical_file)
+    assert isinstance(scores, dict)
+    assert scores["s1"] == 0.8

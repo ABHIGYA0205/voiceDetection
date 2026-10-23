@@ -1,4 +1,4 @@
-"""Scientifically rigorous evaluation toolkit for binary audio deepfake detection."""
+"""Evaluation toolkit with scientific guardrails for binary audio deepfake detection."""
 
 from __future__ import annotations
 

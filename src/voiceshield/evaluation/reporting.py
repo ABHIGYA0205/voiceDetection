@@ -306,9 +306,8 @@ def generate_evaluation_plots(
     scores_dict: dict[str, float],
     direction: ScoreDirection,
     output_dir: Path,
-    calibrated_spoof_probabilities: dict[str, float] | None = None,
 ) -> dict[str, Path]:
-    """Generate and save publication-quality evaluation plots (ROC, DET, Score Distributions, Reliability)."""
+    """Generate and save publication-quality evaluation plots (ROC, DET, Score Distributions)."""
     plot_dir = output_dir / "plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
     generated_plots: dict[str, Path] = {}
@@ -385,44 +384,6 @@ def generate_evaluation_plots(
     plt.close(fig)
     generated_plots["score_distributions"] = dist_path
 
-    # 3. Calibration Reliability Diagram (ONLY if calibrated_spoof_probabilities is explicitly provided)
-    # Raw or bounded detector scores must NOT produce calibration claims or plots without a calibrator artifact.
-    if calibrated_spoof_probabilities is not None:
-        cal_prob_list = [
-            calibrated_spoof_probabilities[r.sample_id]
-            for r in records
-            if r.sample_id in calibrated_spoof_probabilities and r.sample_id in scores_dict
-        ]
-        if len(cal_prob_list) == len(y_arr):
-            probs = np.clip(np.array(cal_prob_list, dtype=np.float64), 0.0, 1.0)
-            bin_edges = np.linspace(0.0, 1.0, 11)
-            bin_confs: list[float] = []
-            bin_accs: list[float] = []
-            for i in range(10):
-                low, high = bin_edges[i], bin_edges[i + 1]
-                in_b = (probs >= low) & (probs <= high if i == 9 else probs < high)
-                if np.sum(in_b) > 0:
-                    bin_confs.append(float(np.mean(probs[in_b])))
-                    bin_accs.append(float(np.mean(y_arr[in_b])))
-
-            fig, ax = plt.subplots(figsize=(5.5, 5), dpi=150)
-            ax.plot([0, 1], [0, 1], color="#94a3b8", linestyle="--", label="Perfect Calibration")
-            ax.plot(
-                bin_confs, bin_accs, marker="s", color="#7c3aed", lw=2, label="Model Confidence"
-            )
-            ax.set_xlabel("Mean Predicted Probability")
-            ax.set_ylabel("Empirical Spoof Proportion")
-            ax.set_title("Calibration Reliability Diagram")
-            ax.set_xlim((0.0, 1.0))
-            ax.set_ylim((0.0, 1.0))
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            cal_path = plot_dir / "calibration_curve.png"
-            fig.tight_layout()
-            fig.savefig(cal_path)
-            plt.close(fig)
-            generated_plots["calibration_curve"] = cal_path
-
     return generated_plots
 
 
@@ -432,7 +393,6 @@ def save_evaluation_report(
     records: list[ManifestRecord] | None = None,
     scores_dict: dict[str, float] | None = None,
     direction: ScoreDirection = ScoreDirection.HIGHER_IS_SPOOF,
-    calibrated_spoof_probabilities: dict[str, float] | None = None,
 ) -> Path:
     """Save complete evaluation report (summary.md, metrics.csv, and plots) to a versioned directory."""
     target_dir = Path(output_dir)
@@ -454,7 +414,6 @@ def save_evaluation_report(
             scores_dict=scores_dict,
             direction=direction,
             output_dir=target_dir,
-            calibrated_spoof_probabilities=calibrated_spoof_probabilities,
         )
 
     return target_dir

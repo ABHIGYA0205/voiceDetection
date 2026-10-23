@@ -1,4 +1,4 @@
-"""Orchestrator for scientifically rigorous audio deepfake detection evaluation."""
+"""Orchestrator for audio deepfake detection evaluation with scientific guardrails."""
 
 from __future__ import annotations
 
@@ -120,7 +120,6 @@ def evaluate_sample_group(
     threshold: float,
     config: VoiceShieldConfig | None = None,
     compute_bootstrap: bool = True,
-    calibrated_spoof_probabilities: dict[str, float] | None = None,
 ) -> GroupEvaluationResult:
     """Evaluate discrimination and calibration metrics for a specific subset of manifest records."""
     eval_cfg = config.evaluation if config else None
@@ -132,11 +131,10 @@ def evaluate_sample_group(
     boot_ci = eval_cfg.bootstrap_ci_level if eval_cfg else 0.95
     ece_bins = eval_cfg.ece_num_bins if eval_cfg else 10
 
-    # Collect labels, raw scores, cluster IDs, and optional calibrated probabilities
+    # Collect labels, raw scores, and cluster IDs
     y_list: list[int] = []
     raw_score_list: list[float] = []
     cluster_list: list[str] = []
-    cal_prob_list: list[float] = []
 
     for r in records:
         if r.sample_id in scores_dict:
@@ -144,18 +142,10 @@ def evaluate_sample_group(
             raw_score_list.append(scores_dict[r.sample_id])
             # Grouping key for bootstrap: speaker_id if available, else sample_id
             cluster_list.append(r.speaker_id if r.speaker_id else r.sample_id)
-            if (
-                calibrated_spoof_probabilities is not None
-                and r.sample_id in calibrated_spoof_probabilities
-            ):
-                cal_prob_list.append(calibrated_spoof_probabilities[r.sample_id])
 
     y_arr = np.array(y_list, dtype=int)
     raw_scores = np.array(raw_score_list, dtype=np.float64)
     cluster_arr = np.array(cluster_list)
-    cal_probs_arr: np.ndarray[Any, np.dtype[np.float64]] | None = None
-    if calibrated_spoof_probabilities is not None and len(cal_prob_list) == len(y_list):
-        cal_probs_arr = np.array(cal_prob_list, dtype=np.float64)
 
     if len(y_arr) == 0:
         # Empty group
@@ -202,7 +192,6 @@ def evaluate_sample_group(
         y_true=y_arr,
         scores_higher_spoof=scores_norm,
         raw_scores=raw_scores,
-        calibrated_spoof_probabilities=cal_probs_arr,
         target_tprs=target_tprs,
         c_miss=c_miss,
         c_fa=c_fa,
@@ -277,9 +266,8 @@ def evaluate_deepfake_detector(
     config: VoiceShieldConfig | None = None,
     timing_data: dict[str, float] | None = None,
     metadata: dict[str, Any] | None = None,
-    calibrated_spoof_probabilities: dict[str, float] | None = None,
 ) -> FullEvaluationReport:
-    """Evaluate deepfake detector with scientific rigor, guardrails, and detailed slicing.
+    """Evaluate deepfake detector with scientific guardrails and detailed slicing.
 
     Args:
         manifest: List of ManifestRecords or path to manifest CSV/JSONL file.
@@ -291,7 +279,6 @@ def evaluate_deepfake_detector(
         config: VoiceShieldConfig object with evaluation and DCF settings.
         timing_data: Optional mapping of sample_id to elapsed inference seconds.
         metadata: Optional dictionary with run/model/commit hashes.
-        calibrated_spoof_probabilities: Optional mapping of sample_id to calibrated spoof probabilities.
 
     Returns:
         FullEvaluationReport with overall, score coverage, sliced, cross-condition, and latency metrics.
@@ -515,7 +502,6 @@ def evaluate_deepfake_detector(
         threshold=operating_threshold,
         config=config,
         compute_bootstrap=True,
-        calibrated_spoof_probabilities=calibrated_spoof_probabilities,
     )
 
     # 6. Breakdown by Generator

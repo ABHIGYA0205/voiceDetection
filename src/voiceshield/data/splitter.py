@@ -6,11 +6,12 @@ import math
 import random
 from collections import defaultdict
 from collections.abc import Callable
-from typing import Literal
+from typing import Literal, TypeVar
 
 from voiceshield.data.schema import ManifestRecord, SplitType
 
 SplitMode = Literal["speaker_disjoint", "generator_holdout", "codec_holdout"]
+T = TypeVar("T", bound=str)
 
 
 class DisjointSet:
@@ -112,26 +113,37 @@ def validate_ratios(train_ratio: float, dev_ratio: float, test_ratio: float) -> 
         raise ValueError(f"Split ratios must sum to 1.0 (within numeric tolerance), got {total}.")
 
 
-def _allocate_counts(total: int, ratios: dict[str, float]) -> dict[str, int]:
+def _allocate_counts(total: int, ratios: dict[T, float]) -> dict[T, int]:
     """Distribute total items across splits with positive ratios using largest remainder method."""
-    pos_splits = [s for s, r in ratios.items() if r > 0.0]
+    pos_splits: list[T] = [s for s, r in ratios.items() if r > 0.0]
     if not pos_splits or total <= 0:
         return dict.fromkeys(ratios, 0)
 
-    sum_pos = sum(ratios[s] for s in pos_splits)
-    alloc = dict.fromkeys(ratios, 0)
-    fractional: list[tuple[float, str]] = []
+    if total < len(pos_splits):
+        raise ValueError(
+            f"Cannot allocate {total} atomic components across {len(pos_splits)} positive-ratio splits ({pos_splits}) without leaving a split empty."
+        )
 
+    alloc: dict[T, int] = dict.fromkeys(ratios, 0)
     for s in pos_splits:
-        quota = total * (ratios[s] / sum_pos) if sum_pos > 0 else 0.0
-        base = int(quota)
-        alloc[s] = base
-        fractional.append((quota - base, s))
+        alloc[s] = 1
 
-    leftover = total - sum(alloc.values())
-    fractional.sort(key=lambda item: (-item[0], item[1]))
-    for i in range(leftover):
-        alloc[fractional[i][1]] += 1
+    remaining = total - len(pos_splits)
+    if remaining > 0:
+        sum_pos = sum(ratios[s] for s in pos_splits)
+        fractional: list[tuple[float, T]] = []
+
+        for s in pos_splits:
+            quota = remaining * (ratios[s] / sum_pos) if sum_pos > 0 else 0.0
+            base = int(quota)
+            alloc[s] += base
+            fractional.append((quota - base, s))
+
+        allocated_remaining = sum(alloc[s] - 1 for s in pos_splits)
+        leftover = remaining - allocated_remaining
+        fractional.sort(key=lambda item: (-item[0], item[1]))
+        for i in range(leftover):
+            alloc[fractional[i][1]] += 1
 
     return alloc
 
@@ -164,7 +176,17 @@ def speaker_disjoint_split(
     components = build_connected_components(records)
     num_components = len(components)
 
-    target_ratios = {"train": train_ratio, "dev": dev_ratio, "test": test_ratio}
+    target_ratios: dict[SplitType, float] = {
+        "train": train_ratio,
+        "dev": dev_ratio,
+        "test": test_ratio,
+    }
+    pos_splits = [s for s, r in target_ratios.items() if r > 0.0]
+
+    if num_components < len(pos_splits):
+        raise ValueError(
+            f"Too few atomic components ({num_components}) for {len(pos_splits)} positive-ratio splits: {pos_splits}."
+        )
 
     # Deterministic shuffling of components based on seed
     rng = random.Random(seed)
@@ -183,6 +205,21 @@ def speaker_disjoint_split(
             for r in comp:
                 sample_to_split[r.sample_id] = split_name
         curr += count
+
+    # Explicit internal postconditions:
+    assigned_sample_ids = set(sample_to_split.keys())
+    input_sample_ids = {r.sample_id for r in records}
+    if assigned_sample_ids != input_sample_ids:
+        missing = input_sample_ids - assigned_sample_ids
+        extra = assigned_sample_ids - input_sample_ids
+        raise ValueError(f"Split assignment postcondition failed: missing={missing}, extra={extra}")
+
+    for s in pos_splits:
+        assigned_in_split = [sid for sid, split in sample_to_split.items() if split == s]
+        if not assigned_in_split:
+            raise ValueError(
+                f"Split assignment postcondition failed: split '{s}' has positive ratio ({target_ratios[s]}) but no samples assigned."
+            )
 
     return [
         ManifestRecord.model_validate({**r.model_dump(), "split": sample_to_split[r.sample_id]})
@@ -206,6 +243,18 @@ def _partition_holdout(
 
     components = build_connected_components(records)
 
+    target_ratios: dict[SplitType, float] = {
+        "train": train_ratio,
+        "dev": dev_ratio,
+        "test": test_ratio,
+    }
+    all_splits: tuple[SplitType, ...] = ("train", "dev", "test")
+    pos_splits: list[SplitType] = [s for s in all_splits if target_ratios[s] > 0.0]
+    if len(components) < len(pos_splits):
+        raise ValueError(
+            f"Too few atomic components ({len(components)}) for {len(pos_splits)} positive-ratio splits: {pos_splits}."
+        )
+
     # Classify whole components as holdout vs standard
     holdout_comps: list[list[ManifestRecord]] = []
     standard_comps: list[list[ManifestRecord]] = []
@@ -216,68 +265,110 @@ def _partition_holdout(
         else:
             standard_comps.append(comp)
 
+    eval_splits: tuple[SplitType, ...] = ("dev", "test")
+    eval_pos_splits: list[SplitType] = [s for s in eval_splits if target_ratios[s] > 0.0]
+
     # Validate holdout feasibility
     if holdout_comps:
-        if dev_ratio <= 0.0 and test_ratio <= 0.0:
+        if not eval_pos_splits:
             raise ValueError(
                 f"Cannot hold out {holdout_desc} components when dev and test ratios are both zero."
             )
 
-    if train_ratio > 0.0 and len(standard_comps) == 0:
+    if target_ratios["train"] > 0.0 and len(standard_comps) == 0:
         raise ValueError(
             f"Impossible split: all records belong to {holdout_desc} components, leaving train empty."
         )
 
     rng = random.Random(seed)
+    sample_to_split: dict[str, SplitType] = {}
+    assigned_counts: dict[SplitType, int] = {"train": 0, "dev": 0, "test": 0}
 
     # 1. Assign holdout components strictly to dev and test
-    sample_to_split: dict[str, SplitType] = {}
-
+    h_alloc: dict[SplitType, int] = {}
     if holdout_comps:
         h_indices = list(range(len(holdout_comps)))
         rng.shuffle(h_indices)
         shuffled_h_comps = [holdout_comps[i] for i in h_indices]
 
-        h_ratios = {"dev": dev_ratio, "test": test_ratio}
-        h_alloc = _allocate_counts(len(holdout_comps), h_ratios)
+        if len(eval_pos_splits) == 1:
+            h_alloc = {eval_pos_splits[0]: len(holdout_comps)}
+        else:
+            # Both dev and test have positive ratios
+            if len(holdout_comps) >= 2:
+                h_alloc = _allocate_counts(
+                    len(holdout_comps),
+                    {s: target_ratios[s] for s in eval_pos_splits},
+                )
+            else:
+                # 1 holdout component: assign to split with higher ratio (tie-break dev)
+                if target_ratios["dev"] >= target_ratios["test"]:
+                    h_alloc = {"dev": 1, "test": 0}
+                else:
+                    h_alloc = {"dev": 0, "test": 1}
 
+        h_curr = 0
         holdout_splits: tuple[SplitType, ...] = ("dev", "test")
-        curr = 0
         for split_name in holdout_splits:
             count = h_alloc.get(split_name, 0)
-            for comp in shuffled_h_comps[curr : curr + count]:
+            assigned_counts[split_name] = count
+            for comp in shuffled_h_comps[h_curr : h_curr + count]:
                 for r in comp:
                     sample_to_split[r.sample_id] = split_name
-            curr += count
+            h_curr += count
 
-    # 2. Assign standard components to train, dev, and test
+    # 2. Assign standard components targeting overall ratios across remaining needs
     if standard_comps:
         s_indices = list(range(len(standard_comps)))
         rng.shuffle(s_indices)
         shuffled_s_comps = [standard_comps[i] for i in s_indices]
 
-        # Allocate standard components targeting overall ratios
-        target_ratios = {"train": train_ratio, "dev": dev_ratio, "test": test_ratio}
-        overall_alloc = _allocate_counts(len(components), target_ratios)
-        needed_train = min(len(standard_comps), overall_alloc.get("train", 0))
-        if train_ratio > 0.0 and needed_train < 1:
-            needed_train = 1
+        needed_pos: list[SplitType] = [s for s in pos_splits if assigned_counts[s] == 0]
+        if len(standard_comps) < len(needed_pos):
+            raise ValueError(
+                f"Too few standard components ({len(standard_comps)}) to satisfy positive-ratio splits {needed_pos} without leakage."
+            )
 
-        for comp in shuffled_s_comps[:needed_train]:
-            for r in comp:
-                sample_to_split[r.sample_id] = "train"
+        standard_alloc: dict[SplitType, int] = dict.fromkeys(pos_splits, 0)
+        for s in needed_pos:
+            standard_alloc[s] = 1
 
-        remaining_standard = shuffled_s_comps[needed_train:]
-        if remaining_standard:
-            eval_ratios = {"dev": dev_ratio, "test": test_ratio}
-            eval_alloc = _allocate_counts(len(remaining_standard), eval_ratios)
-            remaining_splits: tuple[SplitType, ...] = ("dev", "test")
-            for split_name in remaining_splits:
-                count = eval_alloc.get(split_name, 0)
-                for comp in remaining_standard[curr : curr + count]:
-                    for r in comp:
-                        sample_to_split[r.sample_id] = split_name
-                curr += count
+        leftover = len(standard_comps) - len(needed_pos)
+        if leftover > 0:
+            ideal: dict[SplitType, float] = {s: len(components) * target_ratios[s] for s in pos_splits}
+            current: dict[SplitType, int] = {s: assigned_counts[s] + standard_alloc[s] for s in pos_splits}
+            split_order: tuple[SplitType, ...] = ("train", "dev", "test")
+            for _ in range(leftover):
+                best_split = max(
+                    pos_splits,
+                    key=lambda s: (ideal[s] - current[s], -split_order.index(s)),
+                )
+                standard_alloc[best_split] += 1
+                current[best_split] += 1
+
+        s_curr = 0
+        standard_splits: tuple[SplitType, ...] = ("train", "dev", "test")
+        for split_name in standard_splits:
+            count = standard_alloc.get(split_name, 0)
+            for comp in shuffled_s_comps[s_curr : s_curr + count]:
+                for r in comp:
+                    sample_to_split[r.sample_id] = split_name
+            s_curr += count
+
+    # Explicit internal postconditions:
+    assigned_sample_ids = set(sample_to_split.keys())
+    input_sample_ids = {r.sample_id for r in records}
+    if assigned_sample_ids != input_sample_ids:
+        missing = input_sample_ids - assigned_sample_ids
+        extra = assigned_sample_ids - input_sample_ids
+        raise ValueError(f"Split assignment postcondition failed: missing={missing}, extra={extra}")
+
+    for s in pos_splits:
+        assigned_in_split = [sid for sid, split in sample_to_split.items() if split == s]
+        if not assigned_in_split:
+            raise ValueError(
+                f"Split assignment postcondition failed: split '{s}' has positive ratio ({target_ratios[s]}) but no samples assigned."
+            )
 
     return [
         ManifestRecord.model_validate({**r.model_dump(), "split": sample_to_split[r.sample_id]})
@@ -299,6 +390,17 @@ def generator_holdout_split(
     holdout_generators are partitioned strictly between dev and test; zero holdout
     component samples are placed in train.
     """
+    if not holdout_generators:
+        raise ValueError(
+            "holdout_generators list must not be empty. Use speaker_disjoint_split if no holdout is desired."
+        )
+    manifest_generators = {r.generator_family for r in records if r.generator_family}
+    missing = [g for g in holdout_generators if g not in manifest_generators]
+    if missing:
+        raise ValueError(
+            f"Requested holdout generator(s) not found in manifest: {missing}. Available generators: {sorted(manifest_generators)}"
+        )
+
     holdout_set = set(holdout_generators)
     return _partition_holdout(
         records=records,
@@ -325,6 +427,17 @@ def codec_holdout_split(
     holdout_codecs are partitioned strictly between dev and test; zero holdout
     component samples are placed in train.
     """
+    if not holdout_codecs:
+        raise ValueError(
+            "holdout_codecs list must not be empty. Use speaker_disjoint_split if no holdout is desired."
+        )
+    manifest_codecs = {r.codec_channel_condition for r in records if r.codec_channel_condition}
+    missing = [c for c in holdout_codecs if c not in manifest_codecs]
+    if missing:
+        raise ValueError(
+            f"Requested holdout codec(s) not found in manifest: {missing}. Available codecs: {sorted(manifest_codecs)}"
+        )
+
     holdout_set = set(holdout_codecs)
     return _partition_holdout(
         records=records,

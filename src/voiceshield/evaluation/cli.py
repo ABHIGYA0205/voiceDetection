@@ -83,6 +83,7 @@ SCORE_CANDIDATE_KEYS = [
     "synthetic_score",
     "uncalibrated_synthetic_score",
     "score",
+    "mean_synthetic_score",
     "mean_synthetic_likelihood",
     "synthetic_likelihood",
     "calibrated_synthetic_likelihood",
@@ -95,6 +96,16 @@ WINDOW_SCORE_KEYS = [
     "calibrated_synthetic_likelihood",
     "raw_spoof_logit",
 ]
+
+
+def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Hook for json.loads/json.load that rejects duplicate keys in objects."""
+    res: dict[str, Any] = {}
+    for k, v in pairs:
+        if k in res:
+            raise ValueError(f"Duplicate JSON object key found: {k!r}")
+        res[k] = v
+    return res
 
 
 def _extract_sample_id(data: dict[str, Any], context: str = "") -> str:
@@ -138,21 +149,57 @@ def _extract_numeric_value(val: Any, key_name: str, context: str = "") -> float:
 
 
 def _extract_score(data: dict[str, Any], context: str = "") -> float:
+    extracted_scores: list[tuple[str, float]] = []
     for k in SCORE_CANDIDATE_KEYS:
         if k in data:
-            return _extract_numeric_value(data[k], key_name=k, context=context)
-    raise ValueError(
-        f"Missing score {context} (checked keys: {SCORE_CANDIDATE_KEYS}) in: {data}".strip()
-    )
+            val = data[k]
+            if val is not None and not (isinstance(val, str) and not val.strip()):
+                sc = _extract_numeric_value(val, key_name=k, context=context)
+                extracted_scores.append((k, sc))
+
+    if not extracted_scores:
+        for k in SCORE_CANDIDATE_KEYS:
+            if k in data:
+                _extract_numeric_value(data[k], key_name=k, context=context)
+        raise ValueError(
+            f"Missing score {context} (checked keys: {SCORE_CANDIDATE_KEYS}) in: {data}".strip()
+        )
+
+    first_key, first_val = extracted_scores[0]
+    for key, val in extracted_scores[1:]:
+        if val != first_val:
+            raise ValueError(
+                f"Conflicting score fields {context}: '{first_key}'={first_val} and '{key}'={val} have different values."
+            )
+
+    return first_val
 
 
 def _extract_window_score(data: dict[str, Any], context: str = "") -> float:
+    extracted_scores: list[tuple[str, float]] = []
     for k in WINDOW_SCORE_KEYS:
         if k in data:
-            return _extract_numeric_value(data[k], key_name=k, context=context)
-    raise ValueError(
-        f"Missing window score {context} (checked keys: {WINDOW_SCORE_KEYS}) in: {data}".strip()
-    )
+            val = data[k]
+            if val is not None and not (isinstance(val, str) and not val.strip()):
+                sc = _extract_numeric_value(val, key_name=k, context=context)
+                extracted_scores.append((k, sc))
+
+    if not extracted_scores:
+        for k in WINDOW_SCORE_KEYS:
+            if k in data:
+                _extract_numeric_value(data[k], key_name=k, context=context)
+        raise ValueError(
+            f"Missing window score {context} (checked keys: {WINDOW_SCORE_KEYS}) in: {data}".strip()
+        )
+
+    first_key, first_val = extracted_scores[0]
+    for key, val in extracted_scores[1:]:
+        if val != first_val:
+            raise ValueError(
+                f"Conflicting window score fields {context}: '{first_key}'={first_val} and '{key}'={val} have different values."
+            )
+
+    return first_val
 
 
 def load_scores_file(
@@ -174,7 +221,7 @@ def load_scores_file(
                 if not line_str:
                     continue
                 try:
-                    obj = json.loads(line_str)
+                    obj = json.loads(line_str, object_pairs_hook=_reject_duplicate_pairs)
                 except json.JSONDecodeError as exc:
                     raise ValueError(f"Invalid JSON at line {line_num} in {path}: {exc}") from exc
                 if not isinstance(obj, dict):
@@ -259,7 +306,10 @@ def load_scores_file(
 
     elif suffix == ".json":
         with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+            try:
+                data = json.load(f, object_pairs_hook=_reject_duplicate_pairs)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
             if isinstance(data, dict):
                 for k, v in data.items():
                     if not isinstance(k, str) or not k.strip():
@@ -342,6 +392,8 @@ def load_scores_file(
             reader = csv.DictReader(f)
             if not reader.fieldnames:
                 raise ValueError(f"CSV file is empty or missing headers: {path}")
+            if len(reader.fieldnames) != len(set(reader.fieldnames)):
+                raise ValueError(f"Duplicate column headers found in CSV: {reader.fieldnames}")
             for row_num, row in enumerate(reader, start=2):
                 sid = _extract_sample_id(row, context=f"at CSV row {row_num}")
                 if sid in sample_scores:
@@ -378,12 +430,17 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = load_config(args.config) if args.config else None
 
-    # Load scores
+    # Load scores inside validation try-catch
     if not args.scores.exists():
         sys.stderr.write(f"ERROR: Scores file not found: {args.scores}\n")
         return 1
 
-    scores_obj, timings = load_scores_file(args.scores)
+    try:
+        scores_obj, timings = load_scores_file(args.scores)
+    except (ValueError, csv.Error, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"\nVALIDATION ERROR: {exc}\n")
+        return 1
+
     dir_enum = ScoreDirection(args.direction)
     agg_enum = AggregationRule(args.aggregation)
 

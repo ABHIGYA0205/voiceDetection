@@ -168,7 +168,7 @@ The FastAPI service exposes an ephemeral file upload analysis route guarded by c
 
 ## 9. Scientific Evaluation Toolkit
 
-VoiceShield provides a scientifically rigorous evaluation toolkit for benchmark analysis:
+VoiceShield provides an evaluation toolkit with scientific guardrails for benchmark analysis:
 
 ```bash
 # Evaluate model predictions against a canonical manifest
@@ -188,11 +188,11 @@ uv run voiceshield-eval \
 ```
 
 Key capabilities and scientific guardrails:
-- **Connected-Component Partitioning**: Dataset splits are atomic connected components across declared `speaker_id`, `source_utterance_id`, and exact `sha256` checksum links. Holdout constraints operate on whole components. Split ratios may be approximate because atomic components cannot be divided.
+- **Connected-Component Partitioning**: Dataset splits are atomic connected components across declared `speaker_id`, `source_utterance_id`, and declared exact `sha256` checksum links. Holdout constraints operate on whole components. Split ratios currently apply to atomic component counts rather than exact record counts because components cannot be divided. Declared SHA-256 equality is used for component grouping and duplicate detection; the code does not yet verify audio files against declared checksums and does not perform acoustic near-duplicate detection.
 - **Strict Score Ingestion**: Preserves exact `0.0` detection scores without Boolean fallback; strictly rejects duplicate IDs, empty values, Boolean types, non-numeric values, and NaN/Inf scores.
 - **Complete Score Coverage by Default**: Default evaluation requires 100% complete score coverage across all unique manifest sample IDs. Unknown score IDs are refused. Partial evaluation requires explicit opt-in (`--allow-partial-scores`) and is prominently flagged in reports.
 - **Threshold-Selection Isolation**: Decision thresholds are selected on `dev` split only (or on `train` split only when no dev split is present); test splits and unassigned mixtures are never used for threshold optimization.
-- **Fail-Closed Calibration**: Raw/softmax scores are uncalibrated and do not produce Brier scores, Expected Calibration Error (ECE), or reliability diagrams without an identified, fitted calibrator artifact.
+- **Fail-Closed Calibration**: Raw/softmax scores are uncalibrated and do not produce Brier scores, Expected Calibration Error (ECE), or reliability diagrams without an identified, fitted calibrator artifact. Calibration metrics and reliability plots are unavailable through the high-level evaluator until an identified calibrator artifact loader is implemented.
 - **Discrimination Metrics**: Linear-interpolated Equal Error Rate (EER), ROC-AUC, PR-AUC, minDCF with configurable costs ($C_{\text{miss}}, C_{\text{fa}}$) and prior $P_{\text{target}}$, operating FPR at target TPR levels (90%, 95%, 99%).
 - **Operating Point Metrics**: Confusion matrix (TP, FP, TN, FN), Precision, Recall, Specificity, F1 Score, and Balanced Accuracy.
 - **Clustered Bootstrap Inference**: 95% confidence intervals clustered by speaker ID or source utterance to prevent overconfident standard errors from repeated speakers.

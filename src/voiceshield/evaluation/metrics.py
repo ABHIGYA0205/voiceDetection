@@ -1,4 +1,4 @@
-"""Scientifically rigorous evaluation metrics for binary audio deepfake detection."""
+"""Evaluation metrics with scientific guardrails for binary audio deepfake detection."""
 
 from __future__ import annotations
 
