@@ -385,6 +385,48 @@ def test_correction_d_true_zip_sys_path_loading(tmp_path: Path) -> None:
     assert "ZIP_IMPORT_LOAD_SUCCESS" in res.stdout
 
 
+def test_correction_d_packaged_resource_absent_allows_repository_fallback() -> None:
+    """Correction D: When packaged resource is absent, repository fallback is permitted."""
+    fake_absent = MagicMock()
+    fake_absent.is_file.return_value = False
+    fake_module = MagicMock()
+    fake_module.joinpath.return_value = fake_absent
+
+    with patch("importlib.resources.files", return_value=fake_module):
+        cfg = load_config(None)
+        assert (
+            cfg.compute_hash() == "43a9ce74cadab3c63fc0336eeef417e4014833c6c67e33e481b6b4fe81a822ef"
+        )
+
+
+def test_correction_d_packaged_resource_valid_wins_over_repository() -> None:
+    """Correction D: When packaged resource exists and is valid, packaged resource takes precedence."""
+    import yaml
+
+    base_cfg = VoiceShieldConfig()
+    custom_cfg = apply_config_overrides(
+        base_cfg, threshold=0.77, window_seconds=3.0, checkpoint_path="models/weights/custom.pth"
+    )
+    valid_custom_yaml = yaml.safe_dump(custom_cfg.model_dump())
+
+    class ValidResource:
+        def is_file(self) -> bool:
+            return True
+
+        def read_text(self, encoding: str = "utf-8") -> str:
+            return valid_custom_yaml
+
+    fake_module = MagicMock()
+    fake_module.joinpath.return_value = ValidResource()
+
+    with patch("importlib.resources.files", return_value=fake_module):
+        cfg = load_config(None)
+        assert cfg.model.checkpoint_path == "models/weights/custom.pth"
+        assert cfg.windowing.window_seconds == 3.0
+        assert cfg.temporal_policy.threshold_high == 0.77
+        assert cfg.compute_hash() == custom_cfg.compute_hash()
+
+
 def test_correction_d_malformed_packaged_resource_fails_visibly() -> None:
     """Correction D: Malformed higher-precedence packaged resource raises ConfigError and does not silently fall through."""
 
@@ -400,6 +442,42 @@ def test_correction_d_malformed_packaged_resource_fails_visibly() -> None:
 
     with patch("importlib.resources.files", return_value=fake_module):
         with pytest.raises(ConfigError, match="YAML syntax error"):
+            load_config(None)
+
+
+def test_correction_d_packaged_resource_unicode_decode_error_fails_closed() -> None:
+    """Correction D: Packaged resource with UnicodeDecodeError raises ConfigError and does not fall through."""
+
+    class BrokenResource:
+        def is_file(self) -> bool:
+            return True
+
+        def read_text(self, encoding: str = "utf-8") -> str:
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    fake_module = MagicMock()
+    fake_module.joinpath.return_value = BrokenResource()
+
+    with patch("importlib.resources.files", return_value=fake_module):
+        with pytest.raises(ConfigError, match="Invalid UTF-8 in packaged canonical configuration"):
+            load_config(None)
+
+
+def test_correction_d_packaged_resource_os_error_fails_closed() -> None:
+    """Correction D: Packaged resource with OSError raises ConfigError and does not fall through."""
+
+    class BrokenResource:
+        def is_file(self) -> bool:
+            return True
+
+        def read_text(self, encoding: str = "utf-8") -> str:
+            raise OSError("I/O error reading package archive entry")
+
+    fake_module = MagicMock()
+    fake_module.joinpath.return_value = BrokenResource()
+
+    with patch("importlib.resources.files", return_value=fake_module):
+        with pytest.raises(ConfigError, match="Failed to read packaged canonical configuration"):
             load_config(None)
 
 

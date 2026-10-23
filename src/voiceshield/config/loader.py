@@ -93,29 +93,63 @@ def load_config(path: str | Path | None = None) -> VoiceShieldConfig:
         target_path = Path(path)
         if not target_path.is_file():
             raise ConfigError(f"Configuration file not found: {target_path}")
-        return _parse_and_validate_yaml(target_path.read_text(encoding="utf-8"), str(target_path))
+        try:
+            raw_text = target_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ConfigError(
+                f"Invalid UTF-8 in configuration file ({target_path}): {exc}"
+            ) from exc
+        except OSError as exc:
+            raise ConfigError(f"Failed to read configuration file ({target_path}): {exc}") from exc
+        return _parse_and_validate_yaml(raw_text, str(target_path))
 
     # Precedence 1: Packaged canonical resource via importlib.resources (handles zip/wheel archives and directories)
+    traversable = None
     try:
         import importlib.resources as pkg_resources
 
-        traversable = pkg_resources.files("voiceshield.config").joinpath("default.yaml")
-        if traversable.is_file():
-            raw_text = traversable.read_text(encoding="utf-8")
-            return _parse_and_validate_yaml(raw_text, f"packaged resource ({traversable})")
-    except ConfigError:
-        raise
-    except Exception:
-        pass
+        candidate = pkg_resources.files("voiceshield.config").joinpath("default.yaml")
+        if candidate.is_file():
+            traversable = candidate
+    except (ImportError, TypeError, ValueError, AttributeError, FileNotFoundError):
+        traversable = None
 
-    # Package directory relative to __file__
-    pkg_file = Path(__file__).resolve().parent / "default.yaml"
-    if pkg_file.is_file():
-        return _parse_and_validate_yaml(pkg_file.read_text(encoding="utf-8"), str(pkg_file))
+    if traversable is None:
+        pkg_file = Path(__file__).resolve().parent / "default.yaml"
+        if pkg_file.is_file():
+            traversable = pkg_file
+
+    if traversable is not None:
+        try:
+            raw_text = traversable.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ConfigError(
+                f"Invalid UTF-8 in packaged canonical configuration ({traversable}): {exc}"
+            ) from exc
+        except OSError as exc:
+            raise ConfigError(
+                f"Failed to read packaged canonical configuration ({traversable}): {exc}"
+            ) from exc
+        except Exception as exc:
+            raise ConfigError(
+                f"Error reading packaged canonical configuration ({traversable}): {exc}"
+            ) from exc
+
+        return _parse_and_validate_yaml(raw_text, f"packaged resource ({traversable})")
 
     # Precedence 2: Source-tree canonical location
     repo_path = Path(__file__).resolve().parents[3] / "configs" / "default.yaml"
     if repo_path.is_file():
+        try:
+            raw_text = repo_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ConfigError(
+                f"Invalid UTF-8 in repository configuration ({repo_path}): {exc}"
+            ) from exc
+        except OSError as exc:
+            raise ConfigError(
+                f"Failed to read repository configuration ({repo_path}): {exc}"
+            ) from exc
         return _parse_and_validate_yaml(repo_path.read_text(encoding="utf-8"), str(repo_path))
 
     raise ConfigError(
