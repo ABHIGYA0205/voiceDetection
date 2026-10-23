@@ -29,6 +29,10 @@ import soundfile as sf
 from fastapi.testclient import TestClient
 
 from services.api.main import app
+from services.api.resource_admission import (
+    MAX_UPLOAD_REQUEST_BYTES,
+    AtomicAdmissionController,
+)
 from services.api.routes.analyze_file import (
     MAX_FILE_BYTES,
     sanitize_filename,
@@ -37,6 +41,7 @@ from voiceshield.models.aasist_adapter import (
     AASIST_L_DEFAULT_CONFIG,
     AASISTLDetector,
 )
+from voiceshield.models.base import BaseDetector, DetectorOutput
 from voiceshield.pipeline.cli import main as cli_main
 from voiceshield.pipeline.file_evaluator import evaluate_audio
 from voiceshield.vendor.aasist import AASISTModel
@@ -364,6 +369,8 @@ def test_api_concurrent_requests_guarded(tmp_path: Path) -> None:
     wav_bytes = wav_path.read_bytes()
 
     with TestClient(app) as client:
+        # Allow up to 5 concurrent upload slots so all 3 pass admission and test worker serialization
+        app.state.file_upload_admission = AtomicAdmissionController(limit=5, name="file_uploads")
         results: list[dict[str, Any]] = []
         lock = threading.Lock()
 
@@ -386,3 +393,206 @@ def test_api_concurrent_requests_guarded(tmp_path: Path) -> None:
         for data in results:
             assert data["status"] == "success"
             assert data["duration_seconds"] == 4.0
+        assert app.state.file_upload_admission.reserved_count == 0
+
+
+class ControlledUploadDetector(BaseDetector):
+    """Detector mock that blocks on call 1 to test physical execution concurrency."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.call_count = 0
+        self.active_count = 0
+        self.max_concurrency = 0
+        self.call1_started = threading.Event()
+        self.call1_release = threading.Event()
+
+    def predict(self, audio: Any) -> DetectorOutput:
+        with self.lock:
+            self.call_count += 1
+            call_idx = self.call_count
+            self.active_count += 1
+            self.max_concurrency = max(self.max_concurrency, self.active_count)
+
+        try:
+            if call_idx == 1:
+                self.call1_started.set()
+                self.call1_release.wait(timeout=5.0)
+            n_samples = len(audio) if hasattr(audio, "__len__") else 64000
+            logit_spoof = float(np.log(max(0.25, 1e-6)))
+            logit_bonafide = float(np.log(max(1.0 - 0.25, 1e-6)))
+            return DetectorOutput(
+                raw_logits=(logit_spoof, logit_bonafide),
+                bonafide_score=logit_bonafide - logit_spoof,
+                synthetic_score=0.25,
+                uncalibrated_synthetic_score=0.25,
+                is_synthetic_suspected=False,
+                input_samples=n_samples,
+                device_used="cpu",
+                model_id="ControlledUploadDetector",
+            )
+        finally:
+            with self.lock:
+                self.active_count -= 1
+
+    def predict_batch(self, batch: Any) -> list[DetectorOutput]:
+        return [self.predict(x) for x in batch]
+
+
+def test_api_upload_concurrency_admission_limit_and_worker_serialization(tmp_path: Path) -> None:
+    """Test D: Concurrent accepted uploads with limit=2.
+
+    Using one TestClient lifespan:
+    - set upload admission limit to 2;
+    - block the first accepted request in controlled evaluation;
+    - submit additional upload requests concurrently;
+    - at most 2 requests pass body admission;
+    - 3rd excess request returns 429 promptly;
+    - release accepted work;
+    - all reservations return to zero;
+    - R5 maximum physical detector concurrency strictly remains one.
+    """
+    wav_path = create_synthetic_wav(tmp_path / "valid.wav", duration_s=4.0)
+    wav_bytes = wav_path.read_bytes()
+
+    detector = ControlledUploadDetector()
+    with TestClient(app) as client:
+        orig_detector = getattr(app.state, "detector", None)
+        try:
+            app.state.detector = detector
+            app.state.file_upload_admission = AtomicAdmissionController(
+                limit=2, name="file_uploads"
+            )
+
+            resp1: dict[str, Any] = {}
+            resp2: dict[str, Any] = {}
+            resp3: dict[str, Any] = {}
+
+            def send_req1() -> None:
+                r = client.post(
+                    "/api/v1/analyze/file",
+                    files={"file": ("req1.wav", io.BytesIO(wav_bytes), "audio/wav")},
+                )
+                resp1["status_code"] = r.status_code
+                resp1["json"] = r.json()
+
+            def send_req2() -> None:
+                r = client.post(
+                    "/api/v1/analyze/file",
+                    files={"file": ("req2.wav", io.BytesIO(wav_bytes), "audio/wav")},
+                )
+                resp2["status_code"] = r.status_code
+                resp2["json"] = r.json()
+
+            def send_req3() -> None:
+                r = client.post(
+                    "/api/v1/analyze/file",
+                    files={"file": ("req3.wav", io.BytesIO(wav_bytes), "audio/wav")},
+                )
+                resp3["status_code"] = r.status_code
+                resp3["json"] = r.json()
+                resp3["headers"] = dict(r.headers)
+
+            t1 = threading.Thread(target=send_req1)
+            t1.start()
+
+            # Wait until request 1 has physically entered detector call 1
+            assert detector.call1_started.wait(timeout=5.0)
+            assert app.state.file_upload_admission.reserved_count == 1
+
+            # Submit request 2 (which should pass admission and wait for worker queue)
+            t2 = threading.Thread(target=send_req2)
+            t2.start()
+
+            # Give a brief moment for request 2 to pass middleware admission
+            import time
+
+            time.sleep(0.05)
+            assert app.state.file_upload_admission.reserved_count == 2
+
+            # Submit request 3 (must fail admission immediately with 429)
+            t3 = threading.Thread(target=send_req3)
+            t3.start()
+            t3.join(timeout=2.0)
+
+            assert resp3["status_code"] == 429
+            detail = resp3["json"]["detail"]
+            assert detail["error_code"] == "FILE_UPLOAD_CONCURRENCY_LIMIT_REACHED"
+            assert resp3["headers"].get("retry-after") == "5"
+
+            # Now release call 1
+            detector.call1_release.set()
+            t1.join(timeout=5.0)
+            t2.join(timeout=5.0)
+
+            assert resp1["status_code"] == 200
+            assert resp2["status_code"] == 200
+
+            # All reservations returned to zero
+            assert app.state.file_upload_admission.reserved_count == 0
+
+            # Physical detector execution concurrency strictly remained 1
+            assert detector.max_concurrency == 1
+        finally:
+            app.state.detector = orig_detector
+
+
+def test_api_upload_total_request_ceiling_rejected_before_detector() -> None:
+    """Test E: Oversized total request body rejected before detector invocation.
+
+    - Content-Length exceeding MAX_UPLOAD_REQUEST_BYTES returns 413;
+    - Detector is not invoked;
+    - Reservation released back to zero.
+    """
+    detector = ControlledUploadDetector()
+    with TestClient(app) as client:
+        orig_detector = getattr(app.state, "detector", None)
+        try:
+            app.state.detector = detector
+            overflow_len = str(MAX_UPLOAD_REQUEST_BYTES + 1024)
+            resp = client.post(
+                "/api/v1/analyze/file",
+                headers={
+                    "Content-Length": overflow_len,
+                    "Content-Type": "multipart/form-data; boundary=sample_boundary",
+                },
+                content=b"",
+            )
+            assert resp.status_code == 413
+            detail = resp.json()["detail"]
+            assert detail["error_code"] == "PAYLOAD_TOO_LARGE"
+            assert detector.call_count == 0
+            assert app.state.file_upload_admission.reserved_count == 0
+        finally:
+            app.state.detector = orig_detector
+
+
+def test_api_upload_error_cleanup_releases_reservation() -> None:
+    """Test F: Request errors and processing failures release upload reservations."""
+    with TestClient(app) as client:
+        admission: AtomicAdmissionController = app.state.file_upload_admission
+        assert admission.reserved_count == 0
+
+        # 1. Corrupt audio (422)
+        resp1 = client.post(
+            "/api/v1/analyze/file",
+            files={"file": ("corrupt.wav", io.BytesIO(b"RIFF\x24\x00\x00\x00NOTWAV"), "audio/wav")},
+        )
+        assert resp1.status_code == 422
+        assert admission.reserved_count == 0
+
+        # 2. Unsupported format (415)
+        resp2 = client.post(
+            "/api/v1/analyze/file",
+            files={"file": ("test.txt", io.BytesIO(b"hello world"), "text/plain")},
+        )
+        assert resp2.status_code == 415
+        assert admission.reserved_count == 0
+
+        # 3. Empty file (422)
+        resp3 = client.post(
+            "/api/v1/analyze/file",
+            files={"file": ("empty.wav", io.BytesIO(b""), "audio/wav")},
+        )
+        assert resp3.status_code == 422
+        assert admission.reserved_count == 0

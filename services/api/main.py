@@ -14,6 +14,12 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from services.api.inference_worker import InferenceWorker
+from services.api.resource_admission import (
+    MAX_CONCURRENT_FILE_UPLOADS_DEFAULT,
+    MAX_CONCURRENT_SESSIONS_DEFAULT,
+    AtomicAdmissionController,
+    FileUploadAdmissionMiddleware,
+)
 from services.api.routes.analyze_file import router as analyze_router
 from services.api.routes.stream import router as stream_router
 from voiceshield import __version__
@@ -29,12 +35,53 @@ from voiceshield.vendor.aasist import AASISTModel
 logger = logging.getLogger("voiceshield.api")
 
 
+def _parse_positive_int_env(key: str, default: int) -> int:
+    """Parse positive integer environment variable safely with fallback on invalid/negative/zero input."""
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+        if val > 0:
+            return val
+        logger.warning(
+            "Invalid %s value %r (must be a positive integer); using fallback %d",
+            key,
+            raw,
+            default,
+        )
+        return default
+    except (ValueError, TypeError):
+        logger.warning(
+            "Invalid %s value %r (must be an integer); using fallback %d",
+            key,
+            raw,
+            default,
+        )
+        return default
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Preload model detector once at startup and initialize concurrency worker for Apple Silicon M3."""
+    max_concurrent_sessions = _parse_positive_int_env(
+        "VOICESHIELD_MAX_CONCURRENT_SESSIONS", MAX_CONCURRENT_SESSIONS_DEFAULT
+    )
+    max_concurrent_file_uploads = _parse_positive_int_env(
+        "VOICESHIELD_MAX_CONCURRENT_FILE_UPLOADS", MAX_CONCURRENT_FILE_UPLOADS_DEFAULT
+    )
+
+    app.state.max_concurrent_sessions = max_concurrent_sessions
+    app.state.max_concurrent_file_uploads = max_concurrent_file_uploads
+
+    app.state.streaming_admission = AtomicAdmissionController(
+        limit=max_concurrent_sessions, name="streaming_sessions"
+    )
+    app.state.file_upload_admission = AtomicAdmissionController(
+        limit=max_concurrent_file_uploads, name="file_uploads"
+    )
     app.state.inference_worker = InferenceWorker()
     app.state.active_streaming_sessions = {}
-    app.state.max_concurrent_sessions = int(os.getenv("VOICESHIELD_MAX_CONCURRENT_SESSIONS", "10"))
 
     checkpoint_env = os.getenv("VOICESHIELD_CHECKPOINT_PATH", "models/weights/AASIST-L.pth")
     force_mock = os.getenv("VOICESHIELD_MOCK_MODEL", "false").lower() in ("true", "1", "yes")
@@ -95,7 +142,32 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
-        logger.info("VoiceShield API shutting down. Draining inference worker...")
+        logger.info("VoiceShield API shutting down. Closing admission intake...")
+        streaming_admission: AtomicAdmissionController | None = getattr(
+            app.state, "streaming_admission", None
+        )
+        if streaming_admission is not None:
+            streaming_admission.close_intake()
+            leaked_streams = streaming_admission.reserved_count
+            if leaked_streams > 0:
+                logger.warning(
+                    "Streaming admission closed with %d unreleased reservation(s).",
+                    leaked_streams,
+                )
+
+        upload_admission: AtomicAdmissionController | None = getattr(
+            app.state, "file_upload_admission", None
+        )
+        if upload_admission is not None:
+            upload_admission.close_intake()
+            leaked_uploads = upload_admission.reserved_count
+            if leaked_uploads > 0:
+                logger.warning(
+                    "File upload admission closed with %d unreleased reservation(s).",
+                    leaked_uploads,
+                )
+
+        logger.info("Draining inference worker...")
         worker: InferenceWorker | None = getattr(app.state, "inference_worker", None)
         if worker is not None:
             raw_timeout = os.getenv("VOICESHIELD_INFERENCE_SHUTDOWN_TIMEOUT", "5.0")
@@ -155,6 +227,7 @@ app.state.allowed_origins = allowed_origins
 # Disable credentials if wildcard origin is used to prevent CORS specification violations and security risks
 allow_credentials = False if "*" in allowed_origins else True
 
+app.add_middleware(FileUploadAdmissionMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,

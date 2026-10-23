@@ -102,9 +102,16 @@ flowchart TD
 ### 3.6 WebSocket Streaming Security & Session Lifecycle
 
 - **Origin Verification**: Every incoming WebSocket connection checks the HTTP `Origin` header against `VOICESHIELD_CORS_ORIGINS`. Disallowed cross-site origins are rejected before handshake acceptance (`WS_1008_POLICY_VIOLATION`).
-- **Connection Concurrency**: Maximum concurrent streaming sessions are guarded by `VOICESHIELD_MAX_CONCURRENT_SESSIONS` (default: 10). Excess sessions receive a structured `CONCURRENCY_LIMIT_REACHED` error.
-- **Frame Size Ceiling**: Streaming audio frames are capped at `MAX_FRAME_BYTES_DEFAULT` (128 KB = 131,072 bytes). Client handshake metadata cannot increase this ceiling. Frames exceeding this limit trigger immediate closure with `WS_1009_MESSAGE_TOO_BIG`.
-- **Idle Timeout**: Inactive connections exceeding 30.0 seconds of silence/no-traffic are disconnected cleanly (`WS_1000_NORMAL_CLOSURE`).
+- **Atomic Session Admission (Audit M-03)**:
+  - Streaming slots are reserved atomically via `AtomicAdmissionController` *before* `websocket.accept()`, handshake wait, or `StreamingSession` construction.
+  - Handshaking connections count against the session ceiling (`reserved_count` reflects handshaking + active streams).
+  - Maximum concurrent streaming sessions are guarded by `VOICESHIELD_MAX_CONCURRENT_SESSIONS` (default: 10). Excess sessions receive a structured `CONCURRENCY_LIMIT_REACHED` error with code 1008 without entering handshake wait.
+  - Every reservation is released exactly once in `finally:` blocks across all error, timeout, and cancellation paths.
+- **Client Metadata Ceilings (Audit M-03)**:
+  - Client handshake metadata can only *tighten* (lower) server-owned ceilings; metadata can **never** raise server ceilings.
+  - Server Defaults: `MAX_FRAME_BYTES_DEFAULT` (128 KB = 131,072 bytes), `MAX_STREAM_DURATION_SECONDS_DEFAULT` (3,600.0s = 1 hour), `DEFAULT_IDLE_TIMEOUT_SECONDS` (30.0s).
+  - Lower Bounds: `max_frame_bytes >= 1024`, `max_stream_duration >= 1.0s`, `idle_timeout >= 0.1s`.
+  - Non-numeric, boolean, NaN, and ±Infinity metadata values are safely rejected and fall back to server defaults.
 - **Sampling Rate Limits**: Ingested audio must conform to the inclusive range `8,000 Hz <= sample_rate <= 192,000 Hz`. Out-of-bounds rates are rejected with `UnsupportedAudioError`.
 - **Explicit Little-Endian PCM Contract**: Streaming frames accept little-endian encodings: 16-bit signed integer (`<i2`), 32-bit signed integer (`<i4`), and 32-bit floating point (`<f4`).
 - **Byte and Interleaved-Frame Alignment**: Byte buffers must be strictly divisible by the sample width (2 bytes for int16, 4 bytes for int32/float32) and complete frame width (`bytes_per_sample * channels`). Partial samples or incomplete interleaved channel frames are rejected with `AudioDecodingError` (subclass of `CorruptAudioError`).
@@ -131,9 +138,11 @@ flowchart TD
   - When the stale inference call eventually completes, its score and decision are suppressed (`complete_inference` returns `None`), no score is recorded in temporal history, and the drop counter is **not** incremented a second time.
   - A fresh post-gap pending window is immediately dispatched once the worker finishes.
 
-### 3.8 Zero-Persistence Audio Privacy Policy
+### 3.8 Audio Privacy & Ephemeral Spooling Lifecycle
 
-- **No Disk Storage**: Raw PCM audio bytes received over REST or WebSocket are buffered strictly in volatile memory (`io.BytesIO` or `AudioRingBuffer`).
+- **No Long-Term Audio Retention**: Raw PCM audio bytes received over REST or WebSocket are never intentionally persisted after request cleanup. No audio frames are saved to databases, permanent disks, or cloud storage.
+- **Starlette UploadFile Spooling Behavior**:
+  Starlette's `UploadFile` utilizes Python's standard library `tempfile.SpooledTemporaryFile(max_size=1048576)` (1 MB). Uploads up to 1 MB remain strictly in volatile memory buffers. When a multipart upload exceeds 1 MB, the OS spools the stream into an ephemeral temporary file on the host filesystem. Upon request completion, FastAPI's background cleanup closes and deletes the temporary file automatically. VoiceShield reads the accepted file stream into a bounded in-memory buffer (`io.BytesIO`) for evaluation and does not retain the temporary file.
 - **No Residual Logging**: Log messages across `services/api/` and `src/voiceshield/` record only session IDs, sampling rates, window counts, and timing statistics. **No audio samples, transcripts, spoken words, or personally identifiable data are ever logged.**
 - **Automatic Browser Cleanup**: The React dashboard uses `AudioWorklet` with zero browser-side caching or IndexedDB storage. Upon stopping or unmounting, all tracks on `MediaStream` are explicitly stopped (`track.stop()`), and `AudioContext` and `WebSocket` connections are closed.
 
@@ -141,6 +150,31 @@ flowchart TD
 
 - **Control**: Automatic credential restriction on wildcard origin.
 - **Mechanism**: In `services/api/main.py`, if `VOICESHIELD_CORS_ORIGINS` contains `*`, `allow_credentials` is automatically set to `False` to prevent browser CORS violations and credential leakage risks.
+
+### 3.10 Pre-Parsing File-Upload Admission & Request-Body Ceiling (Audit M-03)
+
+- **Pre-Parsing ASGI Middleware**:
+  FastAPI's default multipart parsing buffers/spools request bodies *before* endpoint handler execution. To prevent unmetered memory/disk consumption by concurrent uploads, VoiceShield intercepts `POST /api/v1/analyze/file` in pure ASGI middleware (`FileUploadAdmissionMiddleware`) *before* body consumption or multipart parsing begins.
+- **Upload Concurrency Guard**:
+  Regulated by `AtomicAdmissionController` with limit `VOICESHIELD_MAX_CONCURRENT_FILE_UPLOADS` (positive integer, default: 2). Requests arriving when admission is saturated are rejected immediately with HTTP 429 (`FILE_UPLOAD_CONCURRENCY_LIMIT_REACHED`, `Retry-After: 5`, `Connection: close`) without reading or spooling the request body.
+- **Two-Layer Total Request-Body Ceiling**:
+  Total request body size and individual audio file size are bounded separately:
+  - Individual Audio File Limit: `MAX_FILE_BYTES = 25 MB` (26,214,400 bytes), enforced within the route handler.
+  - Multipart Protocol Overhead: `MAX_UPLOAD_REQUEST_OVERHEAD_BYTES = 1 MB` (1,048,576 bytes).
+  - Total Request Body Ceiling: `MAX_UPLOAD_REQUEST_BYTES = 26 MB` (27,262,976 bytes).
+  Enforced in two defensive layers:
+  1. **Layer A (Content-Length Precheck)**: If a declared `Content-Length` header exceeds 26 MB, the request is immediately rejected with HTTP 413 `PAYLOAD_TOO_LARGE` without reading any request body bytes.
+  2. **Layer B (Streaming Receive Counter)**: For chunked transfer encoding, missing length headers, or false headers, the ASGI `receive` callable is wrapped with a byte counter. As chunks arrive, the cumulative size is tracked. If the total exceeds 26 MB, reception terminates immediately and a structured HTTP 413 `PAYLOAD_TOO_LARGE` error is returned.
+
+### 3.11 Recommended Deployment & Reverse-Proxy Hardening
+
+While VoiceShield implements strict application-level resource bounding, application defenses **do not replace** edge security, TLS termination, user authentication, or reverse-proxy protection for public internet deployments. Production deployments must place VoiceShield behind a hardened reverse proxy (e.g., Nginx, Caddy, Cloudflare, AWS ALB) configured with:
+
+1. **Request Body Limits**: Match the application total body ceiling (e.g. `client_max_body_size 26m;` in Nginx) to drop oversized attacks before forwarding to the application process.
+2. **Connection & Rate Limiting**: Enforce IP-level connection limits (`limit_conn`) and request rate limits (`limit_req`) on `/api/v1/analyze/file` and `/api/v1/stream`.
+3. **Read / Idle Timeouts**: Configure proxy read and idle timeouts no greater than the application ceiling (e.g. `proxy_read_timeout 30s;`).
+4. **TLS Termination & Authentication**: Enforce HTTPS (`wss://` and `https://`) with modern cipher suites and integrate mutual TLS or API token authentication at the proxy layer.
+5. **Host Hardening**: Run the API process in an unprivileged container or sandbox with strict memory and CPU cgroups.
 
 ---
 

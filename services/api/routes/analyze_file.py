@@ -6,30 +6,24 @@ import io
 import re
 import urllib.parse
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
-from pydantic import BaseModel, Field
 
 from services.api.inference_worker import InferenceWorker, InferenceWorkerClosedError
-from voiceshield.core.schema import Disclaimers
+from services.api.resource_admission import (
+    MAX_FILE_BYTES as MAX_FILE_BYTES,
+)
+from services.api.resource_admission import (
+    ApiErrorDetail as ApiErrorDetail,
+)
 from voiceshield.pipeline.file_evaluator import FileInferenceResult, evaluate_audio
 
 router = APIRouter(prefix="/api/v1", tags=["Analysis"])
 
 # Constraints
-MAX_FILE_BYTES = 25 * 1024 * 1024  # 25 MB
 MAX_AUDIO_SECONDS = 300.0  # 5 minutes
 SUPPORTED_EXTENSIONS = {".wav", ".flac"}
-
-
-class ApiErrorDetail(BaseModel):
-    """Structured error payload for API rejections."""
-
-    error_code: str = Field(description="Machine-readable error classification.")
-    message: str = Field(description="Human-readable explanation of rejection.")
-    details: dict[str, Any] = Field(default_factory=dict, description="Diagnostic details.")
-    disclaimers: Disclaimers = Field(default_factory=Disclaimers)
 
 
 def sanitize_filename(filename: str | None) -> str:
@@ -116,7 +110,7 @@ async def analyze_audio_file(
         )
 
     # 2. Size limit enforcement (read up to MAX_FILE_BYTES + 1 to detect overflow)
-    # Never write to disk: strictly buffer in memory
+    # Ephemeral in-memory evaluation buffer; no permanent persistence
     content = await file.read(MAX_FILE_BYTES + 1)
     if len(content) > MAX_FILE_BYTES:
         raise HTTPException(

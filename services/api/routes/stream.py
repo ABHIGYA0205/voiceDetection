@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import uuid
 from typing import Any, Literal
 
@@ -12,6 +13,10 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
 from services.api.inference_worker import InferenceWorker, InferenceWorkerClosedError
+from services.api.resource_admission import (
+    MAX_CONCURRENT_SESSIONS_DEFAULT,
+    AtomicAdmissionController,
+)
 from voiceshield.core.schema import Disclaimers
 from voiceshield.dsp.exceptions import AudioPreprocessingError
 from voiceshield.models.base import BaseDetector
@@ -25,9 +30,33 @@ router = APIRouter(prefix="/api/v1", tags=["Streaming"])
 MAX_FRAME_BYTES_DEFAULT = 131072  # 128 KB
 MAX_STREAM_DURATION_SECONDS_DEFAULT = 3600.0  # 1 hour
 DEFAULT_IDLE_TIMEOUT_SECONDS = 30.0
-MAX_CONCURRENT_SESSIONS_DEFAULT = 10
 SUPPORTED_PCM_ENCODINGS = {"int16", "int32", "float32"}
 SUPPORTED_PROTOCOL_VERSIONS = {"1.0"}
+
+
+def _parse_clamped_numeric(
+    val: Any,
+    min_val: float,
+    max_ceiling: float,
+    as_int: bool = False,
+) -> float | int | None:
+    """Parse and clamp numeric metadata, ensuring it only tightens server ceilings.
+
+    Rejects bool, non-numeric, NaN, and infinite values.
+    Returns clamped value between [min_val, max_ceiling], or None if invalid.
+    """
+    if isinstance(val, bool):
+        return None
+    try:
+        num = float(val)
+    except (ValueError, TypeError):
+        return None
+
+    if not math.isfinite(num):
+        return None
+
+    clamped = max(min_val, min(num, max_ceiling))
+    return int(clamped) if as_int else clamped
 
 
 # ------------------------------------------------------------------------------
@@ -186,21 +215,34 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
         )
         return
 
-    # 2. Concurrency Limit Check
-    active_sessions: dict[str, Any] = getattr(app.state, "active_streaming_sessions", {})
+    # 2. Atomic Session Admission Reservation
+    session_id = str(uuid.uuid4())
+    token = session_id
+
+    streaming_admission: AtomicAdmissionController | None = getattr(
+        app.state, "streaming_admission", None
+    )
     max_concurrent = getattr(app.state, "max_concurrent_sessions", MAX_CONCURRENT_SESSIONS_DEFAULT)
-    if len(active_sessions) >= max_concurrent:
+
+    slot_reserved = False
+    if streaming_admission is not None:
+        slot_reserved = streaming_admission.try_reserve(token)
+    else:
+        active_sessions_dict: dict[str, Any] = getattr(app.state, "active_streaming_sessions", {})
+        slot_reserved = len(active_sessions_dict) < max_concurrent
+
+    if not slot_reserved:
+        limit_val = streaming_admission.limit if streaming_admission is not None else max_concurrent
         logger.warning(
-            "Rejected WebSocket connection: active sessions (%d) reached limit (%d).",
-            len(active_sessions),
-            max_concurrent,
+            "Rejected WebSocket connection: streaming admission limit (%d) reached.",
+            limit_val,
         )
         await websocket.accept()
         await websocket.send_json(
             ServerErrorEvent(
                 error_code="CONCURRENCY_LIMIT_REACHED",
                 message=(
-                    f"Server concurrency limit ({max_concurrent} sessions) reached. "
+                    f"Server concurrency limit ({limit_val} sessions) reached. "
                     "Please retry when existing streams disconnect."
                 ),
             ).model_dump()
@@ -211,9 +253,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
         )
         return
 
-    await websocket.accept()
-
-    session_id = str(uuid.uuid4())
+    active_sessions: dict[str, Any] = getattr(app.state, "active_streaming_sessions", {})
     session: StreamingSession | None = None
     inference_tasks: set[asyncio.Task[None]] = set()
     is_closing = False
@@ -224,6 +264,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
     max_stream_duration = MAX_STREAM_DURATION_SECONDS_DEFAULT
 
     try:
+        await websocket.accept()
         # 3. Protocol Handshake: Expect JSON start message
         try:
             handshake_raw = await asyncio.wait_for(
@@ -323,27 +364,39 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
             )
             return
 
-        # Apply any metadata timeout / constraint overrides (clamped safely)
-        if "idle_timeout_seconds" in start_msg.metadata:
-            try:
-                custom_timeout = float(start_msg.metadata["idle_timeout_seconds"])
-                idle_timeout = max(0.1, min(custom_timeout, 300.0))
-            except (ValueError, TypeError):
-                pass
+        # Apply any metadata timeout / constraint overrides (clamped safely; may only tighten server ceilings)
+        merged_meta: dict[str, Any] = dict(start_msg.metadata)
+        for meta_k in ("idle_timeout_seconds", "max_frame_bytes", "max_stream_duration_seconds"):
+            if meta_k in handshake_dict and meta_k not in merged_meta:
+                merged_meta[meta_k] = handshake_dict[meta_k]
 
-        if "max_frame_bytes" in start_msg.metadata:
-            try:
-                custom_max_frame = int(start_msg.metadata["max_frame_bytes"])
-                max_frame_bytes = max(1024, min(custom_max_frame, MAX_FRAME_BYTES_DEFAULT))
-            except (ValueError, TypeError):
-                pass
+        if "idle_timeout_seconds" in merged_meta:
+            custom_timeout = _parse_clamped_numeric(
+                merged_meta["idle_timeout_seconds"],
+                min_val=0.1,
+                max_ceiling=DEFAULT_IDLE_TIMEOUT_SECONDS,
+            )
+            if custom_timeout is not None:
+                idle_timeout = float(custom_timeout)
 
-        if "max_stream_duration_seconds" in start_msg.metadata:
-            try:
-                custom_duration = float(start_msg.metadata["max_stream_duration_seconds"])
-                max_stream_duration = max(1.0, min(custom_duration, 86400.0))
-            except (ValueError, TypeError):
-                pass
+        if "max_frame_bytes" in merged_meta:
+            custom_max_frame = _parse_clamped_numeric(
+                merged_meta["max_frame_bytes"],
+                min_val=1024,
+                max_ceiling=float(MAX_FRAME_BYTES_DEFAULT),
+                as_int=True,
+            )
+            if custom_max_frame is not None:
+                max_frame_bytes = int(custom_max_frame)
+
+        if "max_stream_duration_seconds" in merged_meta:
+            custom_duration = _parse_clamped_numeric(
+                merged_meta["max_stream_duration_seconds"],
+                min_val=1.0,
+                max_ceiling=MAX_STREAM_DURATION_SECONDS_DEFAULT,
+            )
+            if custom_duration is not None:
+                max_stream_duration = float(custom_duration)
 
         # 4. Check model detector readiness
         detector: BaseDetector | None = getattr(app.state, "detector", None)
@@ -803,5 +856,9 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
         if session is not None:
             session.reset()
         active_sessions.pop(session_id, None)
+
+        # Release atomic admission reservation
+        if streaming_admission is not None:
+            streaming_admission.release(token)
 
         logger.info("Session %s resources released successfully.", session_id)

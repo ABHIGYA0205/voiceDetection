@@ -48,7 +48,17 @@ The VoiceShield streaming protocol provides real-time, low-latency synthetic spe
 
 - **Path**: `/api/v1/stream`
 - **Origin Enforcement**: Validated against `VOICESHIELD_CORS_ORIGINS` / `app.state.allowed_origins`. Connections with unauthorized `Origin` headers are immediately rejected with close code `1008 (Policy Violation)`.
-- **Concurrency Guard**: Default limit of 10 concurrent active streaming sessions to prevent memory pressure on Apple Silicon unified memory. Excess connections are rejected with `CONCURRENCY_LIMIT_REACHED` and close code `1008`.
+- **Atomic Session Admission (Audit M-03)**:
+  - Streaming slots are reserved atomically via `AtomicAdmissionController` *before* `websocket.accept()`, handshake wait, or `StreamingSession` construction.
+  - Handshaking connections count against the session ceiling (`reserved_count` reflects handshaking + active streams).
+  - Configured by `VOICESHIELD_MAX_CONCURRENT_SESSIONS` (positive integer, default: 10). Invalid/negative values log a warning and fall back to 10.
+  - Excess connections are accepted only to transmit a structured `CONCURRENCY_LIMIT_REACHED` error event before closing with code `1008`.
+  - Every reservation is guaranteed to be released exactly once across all disconnect, timeout, error, and cancellation paths.
+- **Client Metadata Ceilings**:
+  - Client handshake metadata can only *tighten* (lower) server-owned ceilings; metadata can **never** raise server ceilings.
+  - Defaults: `MAX_FRAME_BYTES_DEFAULT = 131072` (128 KB), `MAX_STREAM_DURATION_SECONDS_DEFAULT = 3600.0` (1 hour), `DEFAULT_IDLE_TIMEOUT_SECONDS = 30.0`.
+  - Lower bounds: `max_frame_bytes >= 1024`, `max_stream_duration_seconds >= 1.0`, `idle_timeout_seconds >= 0.1`.
+  - Non-numeric, boolean, NaN, and ±Infinity metadata values are safely rejected and fall back to server defaults.
 
 ---
 
@@ -66,11 +76,15 @@ Immediately upon establishing the WebSocket connection, the client must transmit
   "pcm_encoding": "int16",
   "metadata": {
     "client_id": "web-browser-mic",
-    "idle_timeout_seconds": 30.0,
-    "max_frame_bytes": 131072
+    "idle_timeout_seconds": 15.0,
+    "max_frame_bytes": 65536,
+    "max_stream_duration_seconds": 600.0
   }
 }
 ```
+
+> [!NOTE]
+> Metadata timeout and frame values can only lower the server ceilings (idle timeout $\le 30.0$s, max frame bytes $\le 131,072$, stream duration $\le 3,600.0$s). Values attempting to raise server ceilings are clamped to server defaults.
 
 #### Fields
 | Field | Type | Required | Description |
@@ -80,7 +94,7 @@ Immediately upon establishing the WebSocket connection, the client must transmit
 | `sample_rate` | integer | Yes | Declared source sample rate in Hz ($8,000$ to $192,000$ inclusive). |
 | `channels` | integer | Yes | Number of channels ($1$ for mono, $2$ for stereo). Stereo is averaged to mono. |
 | `pcm_encoding` | string | Yes | Supported formats: `"int16"`, `"int32"`, or `"float32"`. Explicit little-endian byte ordering is required. |
-| `metadata` | object | No | Optional key-value pairs (e.g. `idle_timeout_seconds`, `max_frame_bytes`). |
+| `metadata` | object | No | Optional key-value pairs (e.g. `idle_timeout_seconds`, `max_frame_bytes`, `max_stream_duration_seconds`). Values can only tighten server limits. |
 
 ---
 

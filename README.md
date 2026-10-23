@@ -153,16 +153,20 @@ Key features:
 
 ---
 
-## 8. Advisory REST API
+## 8. Advisory REST API & Streaming Service
 
-The FastAPI service exposes an ephemeral file upload analysis route guarded by concurrency control optimized for Apple Silicon M3:
+The FastAPI service exposes real-time streaming WebSocket and ephemeral file upload analysis routes guarded by atomic admission controls and resource ceilings:
 
-- **Health check**: `GET /health` returns system status, Apple Silicon MPS hardware diagnostics, and advisory disclaimers.
-- **File analysis**: `POST /api/v1/analyze/file` accepts `multipart/form-data` audio uploads.
-  - **Constraints**: 25 MB max file size, 300.0s max audio duration, WAV/FLAC formats only.
-  - **Zero audio retention**: Reads audio directly into ephemeral memory buffers; no audio is written to disk.
-  - **M3 concurrency guard**: Serialized via a dedicated process-wide single-worker inference executor (`InferenceWorker`) to prevent unified memory pressure or GPU contention. Caller cancellation does not release physical execution capacity while a model call is running in the worker thread; subsequent jobs queue until the active call returns.
-  - **Lifespan preloading**: Loads detector model once at service startup rather than per request.
+- **Health check**: `GET /health` returns system status, Apple Silicon MPS hardware diagnostics, and advisory disclaimers. `GET /ready` verifies model readiness.
+- **Atomic WebSocket Streaming**: `GET /api/v1/stream` establishes real-time detection sessions.
+  - **Atomic Session Admission (Audit M-03)**: Reserved atomically via `AtomicAdmissionController` *before* `websocket.accept()` or handshake wait. Handshaking connections count against the ceiling (`VOICESHIELD_MAX_CONCURRENT_SESSIONS`, default: 10). Excess connections receive `CONCURRENCY_LIMIT_REACHED` (code 1008).
+  - **Metadata Ceilings**: Client handshake metadata can only *tighten* (lower) server ceilings; metadata cannot raise server limits (default 128 KB frames, 1-hour duration, 30.0s idle timeout).
+- **File Upload Analysis**: `POST /api/v1/analyze/file` accepts `multipart/form-data` audio uploads.
+  - **Pre-Parsing Admission (Audit M-03)**: Governed by ASGI middleware *before* body consumption and multipart parsing (`VOICESHIELD_MAX_CONCURRENT_FILE_UPLOADS`, default: 2). Saturated requests promptly receive HTTP 429 (`FILE_UPLOAD_CONCURRENCY_LIMIT_REACHED`).
+  - **Two-Layer Request Ceiling**: Total request body capped at 26 MB (25 MB audio + 1 MB multipart overhead). Enforced via `Content-Length` precheck and streaming receive chunk counter before endpoint routing. Audio files exceeding 25 MB or 300.0s duration are rejected.
+  - **Ephemeral Audio Lifecycle**: Uploads under 1 MB are processed in RAM; uploads over 1 MB use Starlette's `SpooledTemporaryFile` which automatically cleans up the OS temporary file upon request completion. No uploaded audio is persistently stored.
+  - **M3 concurrency guard**: Physical model evaluation across all routes is strictly serialized through a single process-wide `InferenceWorker` to prevent unified memory thrashing or GPU contention.
+- **Deployment Hardening**: Application resource limits provide defense-in-depth but do not replace TLS, authentication, host hardening, or reverse proxies. Production deployments should use a reverse proxy (e.g. Nginx) with matching body limits (`client_max_body_size 26m`), connection rate limits, and proxy timeouts ($\le 30$s).
 
 ---
 

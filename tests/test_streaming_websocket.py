@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from services.api.inference_worker import InferenceWorker
 from services.api.main import app
+from services.api.resource_admission import AtomicAdmissionController
 from services.api.routes.stream import websocket_stream_endpoint
 from voiceshield.models.base import BaseDetector, DetectorOutput
 
@@ -923,8 +924,11 @@ async def test_endpoint_task_cancellation_propagates_and_cleans_up() -> None:
             return {"type": "websocket.disconnect"}
 
     orig_worker = getattr(app.state, "inference_worker", None)
+    orig_admission = getattr(app.state, "streaming_admission", None)
     worker = InferenceWorker()
+    admission = AtomicAdmissionController(limit=10, name="streaming_sessions")
     app.state.inference_worker = worker
+    app.state.streaming_admission = admission
 
     try:
         mock_ws = MockWebSocket()
@@ -936,6 +940,7 @@ async def test_endpoint_task_cancellation_propagates_and_cleans_up() -> None:
         assert mock_ws.sent_events[0]["type"] == "session_started"
         created_session_id = mock_ws.sent_events[0]["session_id"]
         assert created_session_id in app.state.active_streaming_sessions
+        assert admission.reserved_count == 1
 
         # Cancel the endpoint task
         task.cancel()
@@ -944,12 +949,14 @@ async def test_endpoint_task_cancellation_propagates_and_cleans_up() -> None:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        # Cleanup must have run: session removed from registry
+        # Cleanup must have run: session removed from registry & admission reservation released
         assert created_session_id not in app.state.active_streaming_sessions
         assert len(app.state.active_streaming_sessions) == 0
+        assert admission.reserved_count == 0
     finally:
         await worker.shutdown(timeout=2.0)
         app.state.inference_worker = orig_worker
+        app.state.streaming_admission = orig_admission
 
 
 def test_websocket_worker_unavailable_handshake() -> None:
@@ -1000,5 +1007,421 @@ def test_websocket_worker_unavailable_handshake() -> None:
                     ws.receive_text()
                 assert exc_info.value.code == 1011
             assert len(app.state.active_streaming_sessions) == 0
+            if getattr(app.state, "streaming_admission", None) is not None:
+                assert app.state.streaming_admission.reserved_count == 0
         finally:
             app.state.inference_worker = orig_worker
+
+
+# ==============================================================================
+# 14. Audit M-03 WebSocket Admission Race & Distinction Tests
+# ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_websocket_simultaneous_handshake_race_and_registry_distinction() -> None:
+    """Test A & D: Simultaneous handshake race and active registry distinction.
+
+    - configure a small limit (2);
+    - start substantially more simultaneous connection attempts (6);
+    - hold accepted connections before sending start;
+    - prove at most 2 slots are reserved;
+    - all excess clients receive CONCURRENCY_LIMIT_REACHED without entering handshake wait;
+    - reserved_count never exceeds 2;
+    - during blocked handshakes: reserved_count reflects connections (2),
+      while active_streaming_sessions remains completely empty.
+    """
+
+    class ControllableMockWebSocket:
+        def __init__(self, ws_id: int) -> None:
+            self.ws_id = ws_id
+            self.app = app
+            self.headers = {"origin": "http://localhost:5173"}
+            self.accepted = False
+            self.closed = False
+            self.close_code: int | None = None
+            self.sent_events: list[dict[str, Any]] = []
+            self.receive_start_gate = asyncio.Event()
+            self.receive_disconnect_gate = asyncio.Event()
+
+        async def accept(self) -> None:
+            self.accepted = True
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.closed = True
+            self.close_code = code
+
+        async def send_json(self, data: dict[str, Any]) -> None:
+            self.sent_events.append(data)
+
+        async def receive_text(self) -> str:
+            # Blocks until explicitly allowed to send handshake
+            await self.receive_start_gate.wait()
+            return json.dumps(
+                {
+                    "type": "start",
+                    "protocol_version": "1.0",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                }
+            )
+
+        async def receive(self) -> dict[str, Any]:
+            await self.receive_disconnect_gate.wait()
+            return {"type": "websocket.disconnect"}
+
+    admission = AtomicAdmissionController(limit=2, name="streaming_sessions")
+    worker = InferenceWorker()
+    orig_admission = getattr(app.state, "streaming_admission", None)
+    orig_worker = getattr(app.state, "inference_worker", None)
+    app.state.streaming_admission = admission
+    app.state.inference_worker = worker
+    app.state.active_streaming_sessions = {}
+
+    try:
+        num_clients = 6
+        sockets = [ControllableMockWebSocket(i) for i in range(num_clients)]
+        tasks = [asyncio.create_task(websocket_stream_endpoint(ws)) for ws in sockets]  # type: ignore[arg-type]
+
+        # Give all coroutines a chance to execute up to their first await
+        await asyncio.sleep(0.05)
+
+        # Invariant 1: Exactly limit (2) reservations succeeded; reserved_count never exceeded 2
+        assert admission.reserved_count == 2
+        assert admission.available_count == 0
+
+        # Invariant 2: Active registry distinction:
+        # During blocked handshakes, reserved_count is 2 but active_streaming_sessions is EMPTY
+        assert len(app.state.active_streaming_sessions) == 0
+
+        # Identify which sockets succeeded in admission vs were rejected
+        accepted_sockets = [s for s in sockets if not s.closed]
+        rejected_sockets = [s for s in sockets if s.closed]
+
+        assert len(accepted_sockets) == 2
+        assert len(rejected_sockets) == 4
+
+        # Invariant 3: All excess clients received CONCURRENCY_LIMIT_REACHED with code 1008
+        for rej in rejected_sockets:
+            assert rej.accepted is True
+            assert rej.closed is True
+            assert rej.close_code == 1008
+            assert len(rej.sent_events) == 1
+            err_event = rej.sent_events[0]
+            assert err_event["type"] == "error"
+            assert err_event["error_code"] == "CONCURRENCY_LIMIT_REACHED"
+            # Crucially: receive_text was never awaited for rejected sockets
+            assert not rej.receive_start_gate.is_set()
+
+        # Invariant 4: Now release the 2 accepted sockets to send start
+        for acc in accepted_sockets:
+            acc.receive_start_gate.set()
+
+        await asyncio.sleep(0.05)
+
+        # Now active_streaming_sessions contains exactly the 2 initialized sessions
+        assert len(app.state.active_streaming_sessions) == 2
+        assert admission.reserved_count == 2
+
+        # Finally, trigger disconnect on the accepted sockets
+        for acc in accepted_sockets:
+            acc.receive_disconnect_gate.set()
+
+        await asyncio.gather(*tasks)
+
+        # All sessions cleared and reservations released back to 0
+        assert len(app.state.active_streaming_sessions) == 0
+        assert admission.reserved_count == 0
+        assert admission.available_count == 2
+    finally:
+        await worker.shutdown(timeout=2.0)
+        app.state.streaming_admission = orig_admission
+        app.state.inference_worker = orig_worker
+
+
+# ==============================================================================
+# 15. Audit M-03 Reservation Cleanup Matrix
+# ==============================================================================
+
+
+def test_websocket_reservation_cleanup_matrix() -> None:
+    """Test B: Reservation cleanup matrix.
+
+    Prove reserved_count returns to zero after:
+    - malformed handshake JSON;
+    - unsupported protocol;
+    - unsupported PCM;
+    - worker unavailable;
+    - handshake cancellation / disconnect before start;
+    - graceful stop;
+    - abrupt disconnect.
+    """
+    with TestClient(app) as client:
+        admission: AtomicAdmissionController = app.state.streaming_admission
+        assert admission is not None
+        assert admission.reserved_count == 0
+
+        # 1. Malformed handshake JSON
+        with client.websocket_connect("/api/v1/stream") as ws:
+            assert admission.reserved_count == 1
+            ws.send_text("this is not valid json {{{")
+            msg = ws.receive_json()
+            assert msg["type"] == "error"
+            assert msg["error_code"] == "INVALID_JSON"
+        assert admission.reserved_count == 0
+
+        # 2. Unsupported protocol version
+        with client.websocket_connect("/api/v1/stream") as ws:
+            assert admission.reserved_count == 1
+            ws.send_json(
+                {
+                    "type": "start",
+                    "protocol_version": "99.0",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                }
+            )
+            msg = ws.receive_json()
+            assert msg["type"] == "error"
+            assert msg["error_code"] == "UNSUPPORTED_PROTOCOL_VERSION"
+        assert admission.reserved_count == 0
+
+        # 3. Unsupported PCM encoding
+        with client.websocket_connect("/api/v1/stream") as ws:
+            assert admission.reserved_count == 1
+            ws.send_json(
+                {
+                    "type": "start",
+                    "protocol_version": "1.0",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "pcm_encoding": "mu-law",
+                }
+            )
+            msg = ws.receive_json()
+            assert msg["type"] == "error"
+            assert msg["error_code"] == "UNSUPPORTED_PCM_ENCODING"
+        assert admission.reserved_count == 0
+
+        # 4. Worker unavailable
+        orig_worker = app.state.inference_worker
+        try:
+            app.state.inference_worker = None
+            with client.websocket_connect("/api/v1/stream") as ws:
+                assert admission.reserved_count == 1
+                ws.send_json(
+                    {
+                        "type": "start",
+                        "protocol_version": "1.0",
+                        "sample_rate": 16000,
+                        "channels": 1,
+                        "pcm_encoding": "int16",
+                    }
+                )
+                msg = ws.receive_json()
+                assert msg["type"] == "error"
+                assert msg["error_code"] == "INFERENCE_WORKER_UNAVAILABLE"
+            assert admission.reserved_count == 0
+        finally:
+            app.state.inference_worker = orig_worker
+
+        # 5. Handshake disconnect before start
+        with client.websocket_connect("/api/v1/stream") as ws:
+            assert admission.reserved_count == 1
+            ws.close()
+        # Brief pause for server-side finally block execution
+        time.sleep(0.05)
+        assert admission.reserved_count == 0
+
+        # 6. Graceful stop
+        with client.websocket_connect("/api/v1/stream") as ws:
+            assert admission.reserved_count == 1
+            ws.send_json(
+                {
+                    "type": "start",
+                    "protocol_version": "1.0",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                }
+            )
+            ack = ws.receive_json()
+            assert ack["type"] == "session_started"
+            ws.send_json({"type": "stop"})
+            stopped = ws.receive_json()
+            assert stopped["type"] == "session_stopped"
+        time.sleep(0.05)
+        assert admission.reserved_count == 0
+
+        # 7. Abrupt disconnect after streaming
+        with client.websocket_connect("/api/v1/stream") as ws:
+            assert admission.reserved_count == 1
+            ws.send_json(
+                {
+                    "type": "start",
+                    "protocol_version": "1.0",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                }
+            )
+            ack = ws.receive_json()
+            assert ack["type"] == "session_started"
+            ws.send_bytes(generate_pcm_sine(0.5))
+            ws.close()
+        time.sleep(0.05)
+        assert admission.reserved_count == 0
+
+
+# ==============================================================================
+# 16. Audit M-03 Client Metadata Ceilings Verification
+# ==============================================================================
+
+
+def test_websocket_metadata_ceilings_tighten_only() -> None:
+    """Test Metadata Ceilings: Client metadata may only lower server ceilings.
+
+    Through the real WebSocket route, assert session_started effective values for:
+    - huge values clamp to server constants;
+    - lower valid values are honored;
+    - values below minimum clamp to minimums;
+    - invalid strings fall back to defaults;
+    - NaN / +Inf / -Inf fall back to defaults;
+    - Boolean values fall back to defaults.
+    """
+    with TestClient(app) as client:
+        # A. Huge values: must clamp to server defaults (3600.0, 30.0, 131072)
+        with client.websocket_connect("/api/v1/stream") as ws:
+            ws.send_json(
+                {
+                    "type": "start",
+                    "protocol_version": "1.0",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                    "max_stream_duration_seconds": 999999.0,
+                    "idle_timeout_seconds": 999999.0,
+                    "max_frame_bytes": 999999,
+                }
+            )
+            ack = ws.receive_json()
+            assert ack["type"] == "session_started"
+            assert ack["max_stream_duration_seconds"] == 3600.0
+            assert ack["idle_timeout_seconds"] == 30.0
+            assert ack["max_frame_bytes"] == 131072
+            ws.send_json({"type": "stop"})
+            ws.receive_json()
+
+        # B. Lower valid values: must be honored
+        with client.websocket_connect("/api/v1/stream") as ws:
+            ws.send_json(
+                {
+                    "type": "start",
+                    "protocol_version": "1.0",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                    "max_stream_duration_seconds": 120.0,
+                    "idle_timeout_seconds": 15.0,
+                    "max_frame_bytes": 32768,
+                }
+            )
+            ack = ws.receive_json()
+            assert ack["type"] == "session_started"
+            assert ack["max_stream_duration_seconds"] == 120.0
+            assert ack["idle_timeout_seconds"] == 15.0
+            assert ack["max_frame_bytes"] == 32768
+            ws.send_json({"type": "stop"})
+            ws.receive_json()
+
+        # C. Lower bound clamping: values below minimum clamp to minimum (1.0, 0.1, 1024)
+        with client.websocket_connect("/api/v1/stream") as ws:
+            ws.send_json(
+                {
+                    "type": "start",
+                    "protocol_version": "1.0",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                    "max_stream_duration_seconds": 0.05,
+                    "idle_timeout_seconds": 0.01,
+                    "max_frame_bytes": 100,
+                }
+            )
+            ack = ws.receive_json()
+            assert ack["type"] == "session_started"
+            assert ack["max_stream_duration_seconds"] == 1.0
+            assert ack["idle_timeout_seconds"] == 0.1
+            assert ack["max_frame_bytes"] == 1024
+            ws.send_json({"type": "stop"})
+            ws.receive_json()
+
+        # D. Invalid strings: ignored, default values used
+        with client.websocket_connect("/api/v1/stream") as ws:
+            ws.send_json(
+                {
+                    "type": "start",
+                    "protocol_version": "1.0",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                    "max_stream_duration_seconds": "not_a_number",
+                    "idle_timeout_seconds": "invalid",
+                    "max_frame_bytes": "abc",
+                }
+            )
+            ack = ws.receive_json()
+            assert ack["type"] == "session_started"
+            assert ack["max_stream_duration_seconds"] == 3600.0
+            assert ack["idle_timeout_seconds"] == 30.0
+            assert ack["max_frame_bytes"] == 131072
+            ws.send_json({"type": "stop"})
+            ws.receive_json()
+
+        # E. Boolean values: must not be treated as int/float (True != 1.0)
+        with client.websocket_connect("/api/v1/stream") as ws:
+            ws.send_json(
+                {
+                    "type": "start",
+                    "protocol_version": "1.0",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                    "max_stream_duration_seconds": True,
+                    "idle_timeout_seconds": False,
+                    "max_frame_bytes": True,
+                }
+            )
+            ack = ws.receive_json()
+            assert ack["type"] == "session_started"
+            assert ack["max_stream_duration_seconds"] == 3600.0
+            assert ack["idle_timeout_seconds"] == 30.0
+            assert ack["max_frame_bytes"] == 131072
+            ws.send_json({"type": "stop"})
+            ws.receive_json()
+
+        # F. NaN and Inf: must be safely rejected, not creating non-finite limits
+        with client.websocket_connect("/api/v1/stream") as ws:
+            ws.send_text(
+                json.dumps(
+                    {
+                        "type": "start",
+                        "protocol_version": "1.0",
+                        "sample_rate": 16000,
+                        "channels": 1,
+                        "pcm_encoding": "int16",
+                        "max_stream_duration_seconds": float("nan"),
+                        "idle_timeout_seconds": float("inf"),
+                        "max_frame_bytes": float("-inf"),
+                    }
+                )
+            )
+            ack = ws.receive_json()
+            assert ack["type"] == "session_started"
+            assert ack["max_stream_duration_seconds"] == 3600.0
+            assert ack["idle_timeout_seconds"] == 30.0
+            assert ack["max_frame_bytes"] == 131072
+            ws.send_json({"type": "stop"})
+            ws.receive_json()
