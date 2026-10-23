@@ -320,6 +320,8 @@ Emitted prior to closing the connection or when a non-fatal corrupt frame is han
 - `PAYLOAD_TOO_LARGE`: Frame bytes exceeded `max_frame_bytes`.
 - `STREAM_DURATION_EXCEEDED`: Stream exceeded `max_stream_duration_seconds`.
 - `IDLE_TIMEOUT`: Inactivity exceeded `idle_timeout_seconds`.
+- `DETECTOR_NOT_READY`: Model detector is not loaded or initialized.
+- `INFERENCE_WORKER_UNAVAILABLE`: Single-thread inference executor is not initialized or not accepting new jobs.
 - `CONCURRENCY_LIMIT_REACHED`: Server-wide active session limit reached.
 - `MODEL_INFERENCE_ERROR`: Model inference threw an unexpected runtime exception.
 

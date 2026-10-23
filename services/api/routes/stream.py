@@ -345,20 +345,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
             except (ValueError, TypeError):
                 pass
 
-        # 4. Initialize isolated StreamingSession
-        session = StreamingSession(session_id=session_id)
-        active_sessions[session_id] = session
-
-        logger.info(
-            "Session %s initialized: %d Hz, %d channel(s), %s encoding (idle_timeout=%.1fs)",
-            session_id,
-            start_msg.sample_rate,
-            start_msg.channels,
-            pcm_enc,
-            idle_timeout,
-        )
-
-        # 5. Check model detector readiness
+        # 4. Check model detector readiness
         detector: BaseDetector | None = getattr(app.state, "detector", None)
         if detector is None:
             load_error = getattr(
@@ -379,6 +366,37 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
             )
             return
 
+        # Check inference worker readiness before session acknowledgement
+        worker: InferenceWorker | None = getattr(app.state, "inference_worker", None)
+        if worker is None or not worker.accepting_jobs:
+            logger.warning(
+                "Rejected WebSocket stream: inference worker unavailable or not accepting jobs."
+            )
+            await websocket.send_json(
+                ServerErrorEvent(
+                    error_code="INFERENCE_WORKER_UNAVAILABLE",
+                    message="VoiceShield inference worker is not initialized or not accepting jobs.",
+                ).model_dump()
+            )
+            await websocket.close(
+                code=status.WS_1011_INTERNAL_ERROR,
+                reason="Inference worker unavailable.",
+            )
+            return
+
+        # 5. Initialize isolated StreamingSession
+        session = StreamingSession(session_id=session_id)
+        active_sessions[session_id] = session
+
+        logger.info(
+            "Session %s initialized: %d Hz, %d channel(s), %s encoding (idle_timeout=%.1fs)",
+            session_id,
+            start_msg.sample_rate,
+            start_msg.channels,
+            pcm_enc,
+            idle_timeout,
+        )
+
         is_mock = getattr(app.state, "is_mock_detector", False)
 
         # 6. Send start acknowledgement
@@ -396,8 +414,6 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
             is_mock_detector=is_mock,
         )
         await websocket.send_json(start_ack.model_dump())
-
-        worker: InferenceWorker | None = getattr(app.state, "inference_worker", None)
 
         # 6. Audio Ingestion Loop
         stream_start_time = asyncio.get_event_loop().time()
@@ -766,8 +782,11 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                         inference_tasks.add(task)
                         task.add_done_callback(inference_tasks.discard)
 
-    except (WebSocketDisconnect, asyncio.CancelledError):
+    except WebSocketDisconnect:
         logger.info("Session %s client disconnected.", session_id)
+    except asyncio.CancelledError:
+        logger.info("Session %s task cancelled by server/lifespan.", session_id)
+        raise
     except Exception as exc:
         logger.exception("Unexpected error in streaming session %s: %s", session_id, exc)
     finally:

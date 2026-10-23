@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
+import json
 import threading
 import time
 from typing import Any
@@ -13,7 +15,9 @@ import soundfile as sf
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 
+from services.api.inference_worker import InferenceWorker
 from services.api.main import app
+from services.api.routes.stream import websocket_stream_endpoint
 from voiceshield.models.base import BaseDetector, DetectorOutput
 
 
@@ -870,3 +874,131 @@ def test_abrupt_cleanup_ordering() -> None:
     finally:
         detector.call1_release.set()
         app.state.detector = orig_detector
+
+
+# ==============================================================================
+# 9. Regression Tests: Disconnect Inference Lifecycle Handshake & Cancellation
+# ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_endpoint_task_cancellation_propagates_and_cleans_up() -> None:
+    """Test F: Direct coroutine-level regression showing endpoint task cancellation.
+
+    - runs final cleanup;
+    - removes/reset session;
+    - propagates CancelledError rather than swallowing it.
+    """
+
+    class MockWebSocket:
+        def __init__(self) -> None:
+            self.app = app
+            self.headers = {"origin": "http://localhost:5173"}
+            self.accepted = False
+            self.closed = False
+            self.sent_events: list[dict[str, Any]] = []
+            self.receive_event = asyncio.Event()
+
+        async def accept(self) -> None:
+            self.accepted = True
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.closed = True
+
+        async def send_json(self, data: dict[str, Any]) -> None:
+            self.sent_events.append(data)
+
+        async def receive_text(self) -> str:
+            start_payload = {
+                "type": "start",
+                "protocol_version": "1.0",
+                "sample_rate": 16000,
+                "channels": 1,
+                "pcm_encoding": "int16",
+            }
+            return json.dumps(start_payload)
+
+        async def receive(self) -> dict[str, Any]:
+            await self.receive_event.wait()
+            return {"type": "websocket.disconnect"}
+
+    orig_worker = getattr(app.state, "inference_worker", None)
+    worker = InferenceWorker()
+    app.state.inference_worker = worker
+
+    try:
+        mock_ws = MockWebSocket()
+        task = asyncio.create_task(websocket_stream_endpoint(mock_ws))  # type: ignore[arg-type]
+
+        await asyncio.sleep(0.05)
+        assert mock_ws.accepted is True
+        assert len(mock_ws.sent_events) > 0
+        assert mock_ws.sent_events[0]["type"] == "session_started"
+        created_session_id = mock_ws.sent_events[0]["session_id"]
+        assert created_session_id in app.state.active_streaming_sessions
+
+        # Cancel the endpoint task
+        task.cancel()
+
+        # CancelledError must be propagated, not swallowed
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # Cleanup must have run: session removed from registry
+        assert created_session_id not in app.state.active_streaming_sessions
+        assert len(app.state.active_streaming_sessions) == 0
+    finally:
+        await worker.shutdown(timeout=2.0)
+        app.state.inference_worker = orig_worker
+
+
+def test_websocket_worker_unavailable_handshake() -> None:
+    """Test G: Worker unavailable handshake.
+
+    Set app.state.inference_worker to None or a stopped worker:
+    - client sends start;
+    - receives INFERENCE_WORKER_UNAVAILABLE;
+    - does not receive session_started;
+    - connection closes;
+    - no session registry leak.
+    """
+    start_payload = {
+        "type": "start",
+        "protocol_version": "1.0",
+        "sample_rate": 16000,
+        "channels": 1,
+        "pcm_encoding": "int16",
+    }
+
+    with TestClient(app) as client:
+        orig_worker = getattr(app.state, "inference_worker", None)
+        try:
+            # 1. Test when inference_worker is None
+            app.state.inference_worker = None
+            with client.websocket_connect("/api/v1/stream") as ws:
+                ws.send_text(json.dumps(start_payload))
+                resp = ws.receive_json()
+                assert resp["type"] == "error"
+                assert resp["error_code"] == "INFERENCE_WORKER_UNAVAILABLE"
+                with pytest.raises(WebSocketDisconnect) as exc_info:
+                    ws.receive_text()
+                assert exc_info.value.code == 1011
+            assert len(app.state.active_streaming_sessions) == 0
+
+            # 2. Test when inference_worker is stopped (not accepting jobs)
+            stopped_worker = InferenceWorker()
+            stopped_worker.stop_intake()
+            assert not stopped_worker.accepting_jobs
+            app.state.inference_worker = stopped_worker
+
+            with client.websocket_connect("/api/v1/stream") as ws:
+                ws.send_text(json.dumps(start_payload))
+                resp = ws.receive_json()
+                assert resp["type"] == "error"
+                assert resp["error_code"] == "INFERENCE_WORKER_UNAVAILABLE"
+                with pytest.raises(WebSocketDisconnect) as exc_info:
+                    ws.receive_text()
+                assert exc_info.value.code == 1011
+            assert len(app.state.active_streaming_sessions) == 0
+        finally:
+            app.state.inference_worker = orig_worker

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -89,12 +90,6 @@ class InferenceWorker:
           the sole worker thread until completion.
         - CancelledError is re-raised to allow prompt caller unwinding without freeing the worker.
         """
-        with self._lock:
-            if self._is_shutting_down or self._is_shutdown:
-                raise InferenceWorkerClosedError(
-                    "Inference worker is closed and no longer accepting jobs."
-                )
-
         loop = asyncio.get_running_loop()
 
         def _worker_wrapper() -> T:
@@ -107,20 +102,38 @@ class InferenceWorker:
                 with self._running_lock:
                     self._running_jobs -= 1
 
-        concurrent_future = self._executor.submit(_worker_wrapper)
-
         with self._lock:
+            if self._is_shutting_down or self._is_shutdown:
+                raise InferenceWorkerClosedError(
+                    "Inference worker is closed and no longer accepting jobs."
+                )
+            try:
+                concurrent_future = self._executor.submit(_worker_wrapper)
+            except RuntimeError as exc:
+                raise InferenceWorkerClosedError(
+                    f"Inference worker executor is shutting down or closed: {exc}"
+                ) from exc
             self._active_futures.add(concurrent_future)
 
         def _on_future_done(f: concurrent.futures.Future[Any]) -> None:
             with self._lock:
                 self._active_futures.discard(f)
-            # Retrieve exception to avoid unretrieved future exception warnings
             try:
-                f.exception()
-            except (concurrent.futures.CancelledError, Exception) as exc:
-                logger.debug("Inference worker physical job finished with: %s", exc)
+                exc = f.exception()
+            except concurrent.futures.CancelledError:
+                exc = None
+            except Exception as e:
+                exc = e
 
+            if exc is not None:
+                logger.error(
+                    "InferenceWorker physical job failed with unhandled exception: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=exc,
+                )
+
+        # Register done callback OUTSIDE self._lock to prevent callback re-entrancy deadlock
         concurrent_future.add_done_callback(_on_future_done)
 
         asyncio_future = asyncio.wrap_future(concurrent_future, loop=loop)
@@ -152,12 +165,15 @@ class InferenceWorker:
         return await self.execute(fn, *args, **kwargs)
 
     def stop_intake(self) -> None:
-        """Atomically stop accepting new jobs and cancel queued jobs."""
+        """Atomically stop accepting new jobs and cancel queued jobs outside lock."""
         with self._lock:
-            if not self._is_shutdown:
-                self._is_shutting_down = True
-                for fut in list(self._active_futures):
-                    fut.cancel()
+            if self._is_shutdown:
+                return
+            self._is_shutting_down = True
+            to_cancel = list(self._active_futures)
+
+        for fut in to_cancel:
+            fut.cancel()
 
     async def shutdown(self, timeout: float = 5.0) -> bool:
         """Stop accepting new jobs, cancel queued jobs, and drain running jobs up to timeout.
@@ -168,9 +184,15 @@ class InferenceWorker:
         Returns:
             True if all jobs drained cleanly; False if timeout expired with jobs still running.
         """
+        if not (isinstance(timeout, (int, float)) and math.isfinite(timeout) and timeout >= 0):
+            raise ValueError(
+                f"Shutdown timeout must be a non-negative finite float, got {timeout!r}"
+            )
+
         with self._lock:
-            if self._is_shutdown:
+            if self._is_shutdown and not [f for f in self._active_futures if not f.done()]:
                 return True
+
         self.stop_intake()
 
         start_time = time.monotonic()
@@ -195,23 +217,26 @@ class InferenceWorker:
 
         if drained:
             await asyncio.to_thread(self._executor.shutdown, wait=True, cancel_futures=True)
+            with self._lock:
+                self._is_shutdown = True
         else:
             # Avoid blocking the event loop on an unkillable native thread
             self._executor.shutdown(wait=False, cancel_futures=True)
-
-        with self._lock:
-            self._is_shutdown = True
 
         return drained
 
     def shutdown_sync(self, timeout: float = 5.0) -> bool:
         """Synchronously drain and shut down the worker for non-async testing."""
+        if not (isinstance(timeout, (int, float)) and math.isfinite(timeout) and timeout >= 0):
+            raise ValueError(
+                f"Shutdown timeout must be a non-negative finite float, got {timeout!r}"
+            )
+
         with self._lock:
-            if self._is_shutdown:
+            if self._is_shutdown and not [f for f in self._active_futures if not f.done()]:
                 return True
-            self._is_shutting_down = True
-            for fut in list(self._active_futures):
-                fut.cancel()
+
+        self.stop_intake()
 
         start_time = time.monotonic()
         drained = True
@@ -235,10 +260,9 @@ class InferenceWorker:
 
         if drained:
             self._executor.shutdown(wait=True, cancel_futures=True)
+            with self._lock:
+                self._is_shutdown = True
         else:
             self._executor.shutdown(wait=False, cancel_futures=True)
-
-        with self._lock:
-            self._is_shutdown = True
 
         return drained

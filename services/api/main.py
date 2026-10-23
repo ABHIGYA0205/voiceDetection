@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -97,7 +98,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("VoiceShield API shutting down. Draining inference worker...")
         worker: InferenceWorker | None = getattr(app.state, "inference_worker", None)
         if worker is not None:
-            shutdown_timeout = float(os.getenv("VOICESHIELD_INFERENCE_SHUTDOWN_TIMEOUT", "5.0"))
+            raw_timeout = os.getenv("VOICESHIELD_INFERENCE_SHUTDOWN_TIMEOUT", "5.0")
+            fallback_timeout = 5.0
+            shutdown_timeout = fallback_timeout
+            try:
+                parsed = float(raw_timeout)
+                if math.isfinite(parsed) and parsed >= 0.0:
+                    shutdown_timeout = parsed
+                else:
+                    logger.warning(
+                        "Invalid VOICESHIELD_INFERENCE_SHUTDOWN_TIMEOUT value %r (must be finite and >= 0); "
+                        "using fallback %.1fs",
+                        raw_timeout,
+                        fallback_timeout,
+                    )
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Invalid VOICESHIELD_INFERENCE_SHUTDOWN_TIMEOUT value %r; using fallback %.1fs",
+                    raw_timeout,
+                    fallback_timeout,
+                )
             drained = await worker.shutdown(timeout=shutdown_timeout)
             if not drained:
                 logger.error(
