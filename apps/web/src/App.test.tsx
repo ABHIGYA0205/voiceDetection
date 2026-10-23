@@ -184,7 +184,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
     const ws = MockWebSocket.instances[0];
 
-    // Simulate high anomaly window result
+    // Simulate high anomaly window result with uncalibrated score
     await act(async () => {
       ws.simulateServerMessage({
         type: 'window_result',
@@ -194,10 +194,14 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
         window_end_sec: 7.0,
         speech_seconds: 3.6,
         is_eligible: true,
-        calibrated_score: 0.88,
+        synthetic_score: 0.88,
+        score_is_calibrated: false,
+        calibrated_score: null,
         decision: {
           state: 'high',
-          calibrated_score: 0.88,
+          synthetic_score: 0.88,
+          score_is_calibrated: false,
+          calibrated_score: null,
           smoothed_score: 0.85,
           reason: 'sustained_anomaly_elevation',
           reason_details: 'Elevated anomaly detected over 3 consecutive windows.',
@@ -208,8 +212,8 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
     // Verify non-color indicator and status
     expect(screen.getByText(/\[! HIGH ANOMALY\]/i)).toBeDefined();
-    expect(screen.getByText(/High Synthetic Likelihood/i)).toBeDefined();
-    expect(document.getElementById('calibrated-probability-value')?.textContent).toContain('88.0%');
+    expect(screen.getByText(/High Acoustic Anomaly Score/i)).toBeDefined();
+    expect(document.getElementById('raw-score-value')?.textContent).toContain('0.880');
 
     // Verify REQUIRED Action Directive
     expect(screen.getByText(/ACTION DIRECTIVE/i)).toBeDefined();
@@ -219,7 +223,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
     // Verify Rolling Timeline contains the item
     expect(screen.getByText(/Window #3/i)).toBeDefined();
-    expect(screen.getByText(/Prob: 88.0%/i)).toBeDefined();
+    expect(screen.getByText(/Score: 0.880/i)).toBeDefined();
   });
 
   it('renders raw uncalibrated score clearly labelled when calibration is absent', async () => {
@@ -232,7 +236,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
     const ws = MockWebSocket.instances[0];
 
-    // Simulate window result with raw_score only
+    // Simulate window result with uncalibrated score only
     await act(async () => {
       ws.simulateServerMessage({
         type: 'window_result',
@@ -242,11 +246,16 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
         window_end_sec: 5.0,
         speech_seconds: 3.2,
         is_eligible: true,
-        raw_score: 0.742,
+        synthetic_score: 0.742,
+        score_is_calibrated: false,
+        operating_threshold: 0.65,
+        operating_threshold_source: 'unvalidated_heuristic',
         calibrated_score: null,
         decision: {
           state: 'uncertain',
-          calibrated_score: 0.0,
+          synthetic_score: 0.742,
+          score_is_calibrated: false,
+          calibrated_score: null,
           smoothed_score: 0.742,
           reason: 'ambiguous_score_zone',
           reason_details: 'Score in ambiguous zone.',
@@ -255,10 +264,57 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
       });
     });
 
-    // Check label explicitly specifies uncalibrated
-    expect(screen.getByText(/Raw Acoustic Score \(Uncalibrated\):/i)).toBeDefined();
+    // Check label explicitly specifies Uncalibrated Synthetic Score
+    expect(screen.getByText(/Uncalibrated Synthetic Score:/i)).toBeDefined();
     expect(document.getElementById('raw-score-value')?.textContent).toContain('0.742');
+    expect(screen.getByText(/Operating threshold: 0.650 \(unvalidated heuristic\)/i)).toBeDefined();
     expect(screen.getByText(/\[\? UNCERTAIN\]/i)).toBeDefined();
+  });
+
+  it('asserts that Calibrated Synthetic Probability, Authentic, and Consistent with Natural Speech are absent', async () => {
+    render(<App />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Start Microphone Stream/i }));
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    const ws = MockWebSocket.instances[0];
+
+    // Simulate low anomaly window result
+    await act(async () => {
+      ws.simulateServerMessage({
+        type: 'window_result',
+        session_id: 'test-session-123',
+        window_index: 1,
+        window_start_sec: 0.0,
+        window_end_sec: 4.0,
+        speech_seconds: 3.5,
+        is_eligible: true,
+        synthetic_score: 0.08,
+        score_is_calibrated: false,
+        calibrated_score: null,
+        decision: {
+          state: 'low',
+          synthetic_score: 0.08,
+          score_is_calibrated: false,
+          calibrated_score: null,
+          smoothed_score: 0.08,
+          reason: 'normal_acoustics',
+          reason_details: 'Low acoustic anomaly score — does not authenticate speech.',
+          window_index: 1,
+        },
+      });
+    });
+
+    // Check low state rendering
+    expect(screen.getAllByText(/Low acoustic anomaly score — does not authenticate speech/i).length).toBeGreaterThan(0);
+
+    // Verify PROHIBITED strings are strictly ABSENT from UI
+    const bodyText = document.body.textContent || '';
+    expect(bodyText).not.toContain('Calibrated Synthetic Probability');
+    expect(bodyText).not.toContain('Consistent with Natural Speech');
+    expect(bodyText).not.toContain('Authentic');
   });
 
   it('renders quality flag updates on audio anomalies', async () => {

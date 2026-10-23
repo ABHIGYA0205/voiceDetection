@@ -39,11 +39,20 @@ class TemporalDecision(BaseModel):
     state: DecisionState = Field(
         description="Advisory decision level (low, uncertain, high, insufficient_evidence)."
     )
-    calibrated_score: float = Field(
-        description="Calibrated probability of synthetic speech for this window."
+    synthetic_score: float = Field(
+        default=0.0,
+        description="Uncalibrated acoustic anomaly score for this window.",
+    )
+    score_is_calibrated: bool = Field(
+        default=False,
+        description="Whether score is calibrated against an empirical target dataset.",
+    )
+    calibrated_score: float | None = Field(
+        default=None,
+        description="Calibrated probability of synthetic speech if calibrator available, else None.",
     )
     smoothed_score: float = Field(
-        description="Smoothed probability score (EWMA or median filtered)."
+        description="Smoothed anomaly score (EWMA or median filtered).",
     )
     reason: ReasonCode = Field(description="Machine-readable decision explanation code.")
     reason_details: str = Field(
@@ -125,7 +134,9 @@ class TemporalDecisionPolicy:
         self.window_count += 1
         return TemporalDecision(
             state=DecisionState.INSUFFICIENT_EVIDENCE,
-            calibrated_score=0.0,
+            synthetic_score=0.0,
+            score_is_calibrated=False,
+            calibrated_score=None,
             smoothed_score=self.smoothed_history[-1] if self.smoothed_history else 0.0,
             reason=ReasonCode.INSUFFICIENT_SPEECH_DURATION,
             reason_details=(
@@ -141,20 +152,24 @@ class TemporalDecisionPolicy:
 
     def evaluate(
         self,
-        calibrated_score: float,
-        speech_seconds: float,
-        window_index: int,
-        window_start_sec: float,
-        window_end_sec: float,
+        calibrated_score: float | None = None,
+        speech_seconds: float = 0.0,
+        window_index: int = 0,
+        window_start_sec: float = 0.0,
+        window_end_sec: float = 0.0,
+        synthetic_score: float | None = None,
+        score_is_calibrated: bool = False,
     ) -> TemporalDecision:
-        """Consume calibrated per-window score and determine temporal decision state.
+        """Consume per-window acoustic anomaly score and determine temporal decision state.
 
         Args:
-            calibrated_score: Calibrated synthetic speech probability for the current window [0.0, 1.0].
+            calibrated_score: Calibrated synthetic speech probability (if calibrator loaded) or legacy alias.
             speech_seconds: Duration of active speech in the window in seconds.
             window_index: Sequential index of the window.
             window_start_sec: Window start timestamp in seconds.
             window_end_sec: Window end timestamp in seconds.
+            synthetic_score: Uncalibrated acoustic anomaly score [0.0, 1.0].
+            score_is_calibrated: Whether score is empirically calibrated against a target dataset.
 
         Returns:
             Structured TemporalDecision.
@@ -169,8 +184,14 @@ class TemporalDecisionPolicy:
             )
 
         self.window_count += 1
-        clamped_score = float(np.clip(calibrated_score, 0.0, 1.0))
+        raw_val = (
+            synthetic_score
+            if synthetic_score is not None
+            else (calibrated_score if calibrated_score is not None else 0.0)
+        )
+        clamped_score = float(np.clip(raw_val, 0.0, 1.0))
         smoothed = self.compute_smoothed_score(clamped_score)
+        effective_calibrated_score = clamped_score if score_is_calibrated else None
 
         self.raw_history.append(clamped_score)
         self.smoothed_history.append(smoothed)
@@ -252,7 +273,7 @@ class TemporalDecisionPolicy:
                 self.consecutive_drops = 0
                 reason = ReasonCode.NORMAL_ACOUSTICS
                 details = (
-                    f"Acoustic features consistent with authentic speech "
+                    f"Low acoustic anomaly score — does not authenticate speech "
                     f"(score: {smoothed:.3f} <= {thresh_low:.2f})."
                 )
             else:
@@ -267,7 +288,9 @@ class TemporalDecisionPolicy:
 
         return TemporalDecision(
             state=state,
-            calibrated_score=clamped_score,
+            synthetic_score=clamped_score,
+            score_is_calibrated=score_is_calibrated,
+            calibrated_score=effective_calibrated_score,
             smoothed_score=smoothed,
             reason=reason,
             reason_details=details,

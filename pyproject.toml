@@ -129,6 +129,7 @@ module = [
     "services.api.main",
     "tests.test_aasist_adapter",
     "tests.test_file_inference",
+    "tests.test_benchmark_suite",
 ]
 disallow_untyped_calls = false
 

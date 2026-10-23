@@ -372,22 +372,29 @@ class StreamingSession:
 
     def complete_inference(
         self,
-        calibrated_score: float,
-        window: WindowForInference,
+        synthetic_score: float | None = None,
+        window: WindowForInference | None = None,
+        calibrated_score: float | None = None,
+        score_is_calibrated: bool = False,
     ) -> TemporalDecision:
         """Complete an in-flight inference and update the temporal decision policy.
 
         Args:
-            calibrated_score: Calibrated probability of synthetic speech [0.0, 1.0].
+            synthetic_score: Uncalibrated acoustic anomaly score [0.0, 1.0].
             window: The WindowForInference that was processed.
+            calibrated_score: Optional calibrated probability (None if uncalibrated).
+            score_is_calibrated: Whether score is empirically calibrated.
 
         Returns:
             Updated TemporalDecision from policy.
         """
         self._in_flight_inference = False
+        assert window is not None
 
         decision = self.temporal_policy.evaluate(
             calibrated_score=calibrated_score,
+            synthetic_score=synthetic_score,
+            score_is_calibrated=score_is_calibrated,
             speech_seconds=window.speech_seconds,
             window_index=window.window_index,
             window_start_sec=window.start_time,

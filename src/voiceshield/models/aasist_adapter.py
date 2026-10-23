@@ -236,14 +236,17 @@ class AASISTLDetector(BaseDetector):
             prob_spoof = float(probs[i, 0].item())
 
             results.append(
-                DetectorOutput(
+                DetectorOutput.from_scores(
                     raw_logits=(logit_spoof, logit_bonafide),
                     bonafide_score=logit_bonafide,
-                    synthetic_likelihood=prob_spoof,
+                    synthetic_score=prob_spoof,
                     is_synthetic_suspected=bool(prob_spoof >= self.threshold),
                     input_samples=self.target_length,
                     device_used=self.device.type,
                     model_id="clovaai/aasist-l",
+                    operating_threshold=self.threshold,
+                    operating_threshold_source="unvalidated_heuristic",
+                    score_is_calibrated=False,
                     metadata={
                         "upstream_repo": "https://github.com/clovaai/aasist",
                         "upstream_commit": "a04c9863f63d44471dde8a6abcb3b082b07cd1d1",

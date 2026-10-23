@@ -175,7 +175,7 @@ async def analyze_audio_file(
         result = await _run_inference()
 
     # 5. Result validation and error mapping
-    if result.status != "success":
+    if result.status == "error":
         err_msg = result.error_message or "Unknown evaluation error"
         if "exceeds maximum allowed limit" in err_msg:
             raise HTTPException(

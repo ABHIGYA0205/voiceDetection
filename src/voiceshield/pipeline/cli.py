@@ -84,7 +84,7 @@ def format_cli_summary_table(results: list[FileInferenceResult]) -> str:
         " VoiceShield Offline File Evaluation Summary",
         " (Advisory output only. Does NOT prove caller identity and is NOT a fraud probability)",
         "=========================================================================================================",
-        f"{'File':<35} | {'Status':<10} | {'Duration':<8} | {'Windows':<7} | {'Mean Prob':<10} | {'Peak Prob':<10} | {'Decision'}",
+        f"{'File':<35} | {'Status':<10} | {'Duration':<8} | {'Windows':<7} | {'Mean Score':<10} | {'Peak Score':<10} | {'Decision'}",
         f"{'-' * 35}-|-{'-' * 10}-|-{'-' * 8}-|-{'-' * 7}-|-{'-' * 10}-|-{'-' * 10}-|-{'-' * 12}",
     ]
 
@@ -93,11 +93,16 @@ def format_cli_summary_table(results: list[FileInferenceResult]) -> str:
         if len(fname) > 35:
             fname = fname[:32] + "..."
         if res.status == "success":
-            decision = "SUSPECTED" if res.is_synthetic_suspected else "Authentic"
+            decision = "SUSPECTED" if res.is_synthetic_suspected else "LOW ANOMALY"
             lines.append(
                 f"{fname:<35} | {res.status:<10} | {res.duration_seconds:<8.1f} | "
-                f"{res.total_windows:<7} | {res.mean_synthetic_likelihood:<10.1%} | "
-                f"{res.max_synthetic_likelihood:<10.1%} | {decision}"
+                f"{res.total_windows:<7} | {res.mean_synthetic_score:<10.3f} | "
+                f"{res.max_synthetic_score:<10.3f} | {decision}"
+            )
+        elif res.status == "insufficient_evidence":
+            lines.append(
+                f"{fname:<35} | {res.status:<10} | {res.duration_seconds:<8.1f} | "
+                f"{res.total_windows:<7} | {'-':<10} | {'-':<10} | ABSTAIN"
             )
         else:
             err = res.error_message or "Unknown"
@@ -125,6 +130,8 @@ def save_cli_results(results: list[FileInferenceResult], output_path: Path) -> N
             "status",
             "duration_seconds",
             "total_windows",
+            "mean_synthetic_score",
+            "max_synthetic_score",
             "mean_synthetic_likelihood",
             "max_synthetic_likelihood",
             "is_synthetic_suspected",
@@ -141,6 +148,8 @@ def save_cli_results(results: list[FileInferenceResult], output_path: Path) -> N
                         "status": r.status,
                         "duration_seconds": r.duration_seconds,
                         "total_windows": r.total_windows,
+                        "mean_synthetic_score": r.mean_synthetic_score,
+                        "max_synthetic_score": r.max_synthetic_score,
                         "mean_synthetic_likelihood": r.mean_synthetic_likelihood,
                         "max_synthetic_likelihood": r.max_synthetic_likelihood,
                         "is_synthetic_suspected": r.is_synthetic_suspected,

@@ -93,6 +93,11 @@ class ServerWindowResult(BaseModel):
     window_end_sec: float
     speech_seconds: float
     is_eligible: bool
+    synthetic_score: float | None = None
+    uncalibrated_synthetic_score: float | None = None
+    score_is_calibrated: bool = False
+    operating_threshold: float = 0.65
+    operating_threshold_source: str = "unvalidated_heuristic"
     raw_score: float | None = None
     calibrated_score: float | None = None
     decision: dict[str, Any]
@@ -389,15 +394,18 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     else:
                         output = await asyncio.to_thread(detector.predict, win.samples)
 
-                    calibrated_score = float(output.synthetic_likelihood)
-                    raw_score = float(output.synthetic_likelihood)
+                    synth_score = float(output.synthetic_score)
                 else:
                     # Model fallback simulation
-                    calibrated_score = 0.5
-                    raw_score = 0.5
+                    synth_score = 0.5
 
                 assert session is not None
-                decision = session.complete_inference(calibrated_score=calibrated_score, window=win)
+                decision = session.complete_inference(
+                    synthetic_score=synth_score,
+                    window=win,
+                    calibrated_score=None,
+                    score_is_calibrated=False,
+                )
                 total_windows_evaluated += 1
 
                 result_event = ServerWindowResult(
@@ -407,8 +415,13 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     window_end_sec=win.end_time,
                     speech_seconds=win.speech_seconds,
                     is_eligible=True,
-                    raw_score=raw_score,
-                    calibrated_score=calibrated_score,
+                    synthetic_score=synth_score,
+                    uncalibrated_synthetic_score=synth_score,
+                    score_is_calibrated=False,
+                    operating_threshold=0.65,
+                    operating_threshold_source="unvalidated_heuristic",
+                    raw_score=synth_score,
+                    calibrated_score=None,
                     decision=decision.model_dump(),
                 )
                 await websocket.send_json(result_event.model_dump())
@@ -596,6 +609,11 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                         window_end_sec=imm.window_end_sec,
                         speech_seconds=imm.speech_seconds,
                         is_eligible=False,
+                        synthetic_score=None,
+                        uncalibrated_synthetic_score=None,
+                        score_is_calibrated=False,
+                        operating_threshold=0.65,
+                        operating_threshold_source="unvalidated_heuristic",
                         raw_score=None,
                         calibrated_score=None,
                         decision=imm.model_dump(),

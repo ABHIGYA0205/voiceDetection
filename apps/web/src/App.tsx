@@ -38,10 +38,11 @@ export function App(): React.JSX.Element {
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Status and score metrics for stream
+  // Status and score metrics for stream (uncalibrated decimal scores)
   const [status, setStatus] = useState<DetectionStatus>('insufficient_evidence');
-  const [calibratedProbability, setCalibratedProbability] = useState<number | null>(null);
-  const [rawScore, setRawScore] = useState<number | null>(null);
+  const [uncalibratedScore, setUncalibratedScore] = useState<number | null>(null);
+  const [operatingThreshold, setOperatingThreshold] = useState<number>(0.65);
+  const [operatingThresholdSource, setOperatingThresholdSource] = useState<string>('unvalidated_heuristic');
   const [reasonDetails, setReasonDetails] = useState<string>(
     'Awaiting microphone activation. Press Start Microphone Stream to begin analysis.'
   );
@@ -188,7 +189,7 @@ export function App(): React.JSX.Element {
       });
       mediaStreamRef.current = stream;
 
-      // 2. Initialize AudioContext and AudioWorklet
+      // 2. Initialize Web Audio pipeline
       const AudioCtxClass =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -208,16 +209,20 @@ export function App(): React.JSX.Element {
               this.buffer = new Int16Array(this.bufferSize);
               this.bufferIndex = 0;
             }
-            process(inputs) {
+
+            process(inputs, outputs, parameters) {
               const input = inputs[0];
-              if (!input || !input[0] || input[0].length === 0) return true;
-              const ch = input[0];
-              for (let i = 0; i < ch.length; i++) {
-                const s = Math.max(-1.0, Math.min(1.0, ch[i]));
-                this.buffer[this.bufferIndex++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+              if (!input || !input[0]) return true;
+              const channelData = input[0];
+
+              for (let i = 0; i < channelData.length; i++) {
+                let s = channelData[i];
+                if (s > 1.0) s = 1.0;
+                else if (s < -1.0) s = -1.0;
+                this.buffer[this.bufferIndex++] = s < 0 ? s * 32768 : s * 32767;
+
                 if (this.bufferIndex >= this.bufferSize) {
-                  const copy = this.buffer.slice();
-                  this.port.postMessage(copy.buffer, [copy.buffer]);
+                  this.port.postMessage(this.buffer.buffer.slice(0));
                   this.bufferIndex = 0;
                 }
               }
@@ -231,22 +236,19 @@ export function App(): React.JSX.Element {
         await audioCtx.audioWorklet.addModule(blobUrl);
       }
 
+      const sourceNode = audioCtx.createMediaStreamSource(stream);
       const workletNode = new AudioWorkletNode(audioCtx, 'pcm-worklet-processor');
       workletNodeRef.current = workletNode;
-
-      const sourceNode = audioCtx.createMediaStreamSource(stream);
       sourceNode.connect(workletNode);
 
-      // 3. Connect WebSocket using relative URL resolution through dev proxy
+      // 3. Establish WebSocket connection to backend
       const wsUrl = getWebSocketStreamUrl();
       const ws = new WebSocket(wsUrl);
-      ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
+      ws.binaryType = 'arraybuffer';
 
       ws.onopen = () => {
-        setConnectionState('connected');
         setRecordingState('recording');
-
         // Send protocol start handshake declaring sample rate and format
         const startPayload = {
           type: 'start',
@@ -295,12 +297,18 @@ export function App(): React.JSX.Element {
             setStatus(decState);
             setReasonDetails(data.decision.reason_details);
 
-            if (data.calibrated_score !== null && data.calibrated_score !== undefined) {
-              setCalibratedProbability(data.calibrated_score);
-              setRawScore(null);
-            } else if (data.raw_score !== null && data.raw_score !== undefined) {
-              setRawScore(data.raw_score);
-              setCalibratedProbability(null);
+            const score =
+              data.synthetic_score ??
+              data.uncalibrated_synthetic_score ??
+              data.raw_score ??
+              null;
+            setUncalibratedScore(score);
+
+            if (data.operating_threshold !== undefined) {
+              setOperatingThreshold(data.operating_threshold);
+            }
+            if (data.operating_threshold_source !== undefined) {
+              setOperatingThresholdSource(data.operating_threshold_source);
             }
 
             const historyItem: WindowHistoryItem = {
@@ -309,6 +317,8 @@ export function App(): React.JSX.Element {
               windowEndSec: data.window_end_sec,
               speechSeconds: data.speech_seconds,
               isEligible: data.is_eligible,
+              syntheticScore: score,
+              scoreIsCalibrated: Boolean(data.score_is_calibrated),
               calibratedScore: data.calibrated_score ?? null,
               rawScore: data.raw_score ?? null,
               status: decState,
@@ -449,53 +459,42 @@ export function App(): React.JSX.Element {
           type="button"
           className={`tab-btn ${activeTab === 'stream' ? 'active' : ''}`}
           onClick={() => setActiveTab('stream')}
-          id="tab-stream-btn"
         >
-          🎤 Live Microphone Stream
+          🎙️ Live Microphone Stream
         </button>
         <button
           type="button"
           className={`tab-btn ${activeTab === 'file' ? 'active' : ''}`}
           onClick={() => setActiveTab('file')}
-          id="tab-file-btn"
         >
           📁 File Audio Analysis
         </button>
       </nav>
 
-      {/* Advisory & Scope Warning Banner */}
-      <section className="advisory-banner" role="region" aria-label="Advisory scope notice">
-        <div className="advisory-icon" aria-hidden="true">
-          ℹ️
+      {/* Strict Compliance and Privacy Banner */}
+      <div className="compliance-banner" id="compliance-banner">
+        <div className="compliance-row">
+          <span className="badge-tag">PRIVACY NOTICE:</span>
+          <span>
+            Audio is processed in volatile memory and immediately discarded. Audio is never stored in
+            your browser or on the server.
+          </span>
         </div>
-        <div className="advisory-content">
-          <h3>Advisory Synthetic Speech Assessment</h3>
-          <p>
-            VoiceShield evaluates acoustic anomaly indicators in the local audio feed. Outputs do{' '}
-            <strong>not</strong> verify caller identity and do <strong>not</strong> represent fraud
-            probability.
-          </p>
+        <div className="compliance-row">
+          <span className="badge-tag">ADVISORY NOTICE:</span>
+          <span>
+            VoiceShield outputs acoustic anomaly indicators only. It does not authenticate caller
+            identity and is not a fraud confirmation. Never automatically disconnect or block callers.
+          </span>
         </div>
-      </section>
-
-      {/* Privacy Notice */}
-      <div className="privacy-card" role="region" aria-label="Privacy notice">
-        <span className="privacy-badge" aria-hidden="true">
-          🔒 PRIVACY NOTICE
-        </span>
-        <p>
-          Audio is processed in volatile memory and never stored in your browser or on the server.
-          No voice recordings or biometric voiceprints are retained.
-        </p>
       </div>
 
-      {/* Error Alert */}
       {errorMessage && (
-        <div className="alert-error" role="alert">
+        <div className="alert-error" role="alert" id="stream-error-alert">
           <span className="alert-icon" aria-hidden="true">
             ✕
           </span>
-          <p id="error-message-text">{errorMessage}</p>
+          <p id="error-alert-text">{errorMessage}</p>
         </div>
       )}
 
@@ -521,7 +520,7 @@ export function App(): React.JSX.Element {
                   Pause and verify through a known independent channel.
                 </p>
                 <p className="action-subtext">
-                  Elevated synthetic speech likelihood detected over multiple consecutive windows. Do
+                  Elevated synthetic speech anomaly score sustained over multiple consecutive windows. Do
                   not rely on voice identity.
                 </p>
               </div>
@@ -553,9 +552,9 @@ export function App(): React.JSX.Element {
                 </div>
 
                 <div className="status-label-heading" id="status-heading">
-                  {status === 'low' && 'Consistent with Natural Speech'}
+                  {status === 'low' && 'Low acoustic anomaly score — does not authenticate speech'}
                   {status === 'uncertain' && 'Uncertain / Ambiguous Zone'}
-                  {status === 'high' && 'High Synthetic Likelihood'}
+                  {status === 'high' && 'High Acoustic Anomaly Score'}
                   {status === 'insufficient_evidence' && 'Insufficient Active Speech'}
                   {status === 'error' && 'Assessment Error'}
                 </div>
@@ -565,20 +564,16 @@ export function App(): React.JSX.Element {
                 </p>
               </div>
 
-              {/* Probability vs Raw Score Display */}
+              {/* Uncalibrated Score and Provenance Display */}
               <div className="score-container" id="score-container">
-                {calibratedProbability !== null ? (
+                {uncalibratedScore !== null ? (
                   <div className="score-block">
-                    <span className="score-type">Calibrated Synthetic Probability:</span>
-                    <span className="score-value" id="calibrated-probability-value">
-                      {(calibratedProbability * 100).toFixed(1)}%
-                    </span>
-                  </div>
-                ) : rawScore !== null ? (
-                  <div className="score-block">
-                    <span className="score-type">Raw Acoustic Score (Uncalibrated):</span>
+                    <span className="score-type">Uncalibrated Synthetic Score:</span>
                     <span className="score-value" id="raw-score-value">
-                      {rawScore.toFixed(3)}
+                      score {uncalibratedScore.toFixed(3)} / threshold {operatingThreshold.toFixed(3)}
+                    </span>
+                    <span className="score-source-note" id="threshold-provenance-note" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                      Operating threshold: {operatingThreshold.toFixed(3)} ({operatingThresholdSource === 'unvalidated_heuristic' ? 'unvalidated heuristic' : operatingThresholdSource})
                     </span>
                   </div>
                 ) : (
@@ -705,13 +700,10 @@ export function App(): React.JSX.Element {
                       <span className="timeline-speech">
                         Speech: {item.speechSeconds.toFixed(2)}s
                       </span>
-                      {item.calibratedScore !== null && (
+                      {item.syntheticScore !== null && (
                         <span className="timeline-score">
-                          Prob: {(item.calibratedScore * 100).toFixed(1)}%
+                          Score: {item.syntheticScore.toFixed(3)}
                         </span>
-                      )}
-                      {item.rawScore !== null && (
-                        <span className="timeline-score">Raw: {item.rawScore.toFixed(3)}</span>
                       )}
                     </div>
                     <p className="timeline-reason">{item.reasonDetails}</p>
@@ -823,24 +815,33 @@ export function App(): React.JSX.Element {
                   <div
                     className="verdict-stat-value"
                     style={{
-                      color: fileResult.is_synthetic_suspected ? 'var(--accent-red)' : 'var(--accent-emerald)',
+                      color:
+                        fileResult.status === 'insufficient_evidence'
+                          ? 'var(--accent-amber)'
+                          : fileResult.is_synthetic_suspected
+                          ? 'var(--accent-red)'
+                          : 'var(--accent-emerald)',
                     }}
                   >
-                    {fileResult.is_synthetic_suspected ? '[! HIGH ANOMALY]' : '[✓ LOW ANOMALY]'}
+                    {fileResult.status === 'insufficient_evidence'
+                      ? '[... INSUFFICIENT SPEECH]'
+                      : fileResult.is_synthetic_suspected
+                      ? '[! HIGH ANOMALY]'
+                      : '[✓ LOW ANOMALY]'}
                   </div>
                 </div>
 
                 <div className="verdict-stat">
-                  <div className="verdict-stat-label">Mean Synthetic Prob</div>
+                  <div className="verdict-stat-label">Mean Synthetic Score</div>
                   <div className="verdict-stat-value">
-                    {(fileResult.mean_synthetic_likelihood * 100).toFixed(1)}%
+                    {fileResult.mean_synthetic_score.toFixed(3)}
                   </div>
                 </div>
 
                 <div className="verdict-stat">
-                  <div className="verdict-stat-label">Peak Window Prob</div>
+                  <div className="verdict-stat-label">Peak Window Score</div>
                   <div className="verdict-stat-value">
-                    {(fileResult.max_synthetic_likelihood * 100).toFixed(1)}%
+                    {fileResult.max_synthetic_score.toFixed(3)}
                   </div>
                 </div>
 
@@ -850,6 +851,22 @@ export function App(): React.JSX.Element {
                     {fileResult.duration_seconds.toFixed(1)}s ({fileResult.total_windows} win)
                   </div>
                 </div>
+              </div>
+
+              <div
+                className="threshold-provenance-banner"
+                style={{
+                  margin: '1rem 0',
+                  padding: '0.75rem 1rem',
+                  borderRadius: '6px',
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  fontSize: '0.85rem',
+                }}
+              >
+                <strong style={{ color: 'var(--text-primary)' }}>Threshold Provenance: </strong>
+                <span>
+                  Effective threshold: {fileResult.effective_threshold.toFixed(3)} ({fileResult.operating_threshold_source === 'unvalidated_heuristic' ? 'unvalidated heuristic' : fileResult.operating_threshold_source}). Uncalibrated model output; does not represent calibrated probability.
+                </span>
               </div>
 
               {/* Action Directive on High Anomaly File */}
@@ -869,7 +886,7 @@ export function App(): React.JSX.Element {
                       Pause and verify through a known independent channel.
                     </p>
                     <p className="action-subtext">
-                      Multiple temporal windows exhibited elevated synthetic acoustic likelihood.
+                      Multiple consecutive temporal windows exhibited elevated synthetic acoustic anomaly scores.
                     </p>
                   </div>
                 </section>
@@ -887,7 +904,7 @@ export function App(): React.JSX.Element {
                       <th>#</th>
                       <th>Time Range</th>
                       <th>Bona Fide Score</th>
-                      <th>Synthetic Likelihood</th>
+                      <th>Synthetic Score</th>
                       <th>Active Speech</th>
                       <th>Window Verdict</th>
                     </tr>
@@ -900,15 +917,23 @@ export function App(): React.JSX.Element {
                           {win.start_seconds.toFixed(1)}s - {win.end_seconds.toFixed(1)}s
                         </td>
                         <td>{win.raw_bonafide_score.toFixed(3)}</td>
-                        <td>{(win.calibrated_synthetic_likelihood * 100).toFixed(1)}%</td>
+                        <td>{win.synthetic_score.toFixed(3)}</td>
                         <td>{win.active_speech_seconds.toFixed(2)}s</td>
                         <td>
                           <span
                             className={`timeline-badge ${
-                              win.is_synthetic_suspected ? 'badge-high' : 'badge-low'
+                              win.is_eligible === false
+                                ? 'badge-insufficient_evidence'
+                                : win.is_synthetic_suspected
+                                ? 'badge-high'
+                                : 'badge-low'
                             }`}
                           >
-                            {win.is_synthetic_suspected ? 'SUSPECTED' : 'NATURAL'}
+                            {win.is_eligible === false
+                              ? 'ABSTAINED'
+                              : win.is_synthetic_suspected
+                              ? 'ELEVATED'
+                              : 'LOW ANOMALY'}
                           </span>
                         </td>
                       </tr>
