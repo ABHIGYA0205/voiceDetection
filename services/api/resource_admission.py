@@ -204,20 +204,27 @@ class FileUploadAdmissionMiddleware:
             return
 
         controller = self._get_controller(scope)
-        token = str(uuid.uuid4())
-        reserved = False
+        if controller is None or not isinstance(controller, AtomicAdmissionController):
+            error_payload = {
+                "detail": ApiErrorDetail(
+                    error_code="FILE_UPLOAD_ADMISSION_UNAVAILABLE",
+                    message="File upload admission infrastructure is unavailable. Please retry later.",
+                ).model_dump()
+            }
+            await _send_json_response(
+                send,
+                status_code=503,
+                payload=error_payload,
+                headers=[(b"connection", b"close")],
+            )
+            return
 
-        if controller is not None:
-            reserved = controller.try_reserve(token)
-        else:
-            # Fallback if admission controller is not configured
-            reserved = True
+        token = str(uuid.uuid4())
+        reserved = controller.try_reserve(token)
 
         if not reserved:
-            limit_val = (
-                controller.limit if controller is not None else MAX_CONCURRENT_FILE_UPLOADS_DEFAULT
-            )
-            active_val = controller.reserved_count if controller is not None else limit_val
+            limit_val = controller.limit
+            active_val = controller.reserved_count
             error_payload = {
                 "detail": ApiErrorDetail(
                     error_code="FILE_UPLOAD_CONCURRENCY_LIMIT_REACHED",
@@ -269,6 +276,7 @@ class FileUploadAdmissionMiddleware:
             bytes_received = 0
             payload_too_large = False
             response_started = False
+            response_completed = False
 
             async def counting_receive() -> Message:
                 nonlocal bytes_received, payload_too_large
@@ -284,11 +292,16 @@ class FileUploadAdmissionMiddleware:
                 return message
 
             async def filtering_send(message: Message) -> None:
-                nonlocal response_started
+                nonlocal response_started, response_completed
                 if payload_too_large:
-                    # Suppress downstream error responses (e.g. Starlette 400 parsing error)
+                    # Suppress downstream error responses after overflow (e.g. Starlette 400 parsing error)
                     return
-                response_started = True
+                msg_type = message.get("type", "")
+                if msg_type == "http.response.start":
+                    response_started = True
+                elif msg_type == "http.response.body":
+                    if not message.get("more_body", False):
+                        response_completed = True
                 await send(message)
 
             try:
@@ -297,27 +310,34 @@ class FileUploadAdmissionMiddleware:
                 if not payload_too_large:
                     raise
 
-            if payload_too_large and not response_started:
-                error_payload = {
-                    "detail": ApiErrorDetail(
-                        error_code="PAYLOAD_TOO_LARGE",
-                        message=(
-                            f"Total upload request body exceeds maximum allowed limit of "
-                            f"{self._max_upload_bytes / (1024 * 1024):.0f} MB."
-                        ),
-                        details={
-                            "max_request_bytes": self._max_upload_bytes,
-                            "received_bytes": bytes_received,
-                            "max_file_bytes": MAX_FILE_BYTES,
-                        },
-                    ).model_dump()
-                }
-                await _send_json_response(
-                    send,
-                    status_code=413,
-                    payload=error_payload,
-                    headers=[(b"connection", b"close")],
-                )
+            if payload_too_large:
+                if not response_started:
+                    error_payload = {
+                        "detail": ApiErrorDetail(
+                            error_code="PAYLOAD_TOO_LARGE",
+                            message=(
+                                f"Total upload request body exceeds maximum allowed limit of "
+                                f"{self._max_upload_bytes / (1024 * 1024):.0f} MB."
+                            ),
+                            details={
+                                "max_request_bytes": self._max_upload_bytes,
+                                "received_bytes": bytes_received,
+                                "max_file_bytes": MAX_FILE_BYTES,
+                            },
+                        ).model_dump()
+                    }
+                    await _send_json_response(
+                        send,
+                        status_code=413,
+                        payload=error_payload,
+                        headers=[(b"connection", b"close")],
+                    )
+                else:
+                    # Downstream started response before finishing body reads.
+                    # Never emit a second response start. Ensure stream is cleanly completed.
+                    if not response_completed:
+                        await send({"type": "http.response.body", "body": b"", "more_body": False})
+                        response_completed = True
         finally:
             if controller is not None:
                 controller.release(token)

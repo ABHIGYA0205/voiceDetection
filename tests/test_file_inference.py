@@ -439,14 +439,41 @@ class ControlledUploadDetector(BaseDetector):
         return [self.predict(x) for x in batch]
 
 
+class SignalingAdmissionController(AtomicAdmissionController):
+    """AtomicAdmissionController with explicit condition signaling for deterministic test coordination."""
+
+    def __init__(self, limit: int, name: str = "file_uploads") -> None:
+        super().__init__(limit=limit, name=name)
+        self.reservation_condition = threading.Condition(self._lock)
+
+    def wait_for_reservations(self, count: int, timeout: float = 5.0) -> bool:
+        with self.reservation_condition:
+            return self.reservation_condition.wait_for(
+                lambda: len(self._reserved_tokens) >= count, timeout=timeout
+            )
+
+    def try_reserve(self, token: str) -> bool:
+        res = super().try_reserve(token)
+        if res:
+            with self.reservation_condition:
+                self.reservation_condition.notify_all()
+        return res
+
+    def release(self, token: str) -> bool:
+        res = super().release(token)
+        with self.reservation_condition:
+            self.reservation_condition.notify_all()
+        return res
+
+
 def test_api_upload_concurrency_admission_limit_and_worker_serialization(tmp_path: Path) -> None:
     """Test D: Concurrent accepted uploads with limit=2.
 
     Using one TestClient lifespan:
-    - set upload admission limit to 2;
+    - set upload admission limit to 2 via SignalingAdmissionController;
     - block the first accepted request in controlled evaluation;
     - submit additional upload requests concurrently;
-    - at most 2 requests pass body admission;
+    - at most 2 requests pass body admission (proven via explicit event synchronization);
     - 3rd excess request returns 429 promptly;
     - release accepted work;
     - all reservations return to zero;
@@ -458,62 +485,61 @@ def test_api_upload_concurrency_admission_limit_and_worker_serialization(tmp_pat
     detector = ControlledUploadDetector()
     with TestClient(app) as client:
         orig_detector = getattr(app.state, "detector", None)
+        admission = SignalingAdmissionController(limit=2, name="file_uploads")
+        app.state.file_upload_admission = admission
+
+        resp1: dict[str, Any] = {}
+        resp2: dict[str, Any] = {}
+        resp3: dict[str, Any] = {}
+
+        def send_req1() -> None:
+            r = client.post(
+                "/api/v1/analyze/file",
+                files={"file": ("req1.wav", io.BytesIO(wav_bytes), "audio/wav")},
+            )
+            resp1["status_code"] = r.status_code
+            resp1["json"] = r.json()
+
+        def send_req2() -> None:
+            r = client.post(
+                "/api/v1/analyze/file",
+                files={"file": ("req2.wav", io.BytesIO(wav_bytes), "audio/wav")},
+            )
+            resp2["status_code"] = r.status_code
+            resp2["json"] = r.json()
+
+        def send_req3() -> None:
+            r = client.post(
+                "/api/v1/analyze/file",
+                files={"file": ("req3.wav", io.BytesIO(wav_bytes), "audio/wav")},
+            )
+            resp3["status_code"] = r.status_code
+            resp3["json"] = r.json()
+            resp3["headers"] = dict(r.headers)
+
+        t1 = threading.Thread(target=send_req1)
+        t2 = threading.Thread(target=send_req2)
+        t3 = threading.Thread(target=send_req3)
+
         try:
             app.state.detector = detector
-            app.state.file_upload_admission = AtomicAdmissionController(
-                limit=2, name="file_uploads"
-            )
-
-            resp1: dict[str, Any] = {}
-            resp2: dict[str, Any] = {}
-            resp3: dict[str, Any] = {}
-
-            def send_req1() -> None:
-                r = client.post(
-                    "/api/v1/analyze/file",
-                    files={"file": ("req1.wav", io.BytesIO(wav_bytes), "audio/wav")},
-                )
-                resp1["status_code"] = r.status_code
-                resp1["json"] = r.json()
-
-            def send_req2() -> None:
-                r = client.post(
-                    "/api/v1/analyze/file",
-                    files={"file": ("req2.wav", io.BytesIO(wav_bytes), "audio/wav")},
-                )
-                resp2["status_code"] = r.status_code
-                resp2["json"] = r.json()
-
-            def send_req3() -> None:
-                r = client.post(
-                    "/api/v1/analyze/file",
-                    files={"file": ("req3.wav", io.BytesIO(wav_bytes), "audio/wav")},
-                )
-                resp3["status_code"] = r.status_code
-                resp3["json"] = r.json()
-                resp3["headers"] = dict(r.headers)
-
-            t1 = threading.Thread(target=send_req1)
             t1.start()
 
             # Wait until request 1 has physically entered detector call 1
             assert detector.call1_started.wait(timeout=5.0)
-            assert app.state.file_upload_admission.reserved_count == 1
+            assert admission.reserved_count == 1
 
             # Submit request 2 (which should pass admission and wait for worker queue)
-            t2 = threading.Thread(target=send_req2)
             t2.start()
 
-            # Give a brief moment for request 2 to pass middleware admission
-            import time
-
-            time.sleep(0.05)
-            assert app.state.file_upload_admission.reserved_count == 2
+            # Deterministically wait until request 2 has acquired its admission reservation
+            assert admission.wait_for_reservations(2, timeout=5.0)
+            assert admission.reserved_count == 2
 
             # Submit request 3 (must fail admission immediately with 429)
-            t3 = threading.Thread(target=send_req3)
             t3.start()
-            t3.join(timeout=2.0)
+            t3.join(timeout=5.0)
+            assert not t3.is_alive()
 
             assert resp3["status_code"] == 429
             detail = resp3["json"]["detail"]
@@ -524,16 +550,23 @@ def test_api_upload_concurrency_admission_limit_and_worker_serialization(tmp_pat
             detector.call1_release.set()
             t1.join(timeout=5.0)
             t2.join(timeout=5.0)
+            assert not t1.is_alive()
+            assert not t2.is_alive()
 
             assert resp1["status_code"] == 200
             assert resp2["status_code"] == 200
 
             # All reservations returned to zero
-            assert app.state.file_upload_admission.reserved_count == 0
+            assert admission.reserved_count == 0
 
             # Physical detector execution concurrency strictly remained 1
             assert detector.max_concurrency == 1
         finally:
+            detector.call1_release.set()
+            for t in (t1, t2, t3):
+                if t.is_alive():
+                    t.join(timeout=5.0)
+                assert not t.is_alive()
             app.state.detector = orig_detector
 
 

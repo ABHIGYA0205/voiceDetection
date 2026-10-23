@@ -319,3 +319,135 @@ async def test_middleware_rejects_streaming_chunks_overflow() -> None:
     start_msg = next((m for m in sent_messages if m["type"] == "http.response.start"), None)
     assert start_msg is not None
     assert start_msg["status"] == 413
+
+
+@pytest.mark.asyncio
+async def test_middleware_missing_controller_fails_closed_503() -> None:
+    """Test C: Missing upload controller fail-closed.
+
+    - Invoke middleware for the protected path without a configured controller;
+    - Assert HTTP 503 with FILE_UPLOAD_ADMISSION_UNAVAILABLE;
+    - Assert receive was never called;
+    - Assert downstream was never called;
+    - Assert Connection: close is included.
+    """
+    downstream_called = False
+    receive_called = False
+
+    async def mock_app(scope: Any, receive: Any, send: Any) -> None:
+        nonlocal downstream_called
+        downstream_called = True
+
+    async def mock_receive() -> MutableMapping[str, Any]:
+        nonlocal receive_called
+        receive_called = True
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent_messages: list[MutableMapping[str, Any]] = []
+
+    async def mock_send(msg: MutableMapping[str, Any]) -> None:
+        sent_messages.append(msg)
+
+    # Middleware configured with no controller, and scope has no app state
+    middleware = FileUploadAdmissionMiddleware(mock_app, controller=None)
+    scope: dict[str, Any] = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v1/analyze/file",
+        "headers": [(b"content-length", b"100")],
+    }
+
+    await middleware(scope, mock_receive, mock_send)
+
+    assert downstream_called is False
+    assert receive_called is False
+
+    start_msg = next((m for m in sent_messages if m["type"] == "http.response.start"), None)
+    assert start_msg is not None
+    assert start_msg["status"] == 503
+    headers = dict(start_msg["headers"])
+    assert headers.get(b"connection") == b"close"
+
+    body_msg = next((m for m in sent_messages if m["type"] == "http.response.body"), None)
+    assert body_msg is not None
+    assert b"FILE_UPLOAD_ADMISSION_UNAVAILABLE" in body_msg.get("body", b"")
+
+
+@pytest.mark.asyncio
+async def test_middleware_post_response_start_chunk_overflow_no_duplicate_start() -> None:
+    """Test F: Post-response-start chunk overflow.
+
+    - Downstream reads one under-limit chunk;
+    - Downstream sends http.response.start;
+    - Downstream's next receive crosses the cap;
+    - Assert exactly one http.response.start was sent;
+    - Assert no generic 500 and no second response start;
+    - Assert the admission token returns to zero.
+    """
+    controller = AtomicAdmissionController(limit=2, name="uploads")
+    sent_messages: list[MutableMapping[str, Any]] = []
+
+    async def mock_send(msg: MutableMapping[str, Any]) -> None:
+        sent_messages.append(msg)
+
+    async def mock_app(scope: Any, receive: Any, send: Any) -> None:
+        # 1. Read first under-limit chunk
+        chunk1 = await receive()
+        assert len(chunk1.get("body", b"")) == 300
+
+        # 2. Downstream deliberately starts response before finishing body
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+
+        # 3. Read second chunk which crosses the cap (600 > 500)
+        try:
+            await receive()
+        except Exception:
+            # Downstream may handle or catch the exception
+            pass
+
+    small_cap = 500
+    middleware = FileUploadAdmissionMiddleware(
+        mock_app, controller=controller, max_upload_bytes=small_cap
+    )
+
+    chunks: list[dict[str, Any]] = [
+        {"type": "http.request", "body": b"x" * 300, "more_body": True},
+        {"type": "http.request", "body": b"x" * 300, "more_body": False},  # Cumulative 600 > 500
+    ]
+    chunk_idx = 0
+
+    async def mock_receive() -> MutableMapping[str, Any]:
+        nonlocal chunk_idx
+        if chunk_idx < len(chunks):
+            c = chunks[chunk_idx]
+            chunk_idx += 1
+            return c
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v1/analyze/file",
+        "headers": [],
+    }
+
+    await middleware(scope, mock_receive, mock_send)
+
+    # Invariant 1: Exactly ONE http.response.start was sent
+    start_messages = [m for m in sent_messages if m["type"] == "http.response.start"]
+    assert len(start_messages) == 1
+    assert start_messages[0]["status"] == 200
+
+    # Invariant 2: The stream was completed cleanly with body more_body=False
+    body_messages = [m for m in sent_messages if m["type"] == "http.response.body"]
+    assert len(body_messages) >= 1
+    assert body_messages[-1].get("more_body", False) is False
+
+    # Invariant 3: Admission reservation returned to 0
+    assert controller.reserved_count == 0

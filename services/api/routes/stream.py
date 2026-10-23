@@ -14,7 +14,6 @@ from pydantic import BaseModel, Field
 
 from services.api.inference_worker import InferenceWorker, InferenceWorkerClosedError
 from services.api.resource_admission import (
-    MAX_CONCURRENT_SESSIONS_DEFAULT,
     AtomicAdmissionController,
 )
 from voiceshield.core.schema import Disclaimers
@@ -222,27 +221,38 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
     streaming_admission: AtomicAdmissionController | None = getattr(
         app.state, "streaming_admission", None
     )
-    max_concurrent = getattr(app.state, "max_concurrent_sessions", MAX_CONCURRENT_SESSIONS_DEFAULT)
 
-    slot_reserved = False
-    if streaming_admission is not None:
-        slot_reserved = streaming_admission.try_reserve(token)
-    else:
-        active_sessions_dict: dict[str, Any] = getattr(app.state, "active_streaming_sessions", {})
-        slot_reserved = len(active_sessions_dict) < max_concurrent
+    if streaming_admission is None or not isinstance(
+        streaming_admission, AtomicAdmissionController
+    ):
+        logger.error(
+            "Streaming admission controller is not configured or unavailable on app.state."
+        )
+        await websocket.accept()
+        await websocket.send_json(
+            ServerErrorEvent(
+                error_code="ADMISSION_CONTROLLER_UNAVAILABLE",
+                message="Streaming admission infrastructure is unavailable. Please retry later.",
+            ).model_dump()
+        )
+        await websocket.close(
+            code=status.WS_1011_INTERNAL_ERROR,
+            reason="Admission controller unavailable.",
+        )
+        return
 
+    slot_reserved = streaming_admission.try_reserve(token)
     if not slot_reserved:
-        limit_val = streaming_admission.limit if streaming_admission is not None else max_concurrent
         logger.warning(
             "Rejected WebSocket connection: streaming admission limit (%d) reached.",
-            limit_val,
+            streaming_admission.limit,
         )
         await websocket.accept()
         await websocket.send_json(
             ServerErrorEvent(
                 error_code="CONCURRENCY_LIMIT_REACHED",
                 message=(
-                    f"Server concurrency limit ({limit_val} sessions) reached. "
+                    f"Server concurrency limit ({streaming_admission.limit} sessions) reached. "
                     "Please retry when existing streams disconnect."
                 ),
             ).model_dump()
@@ -253,7 +263,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
         )
         return
 
-    active_sessions: dict[str, Any] = getattr(app.state, "active_streaming_sessions", {})
+    active_sessions: dict[str, Any] | None = getattr(app.state, "active_streaming_sessions", None)
     session: StreamingSession | None = None
     inference_tasks: set[asyncio.Task[None]] = set()
     is_closing = False
@@ -439,7 +449,8 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
 
         # 5. Initialize isolated StreamingSession
         session = StreamingSession(session_id=session_id)
-        active_sessions[session_id] = session
+        if active_sessions is not None:
+            active_sessions[session_id] = session
 
         logger.info(
             "Session %s initialized: %d Hz, %d channel(s), %s encoding (idle_timeout=%.1fs)",
@@ -844,21 +855,35 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
         logger.exception("Unexpected error in streaming session %s: %s", session_id, exc)
     finally:
         is_closing = True
-        # Cancel any pending inference background tasks and await their unwinding
-        tasks_snapshot = list(inference_tasks)
-        for task in tasks_snapshot:
-            if not task.done():
-                task.cancel()
-        if tasks_snapshot:
-            await asyncio.gather(*tasks_snapshot, return_exceptions=True)
-
-        # Cleanly release session resources and remove from registry
-        if session is not None:
-            session.reset()
-        active_sessions.pop(session_id, None)
-
-        # Release atomic admission reservation
-        if streaming_admission is not None:
-            streaming_admission.release(token)
+        try:
+            # Cancel any pending inference background tasks and await their unwinding
+            tasks_snapshot = list(inference_tasks)
+            for task in tasks_snapshot:
+                if not task.done():
+                    task.cancel()
+            if tasks_snapshot:
+                await asyncio.gather(*tasks_snapshot, return_exceptions=True)
+        finally:
+            try:
+                # Cleanly release session resources even if gather was interrupted
+                if session is not None:
+                    session.reset()
+            except Exception as reset_exc:
+                logger.warning("Error resetting session %s: %s", session_id, reset_exc)
+            finally:
+                try:
+                    # Remove from registry even if session.reset() raised
+                    if active_sessions is not None:
+                        active_sessions.pop(session_id, None)
+                except Exception as reg_exc:
+                    logger.warning(
+                        "Error removing session %s from registry: %s", session_id, reg_exc
+                    )
+                finally:
+                    # Unconditionally release atomic admission reservation exactly once
+                    if slot_reserved:
+                        slot_reserved = False
+                        if streaming_admission is not None:
+                            streaming_admission.release(token)
 
         logger.info("Session %s resources released successfully.", session_id)

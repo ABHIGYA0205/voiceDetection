@@ -8,6 +8,7 @@ import json
 import threading
 import time
 from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -20,6 +21,7 @@ from services.api.main import app
 from services.api.resource_admission import AtomicAdmissionController
 from services.api.routes.stream import websocket_stream_endpoint
 from voiceshield.models.base import BaseDetector, DetectorOutput
+from voiceshield.streaming.session import StreamingSession
 
 
 def generate_pcm_sine(
@@ -1031,9 +1033,16 @@ async def test_websocket_simultaneous_handshake_race_and_registry_distinction() 
     - during blocked handshakes: reserved_count reflects connections (2),
       while active_streaming_sessions remains completely empty.
     """
+    phase1_event = asyncio.Event()
+
+    def check_phase1(sockets_list: list[ControllableMockWebSocket]) -> None:
+        admitted = sum(1 for s in sockets_list if s.handshake_read_entered.is_set())
+        rejected = sum(1 for s in sockets_list if s.rejection_complete.is_set())
+        if admitted == 2 and rejected == 4:
+            phase1_event.set()
 
     class ControllableMockWebSocket:
-        def __init__(self, ws_id: int) -> None:
+        def __init__(self, ws_id: int, sockets_ref: list[ControllableMockWebSocket]) -> None:
             self.ws_id = ws_id
             self.app = app
             self.headers = {"origin": "http://localhost:5173"}
@@ -1043,6 +1052,10 @@ async def test_websocket_simultaneous_handshake_race_and_registry_distinction() 
             self.sent_events: list[dict[str, Any]] = []
             self.receive_start_gate = asyncio.Event()
             self.receive_disconnect_gate = asyncio.Event()
+            self.handshake_read_entered = asyncio.Event()
+            self.rejection_complete = asyncio.Event()
+            self.ack_sent_event = asyncio.Event()
+            self.sockets_ref = sockets_ref
 
         async def accept(self) -> None:
             self.accepted = True
@@ -1050,11 +1063,18 @@ async def test_websocket_simultaneous_handshake_race_and_registry_distinction() 
         async def close(self, code: int = 1000, reason: str = "") -> None:
             self.closed = True
             self.close_code = code
+            if code == 1008:
+                self.rejection_complete.set()
+                check_phase1(self.sockets_ref)
 
         async def send_json(self, data: dict[str, Any]) -> None:
             self.sent_events.append(data)
+            if data.get("type") == "session_started":
+                self.ack_sent_event.set()
 
         async def receive_text(self) -> str:
+            self.handshake_read_entered.set()
+            check_phase1(self.sockets_ref)
             # Blocks until explicitly allowed to send handshake
             await self.receive_start_gate.wait()
             return json.dumps(
@@ -1081,11 +1101,13 @@ async def test_websocket_simultaneous_handshake_race_and_registry_distinction() 
 
     try:
         num_clients = 6
-        sockets = [ControllableMockWebSocket(i) for i in range(num_clients)]
+        sockets: list[ControllableMockWebSocket] = []
+        for i in range(num_clients):
+            sockets.append(ControllableMockWebSocket(i, sockets))
         tasks = [asyncio.create_task(websocket_stream_endpoint(ws)) for ws in sockets]  # type: ignore[arg-type]
 
-        # Give all coroutines a chance to execute up to their first await
-        await asyncio.sleep(0.05)
+        # Deterministically wait for phase 1 arrival (2 admitted entered handshake read, 4 rejected completed rejection)
+        await asyncio.wait_for(phase1_event.wait(), timeout=5.0)
 
         # Invariant 1: Exactly limit (2) reservations succeeded; reserved_count never exceeded 2
         assert admission.reserved_count == 2
@@ -1112,13 +1134,17 @@ async def test_websocket_simultaneous_handshake_race_and_registry_distinction() 
             assert err_event["type"] == "error"
             assert err_event["error_code"] == "CONCURRENCY_LIMIT_REACHED"
             # Crucially: receive_text was never awaited for rejected sockets
-            assert not rej.receive_start_gate.is_set()
+            assert not rej.handshake_read_entered.is_set()
 
         # Invariant 4: Now release the 2 accepted sockets to send start
         for acc in accepted_sockets:
             acc.receive_start_gate.set()
 
-        await asyncio.sleep(0.05)
+        # Deterministically wait for session_started acknowledgements to be sent
+        await asyncio.wait_for(
+            asyncio.gather(*(acc.ack_sent_event.wait() for acc in accepted_sockets)),
+            timeout=5.0,
+        )
 
         # Now active_streaming_sessions contains exactly the 2 initialized sessions
         assert len(app.state.active_streaming_sessions) == 2
@@ -1138,6 +1164,307 @@ async def test_websocket_simultaneous_handshake_race_and_registry_distinction() 
         await worker.shutdown(timeout=2.0)
         app.state.streaming_admission = orig_admission
         app.state.inference_worker = orig_worker
+
+
+@pytest.mark.asyncio
+async def test_websocket_missing_admission_controller_fails_closed() -> None:
+    """Test A: Missing/invalid streaming_admission fails closed without reading handshake."""
+    orig_admission = getattr(app.state, "streaming_admission", None)
+    orig_registry = getattr(app.state, "active_streaming_sessions", None)
+    app.state.streaming_admission = None
+    app.state.active_streaming_sessions = {}
+
+    class TrackingMockWebSocket:
+        def __init__(self) -> None:
+            self.app = app
+            self.headers = {"origin": "http://localhost:5173"}
+            self.accepted = False
+            self.closed = False
+            self.close_code: int | None = None
+            self.close_reason: str = ""
+            self.sent_events: list[dict[str, Any]] = []
+            self.receive_text_entered = False
+
+        async def accept(self) -> None:
+            self.accepted = True
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.closed = True
+            self.close_code = code
+            self.close_reason = reason
+
+        async def send_json(self, data: dict[str, Any]) -> None:
+            self.sent_events.append(data)
+
+        async def receive_text(self) -> str:
+            self.receive_text_entered = True
+            return "{}"
+
+        async def receive(self) -> dict[str, Any]:
+            return {"type": "websocket.disconnect"}
+
+    try:
+        mock_ws = TrackingMockWebSocket()
+        await websocket_stream_endpoint(mock_ws)  # type: ignore[arg-type]
+
+        assert mock_ws.accepted is True
+        assert mock_ws.closed is True
+        assert mock_ws.close_code == 1011
+        assert len(mock_ws.sent_events) == 1
+        err_event = mock_ws.sent_events[0]
+        assert err_event["type"] == "error"
+        assert err_event["error_code"] == "ADMISSION_CONTROLLER_UNAVAILABLE"
+        # Assert receive_text / handshake read was NEVER entered
+        assert mock_ws.receive_text_entered is False
+        # Assert no active session created
+        assert len(app.state.active_streaming_sessions) == 0
+    finally:
+        app.state.streaming_admission = orig_admission
+        app.state.active_streaming_sessions = orig_registry
+
+
+@pytest.mark.asyncio
+async def test_websocket_proves_no_active_sessions_registry_len_fallback() -> None:
+    """Test B: Prove admission depends only on AtomicAdmissionController and never calls len() on active_streaming_sessions."""
+
+    class PoisonedRegistry(dict[str, Any]):
+        def __len__(self) -> int:
+            raise RuntimeError(
+                "Admission path forbidden from calling len(active_streaming_sessions)!"
+            )
+
+    poisoned_registry = PoisonedRegistry()
+    orig_registry = getattr(app.state, "active_streaming_sessions", None)
+    orig_admission = getattr(app.state, "streaming_admission", None)
+    orig_worker = getattr(app.state, "inference_worker", None)
+
+    admission = AtomicAdmissionController(limit=1, name="streaming_sessions")
+    worker = InferenceWorker()
+    app.state.streaming_admission = admission
+    app.state.active_streaming_sessions = poisoned_registry
+    app.state.inference_worker = worker
+
+    class SimpleMockWebSocket:
+        def __init__(self) -> None:
+            self.app = app
+            self.headers = {"origin": "http://localhost:5173"}
+            self.accepted = False
+            self.closed = False
+            self.close_code: int | None = None
+            self.sent_events: list[dict[str, Any]] = []
+            self.disconnect_event = asyncio.Event()
+
+        async def accept(self) -> None:
+            self.accepted = True
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.closed = True
+            self.close_code = code
+
+        async def send_json(self, data: dict[str, Any]) -> None:
+            self.sent_events.append(data)
+
+        async def receive_text(self) -> str:
+            return json.dumps(
+                {
+                    "type": "start",
+                    "protocol_version": "1.0",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                }
+            )
+
+        async def receive(self) -> dict[str, Any]:
+            await self.disconnect_event.wait()
+            return {"type": "websocket.disconnect"}
+
+    try:
+        # Client 1 connects successfully: len() must NOT be called on poisoned_registry
+        ws1 = SimpleMockWebSocket()
+        t1 = asyncio.create_task(websocket_stream_endpoint(ws1))  # type: ignore[arg-type]
+        await asyncio.sleep(0.02)
+        assert ws1.accepted is True
+        assert admission.reserved_count == 1
+
+        # Client 2 connects when saturated: len() must NOT be called on poisoned_registry either
+        ws2 = SimpleMockWebSocket()
+        await websocket_stream_endpoint(ws2)  # type: ignore[arg-type]
+        assert ws2.closed is True
+        assert ws2.close_code == 1008
+        assert ws2.sent_events[0]["error_code"] == "CONCURRENCY_LIMIT_REACHED"
+
+        # Disconnect client 1
+        ws1.disconnect_event.set()
+        await t1
+        assert admission.reserved_count == 0
+    finally:
+        await worker.shutdown(timeout=2.0)
+        app.state.streaming_admission = orig_admission
+        app.state.active_streaming_sessions = orig_registry
+        app.state.inference_worker = orig_worker
+
+
+@pytest.mark.asyncio
+async def test_websocket_repeated_cancellation_unconditionally_releases_token() -> None:
+    """Test D: Repeated WebSocket cancellation during child unwinding still releases token and clears registry."""
+    admission = AtomicAdmissionController(limit=1, name="streaming_sessions")
+    worker = InferenceWorker()
+    orig_admission = getattr(app.state, "streaming_admission", None)
+    orig_worker = getattr(app.state, "inference_worker", None)
+    orig_registry = getattr(app.state, "active_streaming_sessions", None)
+    app.state.streaming_admission = admission
+    app.state.inference_worker = worker
+    app.state.active_streaming_sessions = {}
+
+    child_started = asyncio.Event()
+    child_in_cancellation = asyncio.Event()
+    child_release = asyncio.Event()
+
+    async def mock_execute(fn: Any, *args: Any, **kwargs: Any) -> Any:
+        child_started.set()
+        try:
+            await asyncio.sleep(100.0)
+        except asyncio.CancelledError:
+            child_in_cancellation.set()
+            await child_release.wait()
+            raise
+
+    worker.execute = mock_execute  # type: ignore[method-assign]
+
+    class ControllableSocket:
+        def __init__(self) -> None:
+            self.app = app
+            self.headers = {"origin": "http://localhost:5173"}
+            self.accepted = False
+            self.closed = False
+            self.sent_events: list[dict[str, Any]] = []
+            self.disconnect_event = asyncio.Event()
+            self._audio_sent = False
+
+        async def accept(self) -> None:
+            self.accepted = True
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.closed = True
+
+        async def send_json(self, data: dict[str, Any]) -> None:
+            self.sent_events.append(data)
+
+        async def receive_text(self) -> str:
+            return json.dumps(
+                {
+                    "type": "start",
+                    "protocol_version": "1.0",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                }
+            )
+
+        async def receive(self) -> dict[str, Any]:
+            if not self._audio_sent:
+                self._audio_sent = True
+                chunk = generate_pcm_sine(4.0, sample_rate=16000, freq=300.0, amplitude=0.5)
+                return {"type": "websocket.receive", "bytes": chunk}
+            await self.disconnect_event.wait()
+            return {"type": "websocket.disconnect"}
+
+    try:
+        ws = ControllableSocket()
+        endpoint_task = asyncio.create_task(websocket_stream_endpoint(ws))  # type: ignore[arg-type]
+
+        # Wait until inference starts and enters worker.execute
+        await asyncio.wait_for(child_started.wait(), timeout=5.0)
+
+        assert admission.reserved_count == 1
+        assert len(app.state.active_streaming_sessions) == 1
+
+        # Cancel endpoint task once
+        endpoint_task.cancel()
+
+        # Wait deterministically until endpoint is waiting in gather on child cancellation
+        await asyncio.wait_for(child_in_cancellation.wait(), timeout=5.0)
+
+        # Cancel endpoint task a second time while in gather unwinding
+        endpoint_task.cancel()
+
+        # Now release the child task to finish its cancellation unwinding
+        child_release.set()
+
+        # CancelledError must propagate out of the endpoint task
+        with pytest.raises(asyncio.CancelledError):
+            await endpoint_task
+
+        # Reservation count is strictly 0 and session registry is empty
+        assert admission.reserved_count == 0
+        assert len(app.state.active_streaming_sessions) == 0
+    finally:
+        await worker.shutdown(timeout=2.0)
+        app.state.streaming_admission = orig_admission
+        app.state.inference_worker = orig_worker
+        app.state.active_streaming_sessions = orig_registry
+
+
+@pytest.mark.asyncio
+async def test_websocket_session_reset_exception_cleanup() -> None:
+    """Test E: Even if session.reset() raises an exception during cleanup, registry removal and token release still occur."""
+    admission = AtomicAdmissionController(limit=1, name="streaming_sessions")
+    worker = InferenceWorker()
+    orig_admission = getattr(app.state, "streaming_admission", None)
+    orig_worker = getattr(app.state, "inference_worker", None)
+    orig_registry = getattr(app.state, "active_streaming_sessions", None)
+    app.state.streaming_admission = admission
+    app.state.inference_worker = worker
+    app.state.active_streaming_sessions = {}
+
+    class SimpleMockWebSocket:
+        def __init__(self) -> None:
+            self.app = app
+            self.headers = {"origin": "http://localhost:5173"}
+            self.accepted = False
+            self.closed = False
+            self.sent_events: list[dict[str, Any]] = []
+
+        async def accept(self) -> None:
+            self.accepted = True
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.closed = True
+
+        async def send_json(self, data: dict[str, Any]) -> None:
+            self.sent_events.append(data)
+
+        async def receive_text(self) -> str:
+            return json.dumps(
+                {
+                    "type": "start",
+                    "protocol_version": "1.0",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "pcm_encoding": "int16",
+                }
+            )
+
+        async def receive(self) -> dict[str, Any]:
+            return {"type": "websocket.disconnect"}
+
+    try:
+
+        def faulty_reset(self_session: Any) -> None:
+            raise RuntimeError("Intentional session reset failure during disconnect.")
+
+        with patch.object(StreamingSession, "reset", side_effect=faulty_reset):
+            ws = SimpleMockWebSocket()
+            await websocket_stream_endpoint(ws)  # type: ignore[arg-type]
+
+        assert admission.reserved_count == 0
+        assert len(app.state.active_streaming_sessions) == 0
+    finally:
+        await worker.shutdown(timeout=2.0)
+        app.state.streaming_admission = orig_admission
+        app.state.inference_worker = orig_worker
+        app.state.active_streaming_sessions = orig_registry
 
 
 # ==============================================================================
