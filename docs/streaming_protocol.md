@@ -114,6 +114,7 @@ Upon successful validation, the server generates a unique UUID session ID, initi
   "max_frame_bytes": 131072,
   "max_stream_duration_seconds": 3600.0,
   "idle_timeout_seconds": 30.0,
+  "config_hash": "43a9ce74cadab3c63fc0336eeef417e4014833c6c67e33e481b6b4fe81a822ef",
   "disclaimers": {
     "scope_limitations": "Advisory only. Does not prove identity or calculate fraud probability.",
     "model_name": "VoiceShield-AASIST-L"

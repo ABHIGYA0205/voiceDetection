@@ -9,7 +9,8 @@ from typing import Any
 import numpy as np
 from pydantic import BaseModel, Field, model_validator
 
-from voiceshield.config.schema import TemporalPolicyConfig, VoiceShieldConfig, WindowingConfig
+from voiceshield.config.loader import load_config
+from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.core.schema import Disclaimers
 from voiceshield.dsp.exceptions import AudioPreprocessingError
 from voiceshield.dsp.preprocessor import load_audio
@@ -212,6 +213,10 @@ class FileInferenceResult(BaseModel):
         default=False,
         description="Whether evaluation was performed with mock model weights for test/UI.",
     )
+    config_hash: str | None = Field(
+        default=None,
+        description="Deterministic SHA-256 hash of the effective configuration.",
+    )
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="Provenance, model tags, config hash, and checkpoint hashes.",
@@ -257,9 +262,9 @@ def evaluate_audio(
     source: str | Path | bytes | io.BytesIO,
     detector: BaseDetector,
     config: VoiceShieldConfig | None = None,
-    hop_seconds: float = 1.0,
-    window_seconds: float = 4.0,
-    threshold: float = 0.65,
+    hop_seconds: float | None = None,
+    window_seconds: float | None = None,
+    threshold: float | None = None,
     file_name: str | None = None,
     max_duration_seconds: float | None = None,
     min_speech_seconds: float | None = None,
@@ -270,49 +275,41 @@ def evaluate_audio(
         source: Audio file path, bytes, or buffer.
         detector: Instantiated BaseDetector implementation.
         config: Optional VoiceShieldConfig for provenance and policy configuration.
-        hop_seconds: Step size between consecutive windows in seconds (default: 1.0s).
-        window_seconds: Duration of each analysis window in seconds (default: 4.0s).
-        threshold: Request-level decision threshold for synthetic suspicion (default: 0.65).
+        hop_seconds: Optional step size between consecutive windows in seconds (uses config if omitted).
+        window_seconds: Optional duration of each analysis window in seconds (uses config if omitted).
+        threshold: Optional request-level decision threshold for synthetic suspicion (uses config if omitted).
         file_name: Optional explicit file name override for reporting.
         max_duration_seconds: Optional ceiling on acceptable audio duration in seconds.
-        min_speech_seconds: Minimum active speech seconds required per window and file (default: 0.8s).
+        min_speech_seconds: Optional minimum active speech seconds required per window and file.
 
     Returns:
         Populated FileInferenceResult model.
     """
     path_str = file_name or (str(source) if isinstance(source, (str, Path)) else "in_memory_audio")
 
-    # 1. Build and validate effective WindowingConfig from plain Python data
-    base_window_data = (
-        config.windowing.model_dump(mode="python")
-        if config is not None
-        else WindowingConfig().model_dump(mode="python")
-    )
-    window_data = {
-        **base_window_data,
-        "window_seconds": float(window_seconds),
-        "hop_seconds": float(hop_seconds),
-    }
-    if min_speech_seconds is not None:
-        window_data["min_speech_seconds"] = float(min_speech_seconds)
-    effective_window_cfg = WindowingConfig.model_validate(window_data)
+    # 1. Establish validated effective configuration
+    base_cfg: VoiceShieldConfig = config if config is not None else load_config(None)
+    effective_dict = base_cfg.model_dump()
 
-    # 2. Build and validate effective TemporalPolicyConfig from plain Python data
-    base_policy_data = (
-        config.temporal_policy.model_dump(mode="python")
-        if config is not None
-        else TemporalPolicyConfig().model_dump(mode="python")
-    )
-    thresh_high = float(threshold)
-    thresh_low = float(base_policy_data.get("threshold_low", 0.35))
-    if thresh_low > thresh_high:
-        thresh_low = thresh_high
-    policy_data = {
-        **base_policy_data,
-        "threshold_high": thresh_high,
-        "threshold_low": thresh_low,
-    }
-    effective_policy_cfg = TemporalPolicyConfig.model_validate(policy_data)
+    if hop_seconds is not None:
+        effective_dict["windowing"]["hop_seconds"] = float(hop_seconds)
+    if window_seconds is not None:
+        effective_dict["windowing"]["window_seconds"] = float(window_seconds)
+    if min_speech_seconds is not None:
+        effective_dict["windowing"]["min_speech_seconds"] = float(min_speech_seconds)
+    if threshold is not None:
+        t_high = float(threshold)
+        effective_dict["temporal_policy"]["threshold_high"] = t_high
+        if effective_dict["temporal_policy"]["threshold_low"] > t_high:
+            effective_dict["temporal_policy"]["threshold_low"] = t_high
+
+    effective_cfg = VoiceShieldConfig.model_validate(effective_dict)
+    effective_config_hash = effective_cfg.compute_hash()
+
+    effective_window_cfg = effective_cfg.windowing
+    effective_policy_cfg = effective_cfg.temporal_policy
+    target_sr = effective_cfg.audio.sample_rate
+    effective_threshold = effective_policy_cfg.threshold_high
 
     policy = TemporalDecisionPolicy(
         policy_config=effective_policy_cfg,
@@ -323,7 +320,7 @@ def evaluate_audio(
     try:
         preprocessed = load_audio(
             source,
-            target_sr=16000,
+            target_sr=target_sr,
             normalize=False,
             max_duration_seconds=max_duration_seconds,
         )
@@ -332,6 +329,8 @@ def evaluate_audio(
             file_path=path_str,
             status="error",
             error_message=str(exc),
+            config_hash=effective_config_hash,
+            metadata={"config_hash": effective_config_hash},
             disclaimers=Disclaimers(),
         )
     except Exception as exc:
@@ -339,10 +338,12 @@ def evaluate_audio(
             file_path=path_str,
             status="error",
             error_message=f"Unexpected error loading audio: {exc}",
+            config_hash=effective_config_hash,
+            metadata={"config_hash": effective_config_hash},
             disclaimers=Disclaimers(),
         )
 
-    waveform = preprocessed.waveform  # 1D float32 @ 16 kHz
+    waveform = preprocessed.waveform  # 1D float32 @ canonical sample rate
     metadata = preprocessed.metadata
 
     if max_duration_seconds is not None and metadata.duration_seconds > max_duration_seconds:
@@ -356,6 +357,8 @@ def evaluate_audio(
             duration_seconds=round(metadata.duration_seconds, 3),
             original_sample_rate=metadata.original_sample_rate,
             original_channels=metadata.original_channels,
+            config_hash=effective_config_hash,
+            metadata={"config_hash": effective_config_hash},
             disclaimers=Disclaimers(),
         )
 
@@ -370,10 +373,10 @@ def evaluate_audio(
     total_active_speech = round(vad.compute_speech_duration(waveform, 16000), 2)
 
     # 4. Canonical window scheduler
-    window_samples = effective_window_cfg.window_samples(16000)
-    hop_samples = effective_window_cfg.hop_samples(16000)
+    window_samples = effective_window_cfg.window_samples(target_sr)
+    hop_samples = effective_window_cfg.hop_samples(target_sr)
     scheduler = CanonicalWindowScheduler(
-        sample_rate=16000,
+        sample_rate=target_sr,
         window_samples=window_samples,
         hop_samples=hop_samples,
     )
@@ -383,14 +386,14 @@ def evaluate_audio(
     res_metadata: dict[str, Any] = {
         "model_id": getattr(detector, "model_id", detector.__class__.__name__),
         "device_used": str(getattr(detector, "device", "unknown")),
-        "effective_threshold": threshold,
+        "effective_threshold": effective_threshold,
         "operating_threshold_source": "unvalidated_heuristic",
         "score_is_calibrated": False,
         "active_speech_duration_seconds": total_active_speech,
         "min_speech_threshold_seconds": effective_min_speech,
         "window_seconds": effective_window_cfg.window_seconds,
         "hop_seconds": effective_window_cfg.hop_seconds,
-        "config_hash": config.compute_hash() if config else None,
+        "config_hash": effective_config_hash,
         "pre_norm_peak": metadata.pre_norm_quality.peak_level,
         "pre_norm_rms": metadata.pre_norm_quality.rms,
         "pre_norm_status": metadata.pre_norm_quality.quality_status,
@@ -421,13 +424,14 @@ def evaluate_audio(
             mean_synthetic_likelihood=None,
             max_synthetic_likelihood=None,
             score_is_calibrated=False,
-            effective_threshold=threshold,
+            effective_threshold=effective_threshold,
             operating_threshold_source="unvalidated_heuristic",
             is_synthetic_suspected=False,
             final_decision_state=DecisionState.INSUFFICIENT_EVIDENCE.value,
             temporal_rule_explanation=explanation,
             windows=[],
             is_mock_detector=is_mock,
+            config_hash=effective_config_hash,
             metadata=res_metadata,
             disclaimers=Disclaimers(),
         )
@@ -461,7 +465,7 @@ def evaluate_audio(
                     synthetic_likelihood=None,
                     score_is_calibrated=False,
                     calibrated_synthetic_likelihood=None,
-                    effective_threshold=threshold,
+                    effective_threshold=effective_threshold,
                     is_synthetic_suspected=False,
                     active_speech_seconds=speech_sec,
                     is_eligible=False,
@@ -499,7 +503,7 @@ def evaluate_audio(
                     uncalibrated_synthetic_score=score,
                     score_is_calibrated=False,
                     calibrated_synthetic_likelihood=None,
-                    effective_threshold=threshold,
+                    effective_threshold=effective_threshold,
                     is_synthetic_suspected=is_suspected,
                     active_speech_seconds=speech_sec,
                     is_eligible=True,
@@ -562,13 +566,14 @@ def evaluate_audio(
             mean_synthetic_likelihood=None,
             max_synthetic_likelihood=None,
             score_is_calibrated=False,
-            effective_threshold=threshold,
+            effective_threshold=effective_threshold,
             operating_threshold_source="unvalidated_heuristic",
             is_synthetic_suspected=False,
             final_decision_state=DecisionState.INSUFFICIENT_EVIDENCE.value,
             temporal_rule_explanation=explanation,
             windows=windows,
             is_mock_detector=is_mock,
+            config_hash=effective_config_hash,
             metadata=res_metadata,
             disclaimers=Disclaimers(),
         )
@@ -583,7 +588,7 @@ def evaluate_audio(
     if file_suspected:
         explanation = (
             f"Advisory Warning: Sustained synthetic acoustic anomaly detected across temporal decision policy "
-            f"(Peak score: {max_score:.3f} >= threshold {threshold:.3f}). "
+            f"(Peak score: {max_score:.3f} >= threshold {effective_threshold:.3f}). "
             "Pause and verify through a known independent channel. Do not automatically terminate or block calls."
         )
     elif (
@@ -593,13 +598,13 @@ def evaluate_audio(
         explanation = (
             f"Isolated or ambiguous synthetic acoustic anomaly detected, but anomaly was not sustained across "
             f"temporal policy elevation criteria. "
-            f"Low anomaly overall across {num_eligible} evaluated window(s) (Mean score: {mean_score:.3f}, Peak score: {max_score:.3f} / threshold {threshold:.3f}). "
+            f"Low anomaly overall across {num_eligible} evaluated window(s) (Mean score: {mean_score:.3f}, Peak score: {max_score:.3f} / threshold {effective_threshold:.3f}). "
             "Advisory metric only; does NOT prove identity of caller."
         )
     else:
         explanation = (
             f"Low acoustic anomaly score — does not authenticate speech across {num_eligible} evaluated "
-            f"window(s) (Mean score: {mean_score:.3f}, Peak score: {max_score:.3f} / threshold {threshold:.3f}). "
+            f"window(s) (Mean score: {mean_score:.3f}, Peak score: {max_score:.3f} / threshold {effective_threshold:.3f}). "
             "Advisory metric only; does NOT prove identity of caller."
         )
 
@@ -617,13 +622,14 @@ def evaluate_audio(
         mean_synthetic_likelihood=round(mean_score, 4),
         max_synthetic_likelihood=round(max_score, 4),
         score_is_calibrated=False,
-        effective_threshold=threshold,
+        effective_threshold=effective_threshold,
         operating_threshold_source="unvalidated_heuristic",
         is_synthetic_suspected=file_suspected,
         final_decision_state=policy.current_state.value,
         temporal_rule_explanation=explanation,
         windows=windows,
         is_mock_detector=is_mock,
+        config_hash=effective_config_hash,
         metadata=res_metadata,
         disclaimers=Disclaimers(),
     )

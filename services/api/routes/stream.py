@@ -16,6 +16,7 @@ from services.api.inference_worker import InferenceWorker, InferenceWorkerClosed
 from services.api.resource_admission import (
     AtomicAdmissionController,
 )
+from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.core.schema import Disclaimers
 from voiceshield.dsp.exceptions import AudioPreprocessingError
 from voiceshield.models.base import BaseDetector
@@ -97,6 +98,7 @@ class ServerStartAck(BaseModel):
     max_stream_duration_seconds: float = MAX_STREAM_DURATION_SECONDS_DEFAULT
     idle_timeout_seconds: float = DEFAULT_IDLE_TIMEOUT_SECONDS
     is_mock_detector: bool = False
+    config_hash: str | None = None
     disclaimers: Disclaimers = Field(default_factory=Disclaimers)
 
 
@@ -447,8 +449,27 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
             )
             return
 
-        # 5. Initialize isolated StreamingSession
-        session = StreamingSession(session_id=session_id)
+        # Check effective config readiness
+        effective_config: VoiceShieldConfig | None = getattr(app.state, "effective_config", None)
+        effective_config_hash: str | None = getattr(app.state, "effective_config_hash", None)
+        if effective_config is None or effective_config_hash is None:
+            logger.error(
+                "Rejected WebSocket stream: effective config or hash unavailable on app.state."
+            )
+            await websocket.send_json(
+                ServerErrorEvent(
+                    error_code="CONFIG_UNAVAILABLE",
+                    message="VoiceShield configuration is unavailable or not initialized.",
+                ).model_dump()
+            )
+            await websocket.close(
+                code=status.WS_1011_INTERNAL_ERROR,
+                reason="Server configuration unavailable.",
+            )
+            return
+
+        # 5. Initialize isolated StreamingSession with effective config
+        session = StreamingSession(config=effective_config, session_id=session_id)
         if active_sessions is not None:
             active_sessions[session_id] = session
 
@@ -476,6 +497,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
             max_stream_duration_seconds=max_stream_duration,
             idle_timeout_seconds=idle_timeout,
             is_mock_detector=is_mock,
+            config_hash=effective_config_hash,
         )
         await websocket.send_json(start_ack.model_dump())
 
@@ -534,7 +556,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     synthetic_score=synth_score,
                     uncalibrated_synthetic_score=synth_score,
                     score_is_calibrated=False,
-                    operating_threshold=0.65,
+                    operating_threshold=session.config.temporal_policy.threshold_high,
                     operating_threshold_source="unvalidated_heuristic",
                     raw_score=synth_score,
                     calibrated_score=None,
@@ -647,7 +669,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                             synthetic_score=None,
                             uncalibrated_synthetic_score=None,
                             score_is_calibrated=False,
-                            operating_threshold=0.65,
+                            operating_threshold=session.config.temporal_policy.threshold_high,
                             operating_threshold_source="unvalidated_heuristic",
                             raw_score=None,
                             calibrated_score=None,
@@ -830,7 +852,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                         synthetic_score=None,
                         uncalibrated_synthetic_score=None,
                         score_is_calibrated=False,
-                        operating_threshold=0.65,
+                        operating_threshold=session.config.temporal_policy.threshold_high,
                         operating_threshold_source="unvalidated_heuristic",
                         raw_score=None,
                         calibrated_score=None,

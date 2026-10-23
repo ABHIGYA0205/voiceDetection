@@ -19,11 +19,27 @@ class ConfigError(Exception):
     """Raised when configuration file loading or validation fails."""
 
 
+def find_default_config_path() -> Path:
+    """Resolve canonical configs/default.yaml robustly across working directories."""
+    cwd_path = Path("configs/default.yaml")
+    if cwd_path.is_file():
+        return cwd_path
+
+    # Check relative to this module: <repo_root>/src/voiceshield/config/loader.py -> <repo_root>/configs/default.yaml
+    repo_path = Path(__file__).resolve().parents[3] / "configs" / "default.yaml"
+    if repo_path.is_file():
+        return repo_path
+
+    raise ConfigError(
+        f"Canonical default configuration file not found at {cwd_path} or {repo_path}."
+    )
+
+
 def load_config(path: str | Path | None = None) -> VoiceShieldConfig:
     """Load and validate a VoiceShield configuration from a YAML file.
 
     Args:
-        path: Path to the YAML file. If None, tries configs/default.yaml or canonical defaults.
+        path: Path to the YAML file. If None, resolves the canonical default config file.
 
     Returns:
         Validated VoiceShieldConfig instance.
@@ -31,16 +47,12 @@ def load_config(path: str | Path | None = None) -> VoiceShieldConfig:
     Raises:
         ConfigError: If the file does not exist, YAML syntax is invalid, or schema validation fails.
     """
-    target_path = Path(path) if path is not None else DEFAULT_CONFIG_PATH
-
-    if not target_path.exists():
-        if path is None:
-            # Fall back to canonical defaults if default file not found
-            logger.info(
-                "Default config file %s not found; using built-in canonical defaults.", target_path
-            )
-            return VoiceShieldConfig()
-        raise ConfigError(f"Configuration file not found: {target_path}")
+    if path is not None:
+        target_path = Path(path)
+        if not target_path.is_file():
+            raise ConfigError(f"Configuration file not found: {target_path}")
+    else:
+        target_path = find_default_config_path()
 
     try:
         with open(target_path, encoding="utf-8") as f:
@@ -49,7 +61,7 @@ def load_config(path: str | Path | None = None) -> VoiceShieldConfig:
         raise ConfigError(f"YAML syntax error while reading {target_path}: {exc}") from exc
 
     if raw_data is None:
-        return VoiceShieldConfig()
+        raise ConfigError(f"Configuration file {target_path} is empty.")
 
     if not isinstance(raw_data, dict):
         raise ConfigError(

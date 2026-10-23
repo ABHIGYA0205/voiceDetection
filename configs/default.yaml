@@ -16,31 +16,12 @@ windowing:
   energy_threshold: 0.015
 
 model:
-  architecture: "lcnn"
-  checkpoint_path: null
-  num_classes: 2
-  embedding_dim: 128
+  architecture: "aasist_l"
+  checkpoint_path: "models/weights/AASIST-L.pth"
   device_preferred: "mps"
   fallback_to_cpu: true
 
-training:
-  batch_size: 32
-  learning_rate: 0.0001
-  weight_decay: 0.00001
-  max_epochs: 50
-  early_stopping_patience: 7
-  seed: 42
-  deterministic: true
-
-calibration:
-  method: "temperature_scaling"
-  temperature: 1.0
-  threshold: 0.65
-
 temporal_policy:
-  consecutive_hops_required: 2
-  decay_factor: 0.85
-  alert_threshold: 0.65
   threshold_high: 0.65
   threshold_low: 0.35
   smoothing_method: "ewma"
@@ -50,21 +31,6 @@ temporal_policy:
   elevation_m: 5
   hysteresis_consecutive_drops: 3
   timing_gap_threshold_seconds: 0.25
-  explanation_rules:
-    - "REQUIRE_MINIMUM_SPEECH_DURATION"
-    - "SUSTAINED_ANOMALY_CONFIRMATION"
-    - "SNR_QUALITY_GATING"
-
-api:
-  host: "127.0.0.1"
-  port: 8000
-  cors_origins:
-    - "http://localhost:5173"
-    - "http://127.0.0.1:5173"
-
-logging:
-  level: "INFO"
-  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 evaluation:
   dcf:

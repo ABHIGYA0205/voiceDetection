@@ -68,21 +68,21 @@ async def analyze_audio_file(
         File(description="Audio file in WAV or FLAC format (max 25MB, max 300s)"),
     ],
     hop_seconds: Annotated[
-        float,
+        float | None,
         Query(
             ge=0.25,
             le=4.0,
-            description="Sliding window step size in seconds.",
+            description="Sliding window step size in seconds. If omitted, uses server configuration.",
         ),
-    ] = 1.0,
+    ] = None,
     threshold: Annotated[
-        float,
+        float | None,
         Query(
             ge=0.01,
             le=0.99,
-            description="Synthetic speech likelihood decision threshold.",
+            description="Synthetic speech likelihood decision threshold. If omitted, uses server configuration.",
         ),
-    ] = 0.65,
+    ] = None,
 ) -> FileInferenceResult:
     """Analyze an uploaded WAV or FLAC file without permanent storage.
 
@@ -160,10 +160,12 @@ async def analyze_audio_file(
         )
 
     try:
+        effective_cfg = getattr(request.app.state, "effective_config", None)
         result = await worker.execute(
             evaluate_audio,
             source=io.BytesIO(content),
             detector=detector,
+            config=effective_cfg,
             hop_seconds=hop_seconds,
             threshold=threshold,
             file_name=clean_name,

@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from voiceshield.config.loader import load_config
+from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.models.aasist_adapter import (
     AASIST_L_DEFAULT_CONFIG,
     AASISTLDetector,
@@ -48,26 +49,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--checkpoint",
         type=Path,
         default=None,
-        help="Path to AASIST-L checkpoint (.pth).",
+        help="Path to AASIST-L checkpoint (.pth) (uses config if omitted).",
     )
     parser.add_argument(
         "--hop-seconds",
         type=float,
-        default=1.0,
-        help="Sliding window hop step in seconds (default: 1.0s).",
+        default=None,
+        help="Sliding window hop step in seconds (uses config if omitted).",
     )
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.65,
-        help="Decision threshold for synthetic speech warning (default: 0.65).",
+        default=None,
+        help="Decision threshold for synthetic speech warning (uses config if omitted).",
     )
     parser.add_argument(
         "--device",
         type=str,
         default=None,
         choices=["mps", "cpu"],
-        help="Preferred computation device ('mps' or 'cpu').",
+        help="Preferred computation device ('mps' or 'cpu') (uses config if omitted).",
     )
     parser.add_argument(
         "--mock-model",
@@ -134,6 +135,7 @@ def save_cli_results(results: list[FileInferenceResult], output_path: Path) -> N
         fieldnames = [
             "file_path",
             "status",
+            "config_hash",
             "duration_seconds",
             "total_windows",
             "mean_synthetic_score",
@@ -152,6 +154,7 @@ def save_cli_results(results: list[FileInferenceResult], output_path: Path) -> N
                     {
                         "file_path": r.file_path,
                         "status": r.status,
+                        "config_hash": r.config_hash or "",
                         "duration_seconds": r.duration_seconds,
                         "total_windows": r.total_windows,
                         "mean_synthetic_score": r.mean_synthetic_score
@@ -178,19 +181,43 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    cfg = load_config(args.config) if args.config else None
+    base_config = load_config(args.config)
 
-    # 1. Initialize detector
+    # Apply explicit CLI overrides with precedence:
+    # 1. canonical/default config; 2. --config selected YAML; 3. explicit CLI options.
+    config_dict = base_config.model_dump()
+    if args.checkpoint is not None:
+        config_dict["model"]["checkpoint_path"] = str(args.checkpoint)
+    if args.device is not None:
+        config_dict["model"]["device_preferred"] = args.device
+    if args.hop_seconds is not None:
+        config_dict["windowing"]["hop_seconds"] = float(args.hop_seconds)
+    if args.threshold is not None:
+        t_high = float(args.threshold)
+        config_dict["temporal_policy"]["threshold_high"] = t_high
+        if config_dict["temporal_policy"]["threshold_low"] > t_high:
+            config_dict["temporal_policy"]["threshold_low"] = t_high
+
+    effective_config = VoiceShieldConfig.model_validate(config_dict)
+    effective_config_hash = effective_config.compute_hash()
+
+    # 1. Initialize detector with effective config
     detector: BaseDetector
     if args.mock_model:
         mock_raw = AASISTModel(AASIST_L_DEFAULT_CONFIG)
-        detector = AASISTLDetector(_instantiated_model=mock_raw, preferred_device=args.device)
+        detector = AASISTLDetector(
+            _instantiated_model=mock_raw,
+            preferred_device=effective_config.model.device_preferred,
+            fallback_to_cpu=effective_config.model.fallback_to_cpu,
+            threshold=effective_config.temporal_policy.threshold_high,
+        )
     else:
         try:
             detector = AASISTLDetector(
-                checkpoint_path=args.checkpoint,
-                preferred_device=args.device,
-                threshold=args.threshold,
+                checkpoint_path=effective_config.model.checkpoint_path,
+                preferred_device=effective_config.model.device_preferred,
+                fallback_to_cpu=effective_config.model.fallback_to_cpu,
+                threshold=effective_config.temporal_policy.threshold_high,
             )
         except CheckpointNotFoundError as exc:
             sys.stderr.write(f"\nERROR: {exc}\n")
@@ -227,21 +254,22 @@ def main(argv: list[str] | None = None) -> int:
                 file_path=str(u),
                 status="unsupported",
                 error_message=f"Unsupported format '{u.suffix}'. Only WAV and FLAC are supported.",
+                config_hash=effective_config_hash,
+                metadata={"config_hash": effective_config_hash},
             )
         )
 
-    # 3. Evaluate each audio file, continuing past individual corrupt files
+    # 3. Evaluate each audio file with effective config
     for a in audio_files:
         res = evaluate_audio(
             source=a,
             detector=detector,
-            config=cfg,
-            hop_seconds=args.hop_seconds,
-            threshold=args.threshold,
+            config=effective_config,
         )
         results.append(res)
 
-    # 4. Print human-readable summary
+    # 4. Print human-readable summary and config provenance
+    print(f"Effective Config Hash: {effective_config_hash}")
     print(format_cli_summary_table(results))
 
     # 5. Save detailed results if requested

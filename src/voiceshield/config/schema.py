@@ -5,13 +5,22 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+def _check_finite(val: float, field_name: str) -> float:
+    """Verify that a float value is finite (not NaN or Inf)."""
+    if not math.isfinite(val):
+        raise ValueError(f"Value for {field_name} must be a finite number, got {val}")
+    return val
 
 
 class AudioConfig(BaseModel):
     """Specification of strict input audio format."""
+
+    model_config = ConfigDict(extra="forbid")
 
     sample_rate: int = Field(default=16000, description="Sampling rate in Hz (strictly 16,000 Hz).")
     channels: int = Field(default=1, description="Number of audio channels (strictly 1 mono).")
@@ -46,9 +55,29 @@ class AudioConfig(BaseModel):
             raise ValueError(f"Audio dtype must be 'float32', got {v!r}.")
         return v
 
+    @field_validator("normalize_range")
+    @classmethod
+    def validate_normalize_range(cls, v: tuple[float, float]) -> tuple[float, float]:
+        if len(v) != 2:
+            raise ValueError(f"normalize_range must contain exactly 2 bounds, got {len(v)}.")
+        low, high = v
+        _check_finite(low, "normalize_range[0]")
+        _check_finite(high, "normalize_range[1]")
+        if low >= high:
+            raise ValueError(
+                f"Lower normalize bound ({low}) must be strictly less than upper bound ({high})."
+            )
+        if low != -1.0 or high != 1.0:
+            raise ValueError(
+                f"VoiceShield input contract strictly requires normalize_range (-1.0, 1.0), got ({low}, {high})."
+            )
+        return v
+
 
 class WindowingConfig(BaseModel):
     """Sliding window and temporal segmentation parameters."""
+
+    model_config = ConfigDict(extra="forbid")
 
     window_seconds: float = Field(
         default=4.0, gt=0, description="Model window duration in seconds."
@@ -67,10 +96,8 @@ class WindowingConfig(BaseModel):
 
     @field_validator("window_seconds", "hop_seconds", "min_speech_seconds", "energy_threshold")
     @classmethod
-    def validate_finite_floats(cls, v: float) -> float:
-        if not math.isfinite(v):
-            raise ValueError(f"Value must be a finite number, got {v}")
-        return v
+    def validate_finite_floats(cls, v: float, info: Any) -> float:
+        return _check_finite(v, info.field_name)
 
     @model_validator(mode="after")
     def validate_window_relationships(self) -> WindowingConfig:
@@ -96,60 +123,44 @@ class WindowingConfig(BaseModel):
 class ModelConfig(BaseModel):
     """Acoustic detector model architecture and hardware execution parameters."""
 
-    architecture: str = Field(default="lcnn", description="Model architecture identifier.")
-    checkpoint_path: str | None = Field(
-        default=None, description="Path to model weights checkpoint."
+    model_config = ConfigDict(extra="forbid")
+
+    architecture: Literal["aasist_l"] = Field(
+        default="aasist_l",
+        description="Supported model architecture identifier (strictly 'aasist_l').",
     )
-    num_classes: int = Field(default=2, ge=2, description="Output classification targets.")
-    embedding_dim: int = Field(default=128, gt=0, description="Latent representation dimension.")
+    checkpoint_path: str = Field(
+        default="models/weights/AASIST-L.pth",
+        description="Path to AASIST-L model weights checkpoint.",
+    )
     device_preferred: str = Field(
         default="mps", description="Preferred acceleration device ('mps' or 'cpu')."
     )
     fallback_to_cpu: bool = Field(
-        default=True, description="Gracefully fall back to CPU if MPS unavailable."
+        default=True, description="Gracefully fall back to CPU if preferred device unavailable."
     )
 
+    @field_validator("checkpoint_path")
+    @classmethod
+    def validate_checkpoint_path(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("checkpoint_path cannot be empty.")
+        return v.strip()
 
-class TrainingConfig(BaseModel):
-    """Reproducible training and optimization hyperparameters."""
-
-    batch_size: int = Field(default=32, gt=0, description="Mini-batch size.")
-    learning_rate: float = Field(default=1e-4, gt=0, description="Initial learning rate.")
-    weight_decay: float = Field(default=1e-5, ge=0, description="L2 weight regularization.")
-    max_epochs: int = Field(default=50, gt=0, description="Maximum training epochs.")
-    early_stopping_patience: int = Field(
-        default=7, gt=0, description="Patience epochs before early stopping."
-    )
-    seed: int = Field(default=42, description="Global random seed.")
-    deterministic: bool = Field(
-        default=True, description="Enforce deterministic operations where supported."
-    )
-
-
-class CalibrationConfig(BaseModel):
-    """Score calibration parameters."""
-
-    method: str = Field(default="temperature_scaling", description="Calibration algorithm.")
-    temperature: float = Field(default=1.0, gt=0, description="Temperature scaling factor.")
-    threshold: float = Field(
-        default=0.65, ge=0.0, le=1.0, description="Decision threshold for warning."
-    )
+    @field_validator("device_preferred")
+    @classmethod
+    def validate_device_preferred(cls, v: str) -> str:
+        norm = v.strip().lower()
+        if norm not in ("mps", "cpu"):
+            raise ValueError(f"device_preferred must be 'mps' or 'cpu', got {v!r}.")
+        return norm
 
 
 class TemporalPolicyConfig(BaseModel):
-    """Multi-hop temporal reasoning and explanation generation rules."""
+    """Multi-hop temporal reasoning and decision policy parameters."""
 
-    consecutive_hops_required: int = Field(
-        default=2,
-        ge=1,
-        description="Number of consecutive high-anomaly hops required to trigger advisory alert.",
-    )
-    decay_factor: float = Field(
-        default=0.85, gt=0.0, le=1.0, description="Exponential decay factor."
-    )
-    alert_threshold: float = Field(
-        default=0.65, ge=0.0, le=1.0, description="Threshold for warning."
-    )
+    model_config = ConfigDict(extra="forbid")
+
     threshold_high: float = Field(
         default=0.65,
         ge=0.0,
@@ -188,28 +199,16 @@ class TemporalPolicyConfig(BaseModel):
         gt=0.0,
         description="Timestamp jump threshold in seconds to flag timing discontinuity.",
     )
-    explanation_rules: list[str] = Field(
-        default_factory=lambda: [
-            "REQUIRE_MINIMUM_SPEECH_DURATION",
-            "SUSTAINED_ANOMALY_CONFIRMATION",
-            "SNR_QUALITY_GATING",
-        ],
-        description="Active rule identifiers for temporal explanations.",
-    )
 
     @field_validator(
-        "alert_threshold",
         "threshold_high",
         "threshold_low",
         "ewma_alpha",
-        "decay_factor",
         "timing_gap_threshold_seconds",
     )
     @classmethod
-    def validate_finite_policy_floats(cls, v: float) -> float:
-        if not math.isfinite(v):
-            raise ValueError(f"Value must be a finite number, got {v}")
-        return v
+    def validate_finite_policy_floats(cls, v: float, info: Any) -> float:
+        return _check_finite(v, info.field_name)
 
     @model_validator(mode="after")
     def validate_policy_parameters(self) -> TemporalPolicyConfig:
@@ -228,29 +227,10 @@ class TemporalPolicyConfig(BaseModel):
         return self
 
 
-class APIConfig(BaseModel):
-    """FastAPI service endpoints and network parameters."""
-
-    host: str = Field(default="127.0.0.1", description="Service bind address.")
-    port: int = Field(default=8000, gt=0, le=65535, description="Service bind port.")
-    cors_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"],
-        description="Allowed CORS origin URLs.",
-    )
-
-
-class LoggingConfig(BaseModel):
-    """Logging verbosity and format configuration."""
-
-    level: str = Field(default="INFO", description="Log level.")
-    log_format: str = Field(
-        default="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        description="Standard logger format string.",
-    )
-
-
 class DCFConfig(BaseModel):
     """Detection Cost Function (DCF) parameters for minDCF calculation."""
+
+    model_config = ConfigDict(extra="forbid")
 
     c_miss: float = Field(default=1.0, gt=0, description="Cost of a false negative (missed spoof).")
     c_fa: float = Field(
@@ -260,9 +240,16 @@ class DCFConfig(BaseModel):
         default=0.05, gt=0.0, lt=1.0, description="Prior probability of target class (spoof)."
     )
 
+    @field_validator("c_miss", "c_fa", "p_target")
+    @classmethod
+    def validate_finite_dcf_floats(cls, v: float, info: Any) -> float:
+        return _check_finite(v, info.field_name)
+
 
 class EvaluationConfig(BaseModel):
     """Configuration parameters for evaluation and reporting toolkit."""
+
+    model_config = ConfigDict(extra="forbid")
 
     dcf: DCFConfig = Field(default_factory=DCFConfig)
     target_tpr_levels: list[float] = Field(
@@ -279,18 +266,30 @@ class EvaluationConfig(BaseModel):
         default=10, ge=2, description="Number of bins for Expected Calibration Error."
     )
 
+    @field_validator("bootstrap_ci_level")
+    @classmethod
+    def validate_finite_ci_level(cls, v: float, info: Any) -> float:
+        return _check_finite(v, info.field_name)
+
+    @field_validator("target_tpr_levels")
+    @classmethod
+    def validate_target_tpr_levels(cls, v: list[float]) -> list[float]:
+        for i, level in enumerate(v):
+            _check_finite(level, f"target_tpr_levels[{i}]")
+            if level <= 0.0 or level >= 1.0:
+                raise ValueError(f"target_tpr_levels elements must be in (0, 1), got {level}")
+        return v
+
 
 class VoiceShieldConfig(BaseModel):
     """Canonical root configuration for VoiceShield."""
 
+    model_config = ConfigDict(extra="forbid")
+
     audio: AudioConfig = Field(default_factory=AudioConfig)
     windowing: WindowingConfig = Field(default_factory=WindowingConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
-    training: TrainingConfig = Field(default_factory=TrainingConfig)
-    calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
     temporal_policy: TemporalPolicyConfig = Field(default_factory=TemporalPolicyConfig)
-    api: APIConfig = Field(default_factory=APIConfig)
-    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
 
     def compute_hash(self) -> str:

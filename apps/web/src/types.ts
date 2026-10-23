@@ -45,6 +45,7 @@ export interface ServerStartAck {
   max_stream_duration_seconds: number;
   idle_timeout_seconds: number;
   is_mock_detector?: boolean;
+  config_hash?: string;
 }
 
 export interface ServerQualityEvent {
@@ -163,6 +164,7 @@ export interface FileInferenceResult {
   is_synthetic_suspected: boolean;
   temporal_rule_explanation: string;
   is_mock_detector: boolean;
+  config_hash?: string;
   windows: FileWindowResult[];
   metadata: Record<string, unknown>;
   disclaimers: {
@@ -178,5 +180,6 @@ export interface SystemReadiness {
   status: 'ready' | 'not_ready' | 'checking' | 'error';
   is_mock_detector: boolean;
   device?: string;
+  config_hash?: string;
   reason?: string;
 }

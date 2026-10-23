@@ -84,28 +84,54 @@ VoiceShield automatically queries `torch.backends.mps.is_available()`. If suppor
 
 ---
 
-## 6. Configuration & Reproducibility Flow
+## 6. Configuration & Runtime Wiring (Audit H-09)
 
-VoiceShield enforces strict configuration validation and complete provenance tracking:
+VoiceShield enforces strict canonical configuration wiring and complete algorithmic provenance:
 
-### 6.1 Canonical Configuration
-The canonical settings reside in `configs/default.yaml` and are parsed into strictly typed Pydantic models:
+### 6.1 Canonical Algorithmic Configuration
+`configs/default.yaml` is the canonical algorithmic configuration governing model detector construction, real-time streaming sessions, and offline file evaluation:
+- **Architecture**: Strictly `aasist_l` (`clovaai/aasist` baseline). Other architectures are rejected.
 - **Audio contract**: Strictly 16,000 Hz, mono (1 channel), float32 normalized to $[-1.0, 1.0]$.
 - **Windowing**: 4.0-second window (64,000 samples) with 1.0-second streaming hop (16,000 samples).
 - **Speech gating**: $\ge 0.8\text{s}$ active speech duration required per window before inference.
+- **Temporal Policy**: High threshold ($0.65$), low threshold ($0.35$), EWMA smoothing ($\alpha = 0.3$), 3-of-5 elevation, 3-drop hysteresis cooldown, and 0.25s timing gap threshold.
+- **Scores remain uncalibrated**: Softmax probabilities are raw acoustic anomaly heuristics; score calibration is not implemented.
+- **Removed dead schemas**: Unused training and calibration configuration sections were removed from the schema because those implementations do not exist. Dead model fields (`num_classes`, `embedding_dim`) and dead temporal policy fields (`consecutive_hops_required`, `decay_factor`, `alert_threshold`, `explanation_rules`) were removed.
+- **Deployment settings outside hash**: Operational settings (such as bind host/port, CORS origins, and admission limits) do not alter inference output and are configured via environment variables outside the algorithmic configuration hash.
+
+### 6.2 Strict Schema Validation
+All configuration models enforce `extra="forbid"`. Any unknown root or nested key fails startup or CLI invocation with a clear `ConfigError` detailing the exact field path. Non-finite numeric values (`NaN`, `±Inf`) are strictly rejected.
 
 ```python
-from voiceshield.config import load_config
+from voiceshield.config import VoiceShieldConfig, load_config
 
-# Load validated configuration with human-readable error reporting
+# Load canonical configuration (fails fast on missing or invalid schema)
 config = load_config("configs/default.yaml")
 
-print(f"Sample Rate: {config.audio.sample_rate} Hz")
-print(f"Window Samples: {config.windowing.window_samples()} samples")
+print(f"Architecture: {config.model.architecture}")
 print(f"Config Hash: {config.compute_hash()}")
+
+# Parity guarantee: VoiceShieldConfig() and configs/default.yaml yield identical defaults and SHA-256 hash
+assert config.compute_hash() == VoiceShieldConfig().compute_hash()
 ```
 
-### 6.2 Deterministic Seeding
+### 6.3 Configuration Path Selection & Precedence
+VoiceShield establishes one validated effective configuration for each API process or CLI invocation.
+
+**Precedence Order**:
+1. **Canonical Default Config**: Loaded from repository/package `configs/default.yaml` when no path is specified.
+2. **Explicit Custom Config Path**:
+   - API: `VOICESHIELD_CONFIG_PATH=/path/to/custom.yaml`
+   - CLI: `--config /path/to/custom.yaml`
+3. **Explicit Operational Overrides**:
+   - Environment variables: `VOICESHIELD_CHECKPOINT_PATH`, `VOICESHIELD_DEVICE`.
+   - CLI flags: `--checkpoint`, `--device`, `--hop-seconds`, `--threshold`.
+   - REST API query parameters: `hop_seconds`, `threshold` (omission preserves server configuration).
+
+**Deterministic Hash Computation**:
+Whenever an explicit override is provided, VoiceShield validates and instantiates a new effective configuration, and computes the SHA-256 hash *after* the overrides are applied. The pre-override hash is never reported.
+
+### 6.4 Deterministic Seeding
 ```python
 from voiceshield.reproducibility import set_seed
 
@@ -113,7 +139,7 @@ from voiceshield.reproducibility import set_seed
 set_seed(42, deterministic=True)
 ```
 
-### 6.3 Provenance & Run Records
+### 6.5 Provenance & Run Records
 All experiments and evaluations automatically generate a structured JSON run record saved to `reports/runs/<run_id>.json`:
 ```python
 from voiceshield.reproducibility import create_run_record, save_run_record
@@ -127,7 +153,7 @@ save_run_record(record)
 ```
 The run record captures:
 - Exact Git commit and working-tree dirty status;
-- Deterministic SHA-256 config hash;
+- Deterministic SHA-256 effective config hash;
 - Dataset manifest hash and model weights checkpoint hash;
 - macOS kernel/platform, Python version, PyTorch version, and active acceleration device (`mps` / `cpu`).
 
@@ -138,8 +164,11 @@ The run record captures:
 VoiceShield includes an offline file evaluation CLI (`voiceshield-infer`) for single files or entire audio directories:
 
 ```bash
-# Evaluate a single file using mock model (or provide --checkpoint path/to/AASIST-L.pth)
-uv run voiceshield-infer --input sample.wav --mock-model --hop-seconds 1.0
+# Evaluate a single file using mock model (uses canonical config defaults when flags are omitted)
+uv run voiceshield-infer --input sample.wav --mock-model
+
+# Override decision threshold and hop size explicitly (updates effective hash)
+uv run voiceshield-infer --input sample.wav --mock-model --threshold 0.80 --hop-seconds 0.5
 
 # Batch evaluate a directory and export structured CSV/JSONL records
 uv run voiceshield-infer --input path/to/recordings/ --mock-model --output reports/eval.jsonl
@@ -148,6 +177,7 @@ uv run voiceshield-infer --input path/to/recordings/ --mock-model --output repor
 Key features:
 - **Canonical audio preprocessor**: Loads WAV and FLAC with sample rate normalization (16 kHz mono float32).
 - **Deterministic temporal windowing**: 4.0-second sliding windows with configurable hop step (default: 1.0s).
+- **Effective Configuration Provenance**: Outputs effective config hash in CLI summary and structured results (`config_hash` field).
 - **Graceful degradation**: Reports unsupported files cleanly and continues past individual corrupt files without crashing.
 - **Detailed provenance**: Captures per-window raw spoof/bonafide logits, uncalibrated synthetic acoustic anomaly scores (effective threshold and provenance source), active speech duration, quality diagnostics, model/checkpoint hashes, and compliance disclaimers.
 

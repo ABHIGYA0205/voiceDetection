@@ -23,6 +23,8 @@ from services.api.resource_admission import (
 from services.api.routes.analyze_file import router as analyze_router
 from services.api.routes.stream import router as stream_router
 from voiceshield import __version__
+from voiceshield.config.loader import load_config
+from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.core.device import resolve_device_status
 from voiceshield.core.schema import Disclaimers
 from voiceshield.models.aasist_adapter import (
@@ -63,7 +65,7 @@ def _parse_positive_int_env(key: str, default: int) -> int:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Preload model detector once at startup and initialize concurrency worker for Apple Silicon M3."""
+    """Load canonical configuration, initialize concurrency workers, and preload detector at startup."""
     max_concurrent_sessions = _parse_positive_int_env(
         "VOICESHIELD_MAX_CONCURRENT_SESSIONS", MAX_CONCURRENT_SESSIONS_DEFAULT
     )
@@ -83,10 +85,35 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.inference_worker = InferenceWorker()
     app.state.active_streaming_sessions = {}
 
-    checkpoint_env = os.getenv("VOICESHIELD_CHECKPOINT_PATH", "models/weights/AASIST-L.pth")
+    # 1. Load canonical or custom configuration path
+    config_path_target = getattr(app.state, "_initial_config_path", None) or os.getenv(
+        "VOICESHIELD_CONFIG_PATH"
+    )
+    base_config = load_config(config_path_target)
+
+    # 2. Reconcile explicit environment overrides
+    env_checkpoint = os.getenv("VOICESHIELD_CHECKPOINT_PATH")
+    env_device = os.getenv("VOICESHIELD_DEVICE")
+
+    config_dict = base_config.model_dump()
+    if env_checkpoint is not None and env_checkpoint.strip():
+        config_dict["model"]["checkpoint_path"] = env_checkpoint.strip()
+    if env_device is not None and env_device.strip():
+        config_dict["model"]["device_preferred"] = env_device.strip().lower()
+
+    effective_config = VoiceShieldConfig.model_validate(config_dict)
+    effective_config_hash = effective_config.compute_hash()
+
+    app.state.effective_config = effective_config
+    app.state.effective_config_hash = effective_config_hash
+
+    # 3. Detector initialization using effective configuration
+    checkpoint_path = Path(effective_config.model.checkpoint_path)
+    preferred_device = effective_config.model.device_preferred
+    fallback_to_cpu = effective_config.model.fallback_to_cpu
+    operating_threshold = effective_config.temporal_policy.threshold_high
+
     force_mock = os.getenv("VOICESHIELD_MOCK_MODEL", "false").lower() in ("true", "1", "yes")
-    preferred_device = os.getenv("VOICESHIELD_DEVICE")
-    checkpoint_path = Path(checkpoint_env)
 
     app.state.is_mock_detector = False
     app.state.model_load_error = None
@@ -101,6 +128,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.detector = AASISTLDetector(
             _instantiated_model=mock_raw,
             preferred_device=preferred_device,
+            fallback_to_cpu=fallback_to_cpu,
+            threshold=operating_threshold,
         )
         app.state.is_mock_detector = True
     else:
@@ -126,6 +155,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 app.state.detector = AASISTLDetector(
                     checkpoint_path=checkpoint_path,
                     preferred_device=preferred_device,
+                    fallback_to_cpu=fallback_to_cpu,
+                    threshold=operating_threshold,
                 )
                 app.state.is_mock_detector = False
             except CheckpointNotFoundError as exc:
@@ -206,86 +237,98 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.active_streaming_sessions.clear()
 
 
-app = FastAPI(
-    title="VoiceShield Advisory API",
-    version=__version__,
-    description=(
-        "Advisory synthetic speech detection service. "
-        "Outputs do NOT prove caller identity and do NOT constitute fraud probabilities."
-    ),
-    lifespan=lifespan,
-)
+def create_app(config_path: str | Path | None = None) -> FastAPI:
+    """Application factory for VoiceShield API with optional initial configuration path selector."""
+    application = FastAPI(
+        title="VoiceShield Advisory API",
+        version=__version__,
+        description=(
+            "Advisory synthetic speech detection service. "
+            "Outputs do NOT prove caller identity and do NOT constitute fraud probabilities."
+        ),
+        lifespan=lifespan,
+    )
 
-# CORS and Origin policy for local development and deployment
-allowed_origins_raw = os.getenv(
-    "VOICESHIELD_CORS_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173",
-).split(",")
-allowed_origins = [origin.strip() for origin in allowed_origins_raw if origin.strip()]
-app.state.allowed_origins = allowed_origins
+    if config_path is not None:
+        application.state._initial_config_path = config_path
 
-# Disable credentials if wildcard origin is used to prevent CORS specification violations and security risks
-allow_credentials = False if "*" in allowed_origins else True
+    # CORS and Origin policy for local development and deployment
+    allowed_origins_raw = os.getenv(
+        "VOICESHIELD_CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    allowed_origins = [origin.strip() for origin in allowed_origins_raw if origin.strip()]
+    application.state.allowed_origins = allowed_origins
 
-app.add_middleware(FileUploadAdmissionMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=allow_credentials,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    # Disable credentials if wildcard origin is used to prevent CORS specification violations and security risks
+    allow_credentials = False if "*" in allowed_origins else True
 
-app.include_router(analyze_router)
-app.include_router(stream_router)
+    application.add_middleware(FileUploadAdmissionMiddleware)
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=allow_credentials,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
+    application.include_router(analyze_router)
+    application.include_router(stream_router)
 
-@app.get("/health", tags=["System"])
-async def health_check() -> dict[str, Any]:
-    """Return system liveness status, device acceleration diagnostics, and advisory disclaimers."""
-    device_status = resolve_device_status()
-    disclaimers = Disclaimers()
+    @application.get("/health", tags=["System"])
+    async def health_check() -> dict[str, Any]:
+        """Return system liveness status, device acceleration diagnostics, and advisory disclaimers."""
+        device_status = resolve_device_status()
+        disclaimers = Disclaimers()
 
-    return {
-        "status": "ok",
-        "service": "VoiceShield",
-        "version": __version__,
-        "model_loaded": getattr(app.state, "detector", None) is not None,
-        "is_mock_detector": getattr(app.state, "is_mock_detector", False),
-        "device": {
-            "name": device_status.device_name,
-            "is_mps": device_status.is_mps,
-            "mps_available": device_status.mps_available,
-            "explanation": device_status.explanation,
-        },
-        "disclaimers": disclaimers.model_dump(),
-    }
-
-
-@app.get("/ready", tags=["System"])
-async def readiness_check(request: Request) -> dict[str, Any]:
-    """Return model readiness status distinguishing API liveness from detector readiness."""
-    detector = getattr(request.app.state, "detector", None)
-    if detector is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "status": "not_ready",
-                "service": "VoiceShield",
-                "reason": (
-                    getattr(request.app.state, "model_load_error", None)
-                    or "Detector model is not initialized or checkpoint is missing."
-                ),
-                "is_mock_detector": False,
+        return {
+            "status": "ok",
+            "service": "VoiceShield",
+            "version": __version__,
+            "model_loaded": getattr(application.state, "detector", None) is not None,
+            "is_mock_detector": getattr(application.state, "is_mock_detector", False),
+            "config_hash": getattr(application.state, "effective_config_hash", None),
+            "device": {
+                "name": device_status.device_name,
+                "is_mps": device_status.is_mps,
+                "mps_available": device_status.mps_available,
+                "explanation": device_status.explanation,
             },
-        )
+            "disclaimers": disclaimers.model_dump(),
+        }
 
-    device_status = resolve_device_status()
-    return {
-        "status": "ready",
-        "service": "VoiceShield",
-        "version": __version__,
-        "model_loaded": True,
-        "is_mock_detector": getattr(request.app.state, "is_mock_detector", False),
-        "device": device_status.device_name,
-    }
+    @application.get("/ready", tags=["System"])
+    async def readiness_check(request: Request) -> dict[str, Any]:
+        """Return model readiness status distinguishing API liveness from detector readiness."""
+        detector = getattr(request.app.state, "detector", None)
+        config_hash = getattr(request.app.state, "effective_config_hash", None)
+        if detector is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "status": "not_ready",
+                    "service": "VoiceShield",
+                    "reason": (
+                        getattr(request.app.state, "model_load_error", None)
+                        or "Detector model is not initialized or checkpoint is missing."
+                    ),
+                    "is_mock_detector": False,
+                    "config_hash": config_hash,
+                },
+            )
+
+        device_status = resolve_device_status()
+        return {
+            "status": "ready",
+            "service": "VoiceShield",
+            "version": __version__,
+            "model_loaded": True,
+            "is_mock_detector": getattr(request.app.state, "is_mock_detector", False),
+            "device": device_status.device_name,
+            "config_hash": config_hash,
+        }
+
+    return application
+
+
+app = create_app()

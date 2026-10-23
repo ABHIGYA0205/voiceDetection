@@ -7,26 +7,22 @@ from voiceshield.config.loader import (
     load_config,
 )
 from voiceshield.config.schema import (
-    APIConfig,
     AudioConfig,
-    CalibrationConfig,
-    LoggingConfig,
+    DCFConfig,
+    EvaluationConfig,
     ModelConfig,
     TemporalPolicyConfig,
-    TrainingConfig,
     VoiceShieldConfig,
     WindowingConfig,
 )
 
 __all__ = [
-    "APIConfig",
     "AudioConfig",
-    "CalibrationConfig",
     "ConfigError",
-    "LoggingConfig",
+    "DCFConfig",
+    "EvaluationConfig",
     "ModelConfig",
     "TemporalPolicyConfig",
-    "TrainingConfig",
     "VoiceShieldConfig",
     "WindowingConfig",
     "compute_config_hash",

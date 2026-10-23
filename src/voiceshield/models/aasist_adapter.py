@@ -98,6 +98,7 @@ class AASISTLDetector(BaseDetector):
         expected_sha256: str | None = None,
         model_config: dict[str, Any] | None = None,
         preferred_device: str | None = None,
+        fallback_to_cpu: bool = True,
         threshold: float = DEFAULT_THRESHOLD,
         _instantiated_model: UpstreamAASISTModel | None = None,
     ) -> None:
@@ -108,13 +109,15 @@ class AASISTLDetector(BaseDetector):
             expected_sha256: Optional expected SHA-256 checksum to verify.
             model_config: Architecture hyperparameters dictionary (defaults to official AASIST-L).
             preferred_device: 'mps', 'cpu', or None to read environment.
+            fallback_to_cpu: Whether to gracefully fall back to CPU if preferred device fails.
             threshold: Decision threshold for suspected synthetic classification.
             _instantiated_model: Internal parameter for unit-testing shape/control-flow with mocks.
         """
         self.threshold = threshold
+        self.fallback_to_cpu = fallback_to_cpu
         self.config = model_config or AASIST_L_DEFAULT_CONFIG
         self.target_length = int(self.config.get("nb_samp", 64600))
-        self.device = get_device(preferred=preferred_device, fallback_to_cpu=True)
+        self.device = get_device(preferred=preferred_device, fallback_to_cpu=self.fallback_to_cpu)
         self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else DEFAULT_CHECKPOINT_PATH
 
         self.is_mock = _instantiated_model is not None
@@ -155,6 +158,8 @@ class AASISTLDetector(BaseDetector):
         try:
             self.model.to(self.device)
         except Exception as exc:
+            if not self.fallback_to_cpu:
+                raise
             logger.warning(
                 "Failed to place AASIST-L on device %s: %s. Falling back to CPU.", self.device, exc
             )
@@ -209,7 +214,7 @@ class AASISTLDetector(BaseDetector):
                 # Official forward returns: (last_hidden, output_logits)
                 _, logits = self.model(tensor_in)
         except Exception as exc:
-            if self.device.type != "cpu":
+            if self.fallback_to_cpu and self.device.type != "cpu":
                 logger.warning(
                     "AASIST forward failed on %s (%s). Executing CPU fallback.",
                     self.device,

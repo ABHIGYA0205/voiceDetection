@@ -71,7 +71,7 @@ def test_deterministic_config_hashing() -> None:
     assert hash1 == hash2
 
     # Mutating a configuration field must alter the hash
-    cfg2.training.batch_size = 64
+    cfg2.temporal_policy.threshold_high = 0.85
     assert cfg2.compute_hash() != hash1
 
 
@@ -104,14 +104,14 @@ def test_missing_or_invalid_yaml_raises_config_error(tmp_path: Path) -> None:
 def test_dump_and_reload_roundtrip(tmp_path: Path) -> None:
     """Verify that dumping a config and reloading preserves values and hash."""
     orig = VoiceShieldConfig()
-    orig.model.embedding_dim = 256
-    orig.training.seed = 1337
+    orig.model.device_preferred = "cpu"
+    orig.temporal_policy.threshold_high = 0.8
 
     dump_path = tmp_path / "custom_config.yaml"
     dump_config(orig, dump_path)
 
     reloaded = load_config(dump_path)
-    assert reloaded.model.embedding_dim == 256
-    assert reloaded.training.seed == 1337
+    assert reloaded.model.device_preferred == "cpu"
+    assert reloaded.temporal_policy.threshold_high == 0.8
     assert reloaded.compute_hash() == orig.compute_hash()
     assert compute_config_hash(dump_path) == orig.compute_hash()
