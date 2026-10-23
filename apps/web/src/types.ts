@@ -56,6 +56,19 @@ export interface ServerQualityEvent {
   has_timing_gap: boolean;
   clipping_count: number;
   gap_count: number;
+  total_windows_generated?: number;
+  total_windows_evaluated?: number;
+  total_windows_dropped?: number;
+}
+
+export interface ServerContinuityResetEvent {
+  type: 'continuity_reset';
+  session_id: string;
+  reason: string;
+  timestamp_delta: number;
+  gap_count: number;
+  continuity_segment_id: number;
+  timestamp: number;
 }
 
 export interface ServerWindowResult {
@@ -91,6 +104,8 @@ export interface ServerStopAck {
   session_id: string;
   total_duration_seconds: number;
   total_windows_evaluated: number;
+  total_windows_generated?: number;
+  total_windows_dropped?: number;
 }
 
 export interface ServerErrorEvent {

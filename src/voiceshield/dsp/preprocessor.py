@@ -122,7 +122,7 @@ def load_audio(
                     f"Unsupported audio format: {fmt}. Only {SUPPORTED_FORMATS} are permitted."
                 )
 
-            if orig_sr <= 0 or orig_sr > 192000:
+            if orig_sr < 8000 or orig_sr > 192000:
                 raise UnsupportedAudioError(
                     f"Unsupported sampling rate: {orig_sr} Hz. Permitted range is 8,000 Hz to 192,000 Hz."
                 )

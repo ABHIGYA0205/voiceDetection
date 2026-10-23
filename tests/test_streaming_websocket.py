@@ -451,10 +451,20 @@ def test_websocket_backpressure_drop_replace() -> None:
             for _ in range(7):
                 ws.send_bytes(generate_pcm_sine(1.0, freq=350.0))
 
-            # Receive the first evaluated window result
-            res1 = ws.receive_json()
-            assert res1["type"] == "window_result"
-            assert res1["is_eligible"] is True
+            # Receive emitted events (quality_update events for drops, followed by window_result)
+            messages = []
+            while True:
+                msg = ws.receive_json()
+                messages.append(msg)
+                if msg["type"] == "window_result":
+                    break
+
+            quality_events = [m for m in messages if m["type"] == "quality_update"]
+            assert len(quality_events) >= 1
+            assert any(q.get("total_windows_dropped", 0) > 0 for q in quality_events)
+
+            win_res = [m for m in messages if m["type"] == "window_result"][0]
+            assert win_res["is_eligible"] is True
 
             # Verify that bounded queuing was maintained in the session
             # (at most 1 pending window)
@@ -463,3 +473,6 @@ def test_websocket_backpressure_drop_replace() -> None:
             )
 
             ws.send_json({"type": "stop"})
+            stop_ack = ws.receive_json()
+            assert stop_ack["type"] == "session_stopped"
+            assert stop_ack["total_windows_dropped"] > 0

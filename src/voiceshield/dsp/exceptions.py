@@ -21,3 +21,7 @@ class InvalidAudioValueError(AudioPreprocessingError):
 
 class UnsupportedAudioError(AudioPreprocessingError):
     """Raised when an audio format, channel configuration, or sample rate is not supported."""
+
+
+class AudioDecodingError(AudioPreprocessingError):
+    """Raised when raw PCM audio bytes cannot be decoded, aligned, or framed."""

@@ -12,8 +12,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
 from voiceshield.core.schema import Disclaimers
-from voiceshield.dsp.exceptions import InvalidAudioValueError, UnsupportedAudioError
+from voiceshield.dsp.exceptions import AudioPreprocessingError
 from voiceshield.models.base import BaseDetector
+from voiceshield.streaming.policy import ReasonCode
 from voiceshield.streaming.session import StreamingSession, WindowForInference
 
 logger = logging.getLogger("voiceshield.api.stream")
@@ -81,6 +82,21 @@ class ServerQualityEvent(BaseModel):
     has_timing_gap: bool
     clipping_count: int
     gap_count: int
+    total_windows_generated: int = 0
+    total_windows_evaluated: int = 0
+    total_windows_dropped: int = 0
+
+
+class ServerContinuityResetEvent(BaseModel):
+    """Event emitted on timing discontinuity when continuity segment is reset."""
+
+    type: str = "continuity_reset"
+    session_id: str
+    reason: str = ReasonCode.INSUFFICIENT_CONTIGUOUS_AUDIO.value
+    timestamp_delta: float
+    gap_count: int
+    continuity_segment_id: int
+    timestamp: float
 
 
 class ServerWindowResult(BaseModel):
@@ -110,6 +126,8 @@ class ServerStopAck(BaseModel):
     session_id: str
     total_duration_seconds: float
     total_windows_evaluated: int
+    total_windows_generated: int = 0
+    total_windows_dropped: int = 0
 
 
 class ServerErrorEvent(BaseModel):
@@ -382,6 +400,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
         sample_rate = start_msg.sample_rate
         channels = start_msg.channels
         total_windows_evaluated = 0
+        audio_timeline_seconds = 0.0
 
         async def _dispatch_inference(win: WindowForInference) -> None:
             nonlocal total_windows_evaluated
@@ -406,6 +425,15 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     calibrated_score=None,
                     score_is_calibrated=False,
                 )
+                if decision is None:
+                    logger.info(
+                        "Suppressed stale pre-gap inference result for session %s (win segment %d != session segment %d)",
+                        session_id,
+                        win.continuity_segment_id,
+                        session.continuity_segment_id,
+                    )
+                    return
+
                 total_windows_evaluated += 1
 
                 result_event = ServerWindowResult(
@@ -442,7 +470,11 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
 
             finally:
                 # If a fresher pending window was queued while inference was running, pop and process it
-                if session is not None and session.has_pending_window:
+                if (
+                    session is not None
+                    and session.has_pending_window
+                    and not session.in_flight_inference
+                ):
                     next_win = session.pop_pending_window()
                     if next_win is not None:
                         task = asyncio.create_task(_dispatch_inference(next_win))
@@ -494,11 +526,14 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                 if cmd_data.get("type") == "stop":
                     logger.info("Session %s received stop command from client.", session_id)
                     elapsed = asyncio.get_event_loop().time() - stream_start_time
+                    assert session is not None
                     await websocket.send_json(
                         ServerStopAck(
                             session_id=session_id,
                             total_duration_seconds=float(elapsed),
                             total_windows_evaluated=total_windows_evaluated,
+                            total_windows_generated=session.total_windows_generated,
+                            total_windows_dropped=session.total_windows_dropped,
                         ).model_dump()
                     )
                     await websocket.close(
@@ -563,15 +598,23 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     break
 
                 # 3. Synchronous, fast DSP ingestion into ring buffer
+                gap_thresh = (
+                    session.config.temporal_policy.timing_gap_threshold_seconds if session else 0.25
+                )
+                if elapsed_stream > audio_timeline_seconds + gap_thresh:
+                    frame_timestamp = elapsed_stream
+                else:
+                    frame_timestamp = audio_timeline_seconds
+
                 try:
                     ingest_res = session.ingest_pcm(
                         pcm_data=pcm_bytes,
                         sample_rate=sample_rate,
                         channels=channels,
-                        timestamp=elapsed_stream,
+                        timestamp=frame_timestamp,
                         dtype=pcm_enc,
                     )
-                except (InvalidAudioValueError, UnsupportedAudioError) as exc:
+                except AudioPreprocessingError as exc:
                     logger.warning("Session %s corrupt audio frame: %s", session_id, exc)
                     await websocket.send_json(
                         ServerErrorEvent(
@@ -581,11 +624,27 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     )
                     continue
 
-                # 4. Emit quality updates if clipping or timing gap detected
+                frame_duration = ingest_res.samples_ingested / sample_rate
+                audio_timeline_seconds = frame_timestamp + frame_duration
+
+                # 4. Emit continuity reset event if discontinuity occurred
+                if ingest_res.continuity_reset:
+                    reset_event = ServerContinuityResetEvent(
+                        session_id=session_id,
+                        reason=ReasonCode.INSUFFICIENT_CONTIGUOUS_AUDIO.value,
+                        timestamp_delta=ingest_res.timestamp_delta,
+                        gap_count=ingest_res.quality_flags.gap_count,
+                        continuity_segment_id=ingest_res.continuity_segment_id,
+                        timestamp=elapsed_stream,
+                    )
+                    await websocket.send_json(reset_event.model_dump())
+
+                # 5. Emit quality/backpressure updates if clipping, timing gap, silence, or drops detected
                 if (
                     ingest_res.quality_flags.is_clipped
                     or ingest_res.quality_flags.has_timing_gap
                     or ingest_res.quality_flags.is_silent
+                    or ingest_res.windows_dropped_this_ingest > 0
                 ):
                     quality_event = ServerQualityEvent(
                         session_id=session_id,
@@ -595,13 +654,15 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                         has_timing_gap=ingest_res.quality_flags.has_timing_gap,
                         clipping_count=ingest_res.quality_flags.clipping_count,
                         gap_count=ingest_res.quality_flags.gap_count,
+                        total_windows_generated=session.total_windows_generated,
+                        total_windows_evaluated=total_windows_evaluated,
+                        total_windows_dropped=session.total_windows_dropped,
                     )
                     await websocket.send_json(quality_event.model_dump())
 
-                # 5. Handle immediate abstention decision (insufficient speech)
-                if ingest_res.immediate_decision is not None:
+                # 6. Handle immediate abstention decisions (insufficient speech)
+                for imm in ingest_res.immediate_decisions:
                     total_windows_evaluated += 1
-                    imm = ingest_res.immediate_decision
                     abstained_event = ServerWindowResult(
                         session_id=session_id,
                         window_index=imm.window_index,
@@ -620,7 +681,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     )
                     await websocket.send_json(abstained_event.model_dump())
 
-                # 6. Dispatch eligible window for inference if worker is idle
+                # 7. Dispatch eligible window for inference if worker is idle
                 if session.has_pending_window and not session.in_flight_inference:
                     win = session.pop_pending_window()
                     if win is not None:

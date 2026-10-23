@@ -1,18 +1,19 @@
 # VoiceShield Audio Processing Contract & Specification
 
 ## 1. Overview & Strict Contract Invariants
-Every audio input ingested by VoiceShield—whether from a controlled microphone stream, an uploaded file (WAV/FLAC), a WebRTC packet buffer, or a SIP/VoIP RTP stream—is transformed into an identical, deterministic mathematical representation:
+Every audio input ingested by VoiceShield—whether from an offline audio file (WAV/FLAC) or an online real-time PCM streaming session—is validated and transformed into an identical, deterministic mathematical representation:
 
-- **Sampling Rate ($F_s$)**: Exactly $16,000\text{ Hz}$ (16 kHz).
-- **Channels ($C$)**: Exactly 1 (single-channel mono).
+- **Source Sampling Rate**: Strictly between $8,000\text{ Hz}$ and $192,000\text{ Hz}$ inclusive ($8,000 \le F_s^{\text{orig}} \le 192,000$). Rates below 8,000 Hz or above 192,000 Hz are rejected.
+- **Canonical Model Sampling Rate ($F_s$)**: Exactly $16,000\text{ Hz}$ (16 kHz).
+- **Channels ($C$)**: Exactly 1 (single-channel mono). Multi-channel streams ($C \in \{1, 2\}$ for streaming; $1 \le C \le 8$ for offline files) are averaged across channels to mono.
 - **Data Type**: 32-bit floating point (`numpy.float32`).
-- **Amplitude Range**: Strictly bounded to $[-1.0, 1.0]$.
+- **Amplitude Range**: Strictly bounded to $[-1.0, 1.0]$. Non-finite samples (`NaN`, `±Inf`) or samples exceeding range are rejected.
 - **Window Length ($L_w$)**: Exactly $64,000\text{ samples}$ ($4.0\text{ seconds}$).
 - **Streaming Hop ($L_h$)**: Exactly $16,000\text{ samples}$ ($1.0\text{ second}$).
 
 ---
 
-## 2. Step-by-Step Processing Pipeline Order
+## 2. Step-by-Step Offline Processing Pipeline Order
 
 ```mermaid
 flowchart TD
@@ -31,6 +32,7 @@ flowchart TD
 ### Step 1: Container & Header Validation
 - Accepts `WAV` (RIFF/WAVE) and `FLAC` (Free Lossless Audio Codec) streams.
 - Rejects unsupported compressed audio containers (e.g. raw MP3, AAC) without transparent decoding.
+- Enforces source sample-rate boundaries ($8,000 \le F_s^{\text{orig}} \le 192,000\text{ Hz}$).
 - Enforces channel boundaries ($1 \le C \le 8$).
 
 ### Step 2: Raw Sample Decoding
@@ -74,7 +76,31 @@ The detector requires exactly $64,000\text{ samples}$ ($4.0\text{s}$ at 16 kHz):
 
 ---
 
-## 3. Explicit Prohibitions in Preprocessing
+## 3. Streaming PCM Invariants & Window Scheduling
+
+For online streaming audio sessions (`StreamingSession` and `/api/v1/stream`):
+
+1. **Little-Endian PCM Encoding**:
+   - `int16`: 16-bit signed integer little-endian (`<i2`), normalized by $32,768.0$.
+   - `int32`: 32-bit signed integer little-endian (`<i4`), normalized by $2,147,483,648.0$.
+   - `float32`: 32-bit IEEE float little-endian (`<f4`).
+2. **Byte Alignment**: Every buffer must be an exact multiple of the frame width (`bytes_per_sample * channels`). Misaligned buffers are rejected with `AUDIO_DECODE_ERROR`.
+3. **Format Immutability**: The declared sample rate, channels, and PCM encoding are immutable once streaming begins. Mid-stream changes trigger immediate rejection.
+4. **Sample-Accurate Window Scheduling**: Windows are scheduled strictly along the canonical 16 kHz sample grid:
+   - Window 0 ends at sample 64,000 (4.0s).
+   - Window 1 ends at sample 80,000 (5.0s).
+   - Window $k$ ends at sample $64,000 + k \times 16,000$ ($4.0 + k \times 1.0\text{s}$).
+   Large frames that span multiple logical boundaries emit all due windows in chronological sequence.
+5. **Continuity Segment Model**:
+   - Discontinuities (timing jumps $> 0.25\text{s}$, materially overlapping frames, out-of-order timestamps, or non-finite timestamps) trigger a full continuity reset.
+   - Ring buffer, resampler state, window scheduler, VAD, and temporal history are reset.
+   - Audio from before and after the discontinuity is never concatenated.
+   - Exactly 4.0 contiguous post-gap seconds are required before inference resumes.
+   - Stale in-flight inferences from previous continuity segments are suppressed upon completion.
+
+---
+
+## 4. Explicit Prohibitions in Preprocessing
 
 1. **No Speculative Denoising**: Spectral subtraction, Wiener filtering, and neural denoisers alter spectral phase and remove high-frequency synthetic speech artifacts. Denoising is strictly barred from the core detection path.
 2. **No Implicit Silence Trimming**: Silence regions must remain intact so temporal window timestamps correspond exactly to wall-clock recording offsets.

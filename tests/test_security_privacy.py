@@ -138,17 +138,24 @@ def test_decompression_bomb_duration_ceiling_precheck() -> None:
 
 
 def test_unsupported_sample_rate_bounds_rejected() -> None:
-    """Verify load_audio rejects abnormal sampling rates that could cause memory blowup."""
-    # Try creating WAV buffer with out-of-range sample rate (e.g. 1,000,000 Hz)
+    """Verify load_audio rejects out-of-range sample rates (below 8 kHz or above 192 kHz)."""
     sig = np.zeros(100, dtype=np.float32)
-    buf = io.BytesIO()
-    # Libsndfile supports rates up to 192000 normally. Test with 4000 Hz (below standard speech bounds)
-    sf.write(buf, sig, 16000, format="WAV", subtype="PCM_16")
-    wav_bytes = buf.getvalue()
 
-    # Loading clean audio succeeds
-    out = load_audio(wav_bytes)
-    assert out.metadata.original_sample_rate == 16000
+    # Rejection of out-of-bounds rates
+    for bad_sr in (4000, 7999, 192001):
+        buf = io.BytesIO()
+        sf.write(buf, sig, bad_sr, format="WAV", subtype="PCM_16")
+        with pytest.raises(UnsupportedAudioError) as exc_info:
+            load_audio(buf.getvalue())
+        assert f"Unsupported sampling rate: {bad_sr} Hz" in str(exc_info.value)
+        assert "Permitted range is 8,000 Hz to 192,000 Hz." in str(exc_info.value)
+
+    # Acceptance of boundary valid rates
+    for valid_sr in (8000, 16000, 44100, 48000, 192000):
+        buf = io.BytesIO()
+        sf.write(buf, sig, valid_sr, format="WAV", subtype="PCM_16")
+        out = load_audio(buf.getvalue())
+        assert out.metadata.original_sample_rate == valid_sr
 
 
 # ==============================================================================

@@ -8,6 +8,7 @@ The VoiceShield streaming protocol provides real-time, low-latency synthetic spe
 - **Advisory Likelihood Only**: Outputs reflect synthetic acoustic indicators. They do **not** verify speaker identity and do **not** compute fraud probability.
 - **Local Audio Only**: Designed for microphone or local audio feeds; does not intercept remote carrier cellular telephony.
 - **No Raw Audio Retention**: Audio is resampled and buffered strictly in volatile memory. No audio frames are written to disk.
+- **Engineering Status**: This implementation provides bounded-backpressure streaming and continuity tracking. It does not claim offline/streaming resampler flush parity, zero dropped windows under sustained overload, complete inference thread cancellation safety, or production readiness.
 
 ---
 
@@ -32,6 +33,8 @@ The VoiceShield streaming protocol provides real-time, low-latency synthetic spe
            |--- Eligible Window -----------------> [ Asynchronous Model Inference ]
            |                                                |
            |<-- 'window_result' Event ----------------------+
+           |<-- 'quality_update' Event (anomalies / drops) -+
+           |<-- 'continuity_reset' Event (timing gaps) -----+
            |
            |--- 'stop' JSON ---------------------> [ 'session_stopped' ACK ] ---> [ Normal Close 1000 ]
            |--- Disconnect ----------------------> [ Resource Cleanup ] ---------> [ Terminated ]
@@ -73,9 +76,9 @@ Immediately upon establishing the WebSocket connection, the client must transmit
 |---|---|---|---|
 | `type` | string | Yes | Must be `"start"`. |
 | `protocol_version` | string | Yes | Supported version: `"1.0"`. |
-| `sample_rate` | integer | Yes | Declared source sample rate in Hz ($8,000$ to $192,000$). |
+| `sample_rate` | integer | Yes | Declared source sample rate in Hz ($8,000$ to $192,000$ inclusive). |
 | `channels` | integer | Yes | Number of channels ($1$ for mono, $2$ for stereo). Stereo is averaged to mono. |
-| `pcm_encoding` | string | Yes | Supported formats: `"int16"`, `"int32"`, or `"float32"`. |
+| `pcm_encoding` | string | Yes | Supported formats: `"int16"`, `"int32"`, or `"float32"`. Explicit little-endian byte ordering is required. |
 | `metadata` | object | No | Optional key-value pairs (e.g. `idle_timeout_seconds`, `max_frame_bytes`). |
 
 ---
@@ -108,16 +111,67 @@ Upon successful validation, the server generates a unique UUID session ID, initi
 ### 4.3 Client Binary Audio Frames
 After receiving `session_started`, the client streams raw binary audio frames matching the declared `pcm_encoding`, `channels`, and `sample_rate`.
 
-#### Operational Invariants
-- **Chunk-Boundary Invariance**: Audio is statefully resampled to canonical 16 kHz mono. Filter state is preserved across chunks, producing seam-free waveforms.
+#### Audio Ingestion Invariants
+- **Little-Endian PCM Requirement**: All multi-byte PCM samples must be explicitly little-endian encoded (`<i2`, `<i4`, `<f4`).
+- **Complete Frame-Width Alignment**: Binary frame byte length must be an exact integer multiple of the complete interleaved frame width (`bytes_per_sample * channels`). Odd-length int16 buffers and misaligned multi-channel buffers are strictly rejected with `AUDIO_DECODE_ERROR`.
+- **Sample Range & Finiteness**: Decoded float samples must be finite (`NaN` and `±Inf` rejected) and bounded within $[-1.0, 1.0]$.
+- **Format Immutability**: Once accepted, declared `sample_rate`, `channels`, and `pcm_encoding` are immutable for the duration of the session until a clean reset. Mid-stream format changes are rejected.
 - **Maximum Frame Size**: Default 128 KB (131,072 bytes). Frames exceeding this limit trigger a `PAYLOAD_TOO_LARGE` error and close code `1009`.
 - **Idle Timeout**: If no frames or text messages are received within `idle_timeout_seconds` (default 30.0s), the server sends an `IDLE_TIMEOUT` error and closes cleanly.
 - **Stream Duration**: Maximum 3600.0s (1 hour) continuous stream duration before graceful termination.
 
 ---
 
-### 4.4 Server Quality Event (`quality_update`)
-Emitted when signal quality anomalies are detected on incoming frames:
+### 4.4 Window Scheduling & Backpressure Guarantees
+
+Logical window scheduling and inference backpressure are decoupled:
+
+1. **Exact Canonical Hop Grid**:
+   Logical windows are scheduled strictly along the canonical 16 kHz sample grid:
+   - Window 0 ends at exactly 64,000 canonical samples (4.0s).
+   - Window 1 ends at 80,000 canonical samples (5.0s).
+   - Window $k$ ends at $64,000 + k \times 16,000$ canonical samples ($4.0 + k \times 1.0\text{s}$).
+   Every due logical boundary is detected and assigned continuous, unique global window indices with zero cumulative timestamp drift, regardless of whether incoming audio arrives in small chunks (e.g. 20ms) or large multi-second frames.
+
+2. **Bounded Backpressure Queue**:
+   To prevent unbounded latency and memory growth:
+   - At most one inference task is in flight per session.
+   - At most one eligible window is held pending.
+   - If a new eligible window arrives while an inference is already in flight and a pending window exists, the fresher window replaces the stale pending window.
+   - Every replaced window increments an explicit `total_windows_dropped` counter. Drops are never silent.
+   - Abstained windows (insufficient speech) do not require model inference and are emitted immediately without backpressure drops.
+
+3. **Backpressure Updates**:
+   Whenever one or more eligible windows are dropped/replaced due to backpressure overload, the server emits a `quality_update` event with current window accounting metrics.
+
+---
+
+### 4.5 Continuity Segment Model & Discontinuity Resets
+
+Timing anomalies—positive gaps exceeding the configured threshold ($> 0.25\text{s}$), materially overlapping timestamps, out-of-order timestamps, or non-finite timestamps—trigger an explicit continuity segment reset:
+
+1. **No Concatenation Across Discontinuities**: Audio from before and after a timing discontinuity is never concatenated into the same inference window.
+2. **Buffer & Resampler Reset**: The ring buffer, streaming resampler filter history, window scheduler, VAD, and temporal policy history are reset.
+3. **Contiguity Requirement**: Exactly 4.0 contiguous seconds of post-discontinuity audio are required before model inference can resume.
+4. **Stale Pre-Gap Result Suppression**: Any in-flight inference started before the discontinuity is suppressed upon completion: its score is discarded, it is not applied to the reset temporal policy, and no `window_result` event is emitted. The freshest post-gap pending window is then allowed to proceed.
+5. **Continuity Reset Event**: A machine-readable event with reason `insufficient_contiguous_audio` is emitted to the client.
+
+```json
+{
+  "type": "continuity_reset",
+  "session_id": "6a9e8b12-9c3f-4e0a-b348-4e892cfa7123",
+  "reason": "insufficient_contiguous_audio",
+  "timestamp_delta": 2.50,
+  "gap_count": 1,
+  "continuity_segment_id": 1,
+  "timestamp": 14.50
+}
+```
+
+---
+
+### 4.6 Server Quality Event (`quality_update`)
+Emitted when signal quality anomalies or backpressure window drops occur:
 
 ```json
 {
@@ -128,13 +182,16 @@ Emitted when signal quality anomalies are detected on incoming frames:
   "is_silent": false,
   "has_timing_gap": false,
   "clipping_count": 3,
-  "gap_count": 0
+  "gap_count": 0,
+  "total_windows_generated": 10,
+  "total_windows_evaluated": 7,
+  "total_windows_dropped": 2
 }
 ```
 
 ---
 
-### 4.5 Server Window Result Event (`window_result`)
+### 4.7 Server Window Result Event (`window_result`)
 Emitted every 1.0-second hop once a 4.0-second window is evaluated:
 
 #### Eligible Window (Active Speech $\ge 0.8$s)
@@ -202,7 +259,7 @@ Emitted every 1.0-second hop once a 4.0-second window is evaluated:
 
 ---
 
-### 4.6 Client Graceful Termination (`stop`)
+### 4.8 Client Graceful Termination (`stop`)
 The client can terminate the stream gracefully at any time by sending:
 
 ```json
@@ -211,27 +268,29 @@ The client can terminate the stream gracefully at any time by sending:
 }
 ```
 
-Server replies with confirmation and closes the connection with code `1000 (Normal Closure)`:
+Server replies with confirmation reporting cumulative generated, evaluated, and dropped counts, then closes the connection with code `1000 (Normal Closure)`:
 
 ```json
 {
   "type": "session_stopped",
   "session_id": "6a9e8b12-9c3f-4e0a-b348-4e892cfa7123",
   "total_duration_seconds": 24.5,
-  "total_windows_evaluated": 21
+  "total_windows_evaluated": 18,
+  "total_windows_generated": 21,
+  "total_windows_dropped": 3
 }
 ```
 
 ---
 
-### 4.7 Server Error Event (`error`)
-Emitted prior to closing the connection when protocol or operational constraints are violated:
+### 4.9 Server Error Event (`error`)
+Emitted prior to closing the connection or when a non-fatal corrupt frame is handled:
 
 ```json
 {
   "type": "error",
-  "error_code": "PAYLOAD_TOO_LARGE",
-  "message": "Audio frame size (150000 bytes) exceeds maximum permitted limit (131072 bytes).",
+  "error_code": "AUDIO_DECODE_ERROR",
+  "message": "Odd-length int16 buffer rejected: 3 bytes.",
   "details": {}
 }
 ```
@@ -243,6 +302,7 @@ Emitted prior to closing the connection when protocol or operational constraints
 - `INVALID_STREAM_CONFIG`: Field validation failed on start message.
 - `UNSUPPORTED_PROTOCOL_VERSION`: Version other than `"1.0"`.
 - `UNSUPPORTED_PCM_ENCODING`: Format other than `"int16"`, `"int32"`, `"float32"`.
+- `AUDIO_DECODE_ERROR`: PCM frame decoding, byte alignment, or sample range validation failure. The session continues accepting subsequent valid frames.
 - `PAYLOAD_TOO_LARGE`: Frame bytes exceeded `max_frame_bytes`.
 - `STREAM_DURATION_EXCEEDED`: Stream exceeded `max_stream_duration_seconds`.
 - `IDLE_TIMEOUT`: Inactivity exceeded `idle_timeout_seconds`.
@@ -261,12 +321,3 @@ The API distinguishes process liveness from neural model readiness:
 ### 2. Readiness Probe (`GET /ready`)
 - Returns `200 OK` if the deepfake detector model is initialized and ready to serve inference.
 - Returns `503 Service Unavailable` if model weights failed to load or are not initialized.
-
----
-
-## 6. Backpressure & Concurrency Guarantees
-
-1. **Non-blocking Event Loop**: Ingestion executes only synchronous DSP and ring-buffering. Model forward passes are dispatched via `asyncio.to_thread` with an `asyncio.Semaphore(1)` hardware lock.
-2. **At Most One In-Flight Inference**: At most one inference task runs per session at any time.
-3. **Drop / Replace Stale Pending Windows**: If an eligible window is generated while inference is already running, the session replaces any pending window with the newest one, preventing unbounded memory queues.
-4. **Session Cleanup**: On disconnect, `StreamingSession.reset()` wipes all ring buffers, pointers, resamplers, and temporal histories.

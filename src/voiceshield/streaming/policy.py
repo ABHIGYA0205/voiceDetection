@@ -31,6 +31,7 @@ class ReasonCode(StrEnum):
     NORMAL_ACOUSTICS = "normal_acoustics"
     SIGNAL_QUALITY_DEGRADED = "signal_quality_degraded"
     INITIALIZING = "initializing"
+    INSUFFICIENT_CONTIGUOUS_AUDIO = "insufficient_contiguous_audio"
 
 
 class TemporalDecision(BaseModel):
