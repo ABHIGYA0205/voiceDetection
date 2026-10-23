@@ -14,9 +14,11 @@ import torch
 
 from voiceshield.dsp.exceptions import InvalidAudioValueError, UnsupportedAudioError
 
-KAISER_BETA_DEFAULT: float = 5.0
 MIN_SUPPORTED_SAMPLE_RATE: int = 8000
 MAX_SUPPORTED_SAMPLE_RATE: int = 192000
+CANONICAL_LOWPASS_FILTER_WIDTH: int = 6
+CANONICAL_ROLLOFF: float = 0.99
+CANONICAL_RESAMPLING_METHOD: str = "sinc_interp_hann"
 
 
 def _get_sinc_kernel(orig_sr: int, target_sr: int, gcd: int) -> tuple[torch.Tensor, int]:
@@ -32,7 +34,15 @@ def _get_sinc_kernel(orig_sr: int, target_sr: int, gcd: int) -> tuple[torch.Tens
             raise AttributeError(
                 "_get_sinc_resample_kernel is missing from torchaudio.functional.functional"
             )
-        kernel, width = F_func._get_sinc_resample_kernel(orig_sr, target_sr, gcd)
+        kernel, width = F_func._get_sinc_resample_kernel(
+            orig_freq=orig_sr,
+            new_freq=target_sr,
+            gcd=gcd,
+            lowpass_filter_width=CANONICAL_LOWPASS_FILTER_WIDTH,
+            rolloff=CANONICAL_ROLLOFF,
+            resampling_method=CANONICAL_RESAMPLING_METHOD,
+            beta=None,
+        )
         return kernel, width
     except Exception as exc:
         raise UnsupportedAudioError(
@@ -233,7 +243,6 @@ def resample_audio(
     audio: np.ndarray[Any, np.dtype[np.float32]],
     orig_sr: int,
     target_sr: int = 16000,
-    kaiser_beta: float = KAISER_BETA_DEFAULT,
 ) -> np.ndarray[Any, np.dtype[np.float32]]:
     """Resample 1D mono audio to target_sr using the canonical stateful sinc resampler.
 
@@ -243,7 +252,6 @@ def resample_audio(
         audio: 1D float32 mono audio array.
         orig_sr: Source sampling rate in Hz.
         target_sr: Target sampling rate in Hz (default: 16,000 Hz).
-        kaiser_beta: Unused parameter retained for backwards signature compatibility.
 
     Returns:
         1D float32 audio array resampled to target_sr.

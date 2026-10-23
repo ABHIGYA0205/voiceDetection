@@ -473,6 +473,11 @@ def test_websocket_backpressure_drop_replace() -> None:
             )
 
             ws.send_json({"type": "stop"})
-            stop_ack = ws.receive_json()
-            assert stop_ack["type"] == "session_stopped"
+            stop_ack = None
+            while True:
+                msg = ws.receive_json()
+                if msg["type"] == "session_stopped":
+                    stop_ack = msg
+                    break
+            assert stop_ack is not None
             assert stop_ack["total_windows_dropped"] > 0

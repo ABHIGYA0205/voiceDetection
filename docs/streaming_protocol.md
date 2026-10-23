@@ -219,12 +219,12 @@ Emitted every 1.0-second hop once a 4.0-second window is evaluated:
     "calibrated_score": null,
     "smoothed_score": 0.80,
     "reason": "sustained_anomaly_elevation",
-    "reason_details": "Elevated to HIGH: 2 of last 3 windows exceeded high threshold (0.65).",
+    "reason_details": "Elevated to HIGH: 3 of last 5 windows exceeded high threshold (0.65).",
     "window_index": 4,
     "window_start_sec": 4.0,
     "window_end_sec": 8.0,
     "speech_seconds": 3.82,
-    "history_scores": [0.42, 0.78, 0.80]
+    "history_scores": [0.42, 0.78, 0.80, 0.79, 0.82]
   }
 }
 ```

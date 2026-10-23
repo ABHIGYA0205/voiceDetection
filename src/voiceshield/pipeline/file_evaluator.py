@@ -322,39 +322,51 @@ def evaluate_audio(
             disclaimers=Disclaimers(),
         )
 
-    # 2. Shared EnergyVAD setup
-    vad_energy_thresh = config.windowing.energy_threshold if config is not None else 0.015
-    vad_subframe_sec = (
-        getattr(config.windowing, "subframe_duration_seconds", 0.02) if config is not None else 0.02
-    )
+    # 2. Build validated effective WindowingConfig for the request
+    if config is not None:
+        effective_window_cfg = config.windowing.model_copy()
+    else:
+        effective_window_cfg = WindowingConfig()
+
+    effective_window_cfg.window_seconds = float(window_seconds)
+    effective_window_cfg.hop_seconds = float(hop_seconds)
+    if min_speech_seconds is not None:
+        effective_window_cfg.min_speech_seconds = float(min_speech_seconds)
+    effective_window_cfg = WindowingConfig.model_validate(effective_window_cfg)
+
+    effective_min_speech = effective_window_cfg.min_speech_seconds
+    vad_energy_thresh = effective_window_cfg.energy_threshold
+    vad_subframe_sec = getattr(effective_window_cfg, "subframe_duration_seconds", 0.02)
     vad = EnergyVAD(
         energy_threshold=vad_energy_thresh,
         subframe_duration_seconds=vad_subframe_sec,
     )
-
-    effective_min_speech = (
-        min_speech_seconds
-        if min_speech_seconds is not None
-        else (config.windowing.min_speech_seconds if config is not None else 0.8)
-    )
     # File-level total active speech calculated over the full canonical waveform for reporting
     total_active_speech = round(vad.compute_speech_duration(waveform, 16000), 2)
 
-    # 3. Request-level TemporalPolicyConfig effective copy
-    effective_policy_cfg = config.temporal_policy.model_copy() if config else TemporalPolicyConfig()
-    effective_policy_cfg.threshold_high = float(threshold)
-    if effective_policy_cfg.threshold_low > effective_policy_cfg.threshold_high:
-        effective_policy_cfg.threshold_low = effective_policy_cfg.threshold_high
+    # 3. Build validated effective TemporalPolicyConfig for the request
+    if config is not None:
+        effective_policy_cfg = config.temporal_policy.model_copy()
+    else:
+        effective_policy_cfg = TemporalPolicyConfig()
 
-    effective_window_cfg = config.windowing if config else WindowingConfig()
+    thresh_high = float(threshold)
+    thresh_low = effective_policy_cfg.threshold_low
+    if thresh_low > thresh_high:
+        thresh_low = thresh_high
+
+    effective_policy_cfg.threshold_high = thresh_high
+    effective_policy_cfg.threshold_low = thresh_low
+    effective_policy_cfg = TemporalPolicyConfig.model_validate(effective_policy_cfg)
+
     policy = TemporalDecisionPolicy(
         policy_config=effective_policy_cfg,
         windowing_config=effective_window_cfg,
     )
 
     # 4. Canonical window scheduler
-    window_samples = int(round(window_seconds * 16000))
-    hop_samples = int(round(hop_seconds * 16000))
+    window_samples = effective_window_cfg.window_samples(16000)
+    hop_samples = effective_window_cfg.hop_samples(16000)
     scheduler = CanonicalWindowScheduler(
         sample_rate=16000,
         window_samples=window_samples,
@@ -371,6 +383,8 @@ def evaluate_audio(
         "score_is_calibrated": False,
         "active_speech_duration_seconds": total_active_speech,
         "min_speech_threshold_seconds": effective_min_speech,
+        "window_seconds": effective_window_cfg.window_seconds,
+        "hop_seconds": effective_window_cfg.hop_seconds,
         "config_hash": config.compute_hash() if config else None,
         "pre_norm_peak": metadata.pre_norm_quality.peak_level,
         "pre_norm_rms": metadata.pre_norm_quality.rms,
@@ -495,6 +509,26 @@ def evaluate_audio(
                     history_scores=decision.history_scores,
                 )
             )
+
+    for w in windows:
+        if w.is_eligible:
+            assert w.decision_reason != ReasonCode.INSUFFICIENT_SPEECH_DURATION.value, (
+                f"Window {w.window_index} marked eligible but policy returned insufficient_speech_duration"
+            )
+            assert w.synthetic_score is not None, (
+                f"Window {w.window_index} eligible but score is None"
+            )
+            assert w.raw_spoof_logit is not None, (
+                f"Window {w.window_index} eligible but raw_spoof_logit is None"
+            )
+        else:
+            assert w.synthetic_score is None, (
+                f"Window {w.window_index} abstained but score is not None"
+            )
+            assert w.raw_spoof_logit is None, (
+                f"Window {w.window_index} abstained but raw_spoof_logit is not None"
+            )
+            assert w.abstain_reason == ReasonCode.INSUFFICIENT_SPEECH_DURATION.value
 
     eligible_windows = [w for w in windows if w.is_eligible]
     num_windows = len(windows)

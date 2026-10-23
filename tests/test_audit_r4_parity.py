@@ -20,9 +20,19 @@ import numpy as np
 import pytest
 import soundfile as sf
 import torch
+from fastapi.testclient import TestClient
 
+from services.api.main import app
+from voiceshield.config.schema import VoiceShieldConfig
+from voiceshield.dsp.exceptions import UnsupportedAudioError
 from voiceshield.dsp.preprocessor import load_audio
-from voiceshield.dsp.resampler import CanonicalResampler
+from voiceshield.dsp.resampler import (
+    CANONICAL_LOWPASS_FILTER_WIDTH,
+    CANONICAL_RESAMPLING_METHOD,
+    CANONICAL_ROLLOFF,
+    CanonicalResampler,
+    _get_sinc_kernel,
+)
 from voiceshield.models.base import BaseDetector, DetectorOutput
 from voiceshield.pipeline.file_evaluator import evaluate_audio
 from voiceshield.streaming.policy import (
@@ -622,3 +632,463 @@ def test_streaming_ingest_after_finalization_rejected() -> None:
     # Now ingest succeeds
     res = session.ingest_pcm(dummy_bytes, sample_rate=16000, channels=1, dtype="int16")
     assert res.samples_ingested == 1600
+
+
+# ==============================================================================
+# Blocker 1 Regression Tests: WebSocket Graceful-Stop and Guarded Inference
+# ==============================================================================
+
+
+def make_pcm16_sine(
+    duration: float,
+    sample_rate: int = 16000,
+    channels: int = 1,
+    freq: float = 400.0,
+    amplitude: float = 0.5,
+) -> bytes:
+    """Generate 16-bit little-endian PCM sine wave bytes."""
+    num_samples = int(round(duration * sample_rate))
+    t = np.linspace(0, duration, num_samples, endpoint=False, dtype=np.float32)
+    s = (amplitude * np.sin(2 * np.pi * freq * t) * 32767.0).astype(np.int16)
+    if channels == 1:
+        return bytes(s.tobytes())
+    stereo = np.column_stack([s, s])
+    return bytes(stereo.tobytes())
+
+
+class StrictBaseDetector(BaseDetector):
+    """Detector that strictly enforces the BaseDetector.predict 1-argument contract."""
+
+    def __init__(
+        self,
+        synthetic_score: float = 0.85,
+        delay: float = 0.0,
+        should_fail: bool = False,
+    ) -> None:
+        super().__init__()
+        self.call_args: list[tuple[Any, ...]] = []
+        self.call_kwargs: list[dict[str, Any]] = []
+        self.synthetic_score = synthetic_score
+        self.delay = delay
+        self.should_fail = should_fail
+        self.current_concurrency = 0
+        self.max_concurrency = 0
+
+    def predict(self, *args: Any, **kwargs: Any) -> DetectorOutput:
+        self.call_args.append(args)
+        self.call_kwargs.append(kwargs)
+        if len(args) != 1 or kwargs:
+            raise TypeError(
+                f"predict() takes 1 positional argument but {len(args)} were given (kwargs: {list(kwargs.keys())})"
+            )
+        self.current_concurrency += 1
+        self.max_concurrency = max(self.max_concurrency, self.current_concurrency)
+        if self.delay > 0:
+            import time
+
+            time.sleep(self.delay)
+        self.current_concurrency -= 1
+        if self.should_fail:
+            raise RuntimeError("Simulated detector inference failure")
+        return DetectorOutput(
+            model_id="strict-mock-v1",
+            input_samples=len(args[0]),
+            raw_logits=(1.0, -1.0),
+            synthetic_score=self.synthetic_score,
+            uncalibrated_synthetic_score=self.synthetic_score,
+            bonafide_score=1.0 - self.synthetic_score,
+            is_synthetic_suspected=self.synthetic_score >= 0.5,
+            device_used="cpu",
+        )
+
+    def predict_batch(self, batch: torch.Tensor) -> list[DetectorOutput]:
+        outputs = []
+        for i in range(batch.shape[0]):
+            outputs.append(self.predict(batch[i].cpu().numpy()))
+        return outputs
+
+
+def test_websocket_stop_exact_4s_44100() -> None:
+    """Blocker 1.A: Exact 4.0s at 44.1 kHz flushes on stop, calls detector with 1 arg, and emits window before stop_ack."""
+    detector = StrictBaseDetector()
+    with TestClient(app) as client:
+        orig_detector = getattr(app.state, "detector", None)
+        app.state.detector = detector
+        try:
+            with client.websocket_connect("/api/v1/stream") as ws:
+                ws.send_json(
+                    {"type": "start", "sample_rate": 44100, "channels": 1, "pcm_encoding": "int16"}
+                )
+                ack = ws.receive_json()
+                assert ack["type"] == "session_started"
+
+                pcm = make_pcm16_sine(4.0, 44100, 1)
+                chunk_size = 32000
+                for i in range(0, len(pcm), chunk_size):
+                    ws.send_bytes(pcm[i : i + chunk_size])
+
+                ws.send_json({"type": "stop"})
+                results = []
+                stop_ack = None
+                while True:
+                    msg = ws.receive_json()
+                    if msg["type"] == "session_stopped":
+                        stop_ack = msg
+                        break
+                    results.append(msg)
+
+                win_results = [m for m in results if m.get("type") == "window_result"]
+                assert len(win_results) == 1
+                assert win_results[0]["window_index"] == 0
+                assert win_results[0]["is_eligible"] is True
+                assert win_results[0]["synthetic_score"] == 0.85
+
+                assert stop_ack is not None
+                assert stop_ack["total_windows_generated"] == 1
+                assert stop_ack["total_windows_evaluated"] == 1
+                assert stop_ack["total_windows_dropped"] == 0
+                assert stop_ack["status"] == "success"
+                assert stop_ack["final_reason"] is None
+
+                assert len(detector.call_args) == 1
+                assert len(detector.call_args[0]) == 1
+                assert detector.call_args[0][0].shape == (64000,)
+        finally:
+            app.state.detector = orig_detector
+
+
+def test_websocket_stop_exact_4s_48000() -> None:
+    """Blocker 1.B: Exact 4.0s at 48.0 kHz flushes on stop with identical single-argument and status invariants."""
+    detector = StrictBaseDetector()
+    with TestClient(app) as client:
+        orig_detector = getattr(app.state, "detector", None)
+        app.state.detector = detector
+        try:
+            with client.websocket_connect("/api/v1/stream") as ws:
+                ws.send_json(
+                    {"type": "start", "sample_rate": 48000, "channels": 1, "pcm_encoding": "int16"}
+                )
+                ack = ws.receive_json()
+                assert ack["type"] == "session_started"
+
+                pcm = make_pcm16_sine(4.0, 48000, 1)
+                chunk_size = 32000
+                for i in range(0, len(pcm), chunk_size):
+                    ws.send_bytes(pcm[i : i + chunk_size])
+
+                ws.send_json({"type": "stop"})
+                results = []
+                stop_ack = None
+                while True:
+                    msg = ws.receive_json()
+                    if msg["type"] == "session_stopped":
+                        stop_ack = msg
+                        break
+                    results.append(msg)
+
+                win_results = [m for m in results if m.get("type") == "window_result"]
+                assert len(win_results) == 1
+                assert win_results[0]["window_index"] == 0
+                assert win_results[0]["is_eligible"] is True
+
+                assert stop_ack is not None
+                assert stop_ack["total_windows_generated"] == 1
+                assert stop_ack["total_windows_evaluated"] == 1
+                assert stop_ack["status"] == "success"
+
+                assert len(detector.call_args) == 1
+                assert len(detector.call_args[0]) == 1
+                assert detector.call_args[0][0].shape == (64000,)
+        finally:
+            app.state.detector = orig_detector
+
+
+def test_websocket_stop_less_than_4s() -> None:
+    """Blocker 1.C: Audio < 4.0s triggers zero detector calls and reports insufficient_contiguous_audio on stop."""
+    detector = StrictBaseDetector()
+    with TestClient(app) as client:
+        orig_detector = getattr(app.state, "detector", None)
+        app.state.detector = detector
+        try:
+            with client.websocket_connect("/api/v1/stream") as ws:
+                ws.send_json(
+                    {"type": "start", "sample_rate": 44100, "channels": 1, "pcm_encoding": "int16"}
+                )
+                ack = ws.receive_json()
+                assert ack["type"] == "session_started"
+
+                pcm = make_pcm16_sine(3.5, 44100, 1)
+                chunk_size = 32000
+                for i in range(0, len(pcm), chunk_size):
+                    ws.send_bytes(pcm[i : i + chunk_size])
+
+                ws.send_json({"type": "stop"})
+                results = []
+                stop_ack = None
+                while True:
+                    msg = ws.receive_json()
+                    if msg["type"] == "session_stopped":
+                        stop_ack = msg
+                        break
+                    results.append(msg)
+
+                assert stop_ack is not None
+                assert stop_ack["total_windows_generated"] == 0
+                assert stop_ack["status"] == "insufficient_evidence"
+                assert stop_ack["final_reason"] == "insufficient_contiguous_audio"
+
+                assert len(detector.call_args) == 0
+        finally:
+            app.state.detector = orig_detector
+
+
+def test_websocket_stop_silence_speech_abstention() -> None:
+    """Blocker 1.D: 4.0s of silence triggers zero detector calls, emits abstention window, and reports insufficient_speech_duration."""
+    detector = StrictBaseDetector()
+    with TestClient(app) as client:
+        orig_detector = getattr(app.state, "detector", None)
+        app.state.detector = detector
+        try:
+            with client.websocket_connect("/api/v1/stream") as ws:
+                ws.send_json(
+                    {"type": "start", "sample_rate": 16000, "channels": 1, "pcm_encoding": "int16"}
+                )
+                ack = ws.receive_json()
+                assert ack["type"] == "session_started"
+
+                silence_pcm = b"\x00\x00" * 64000
+                chunk_size = 32000
+                for i in range(0, len(silence_pcm), chunk_size):
+                    ws.send_bytes(silence_pcm[i : i + chunk_size])
+
+                ws.send_json({"type": "stop"})
+                results = []
+                stop_ack = None
+                while True:
+                    msg = ws.receive_json()
+                    if msg["type"] == "session_stopped":
+                        stop_ack = msg
+                        break
+                    results.append(msg)
+
+                win_results = [m for m in results if m.get("type") == "window_result"]
+                assert len(win_results) == 1
+                assert win_results[0]["is_eligible"] is False
+                assert win_results[0]["synthetic_score"] is None
+                assert win_results[0]["decision"]["reason"] == "insufficient_speech_duration"
+
+                assert stop_ack is not None
+                assert stop_ack["total_windows_generated"] == 1
+                assert stop_ack["total_windows_evaluated"] == 1
+                assert stop_ack["status"] == "insufficient_evidence"
+                assert stop_ack["final_reason"] == "insufficient_speech_duration"
+
+                assert len(detector.call_args) == 0
+        finally:
+            app.state.detector = orig_detector
+
+
+def test_websocket_stop_in_flight_drain_and_concurrency() -> None:
+    """Blocker 1.E: Existing in-flight inference followed immediately by stop drains cleanly without duplicate evaluation or semaphore bypass."""
+    detector = StrictBaseDetector(delay=0.1)
+    with TestClient(app) as client:
+        orig_detector = getattr(app.state, "detector", None)
+        app.state.detector = detector
+        try:
+            with client.websocket_connect("/api/v1/stream") as ws:
+                ws.send_json(
+                    {"type": "start", "sample_rate": 16000, "channels": 1, "pcm_encoding": "int16"}
+                )
+                ack = ws.receive_json()
+                assert ack["type"] == "session_started"
+
+                pcm = make_pcm16_sine(4.0, 16000, 1)
+                chunk_size = 32000
+                for i in range(0, len(pcm), chunk_size):
+                    ws.send_bytes(pcm[i : i + chunk_size])
+                ws.send_json({"type": "stop"})
+
+                results = []
+                stop_ack = None
+                while True:
+                    msg = ws.receive_json()
+                    if msg["type"] == "session_stopped":
+                        stop_ack = msg
+                        break
+                    results.append(msg)
+
+                win_results = [m for m in results if m.get("type") == "window_result"]
+                assert len(win_results) == 1
+                assert win_results[0]["is_eligible"] is True
+
+                assert stop_ack is not None
+                assert stop_ack["status"] == "success"
+
+                assert len(detector.call_args) == 1
+                assert detector.max_concurrency == 1
+        finally:
+            app.state.detector = orig_detector
+
+
+def test_websocket_stop_detector_failure() -> None:
+    """Blocker 1.F: Detector model exception on flush emits MODEL_INFERENCE_ERROR and reports error status in stop_ack."""
+    detector = StrictBaseDetector(should_fail=True)
+    with TestClient(app) as client:
+        orig_detector = getattr(app.state, "detector", None)
+        app.state.detector = detector
+        try:
+            with client.websocket_connect("/api/v1/stream") as ws:
+                ws.send_json(
+                    {"type": "start", "sample_rate": 44100, "channels": 1, "pcm_encoding": "int16"}
+                )
+                ack = ws.receive_json()
+                assert ack["type"] == "session_started"
+
+                pcm = make_pcm16_sine(4.0, 44100, 1)
+                chunk_size = 32000
+                for i in range(0, len(pcm), chunk_size):
+                    ws.send_bytes(pcm[i : i + chunk_size])
+
+                ws.send_json({"type": "stop"})
+                results = []
+                stop_ack = None
+                while True:
+                    msg = ws.receive_json()
+                    if msg["type"] == "session_stopped":
+                        stop_ack = msg
+                        break
+                    results.append(msg)
+
+                err_results = [m for m in results if m.get("type") == "error"]
+                assert len(err_results) == 1
+                assert err_results[0]["error_code"] == "MODEL_INFERENCE_ERROR"
+
+                assert stop_ack is not None
+                assert stop_ack["status"] == "error"
+                assert stop_ack["final_reason"] == "model_inference_error"
+                assert stop_ack["total_windows_evaluated"] == 0
+        finally:
+            app.state.detector = orig_detector
+
+
+# ==============================================================================
+# Blocker 2 Regression Tests: Effective Configuration Invariants
+# ==============================================================================
+
+
+def test_evaluate_audio_min_speech_override_eligible(tmp_path: Path) -> None:
+    """Blocker 2.A: min_speech_seconds=0.4 with 0.5s speech is eligible and policy does not return insufficient_speech_duration."""
+    sr = 16000
+    t_active = np.linspace(0, 0.5, int(round(0.5 * sr)), endpoint=False, dtype=np.float32)
+    s_active = 0.5 * np.sin(2 * np.pi * 400.0 * t_active)
+    s_silence = np.zeros(int(round(3.5 * sr)), dtype=np.float32)
+    samples = np.concatenate([s_active, s_silence]).astype(np.float32)
+
+    wav_file = tmp_path / "speech_0_5.wav"
+    sf.write(str(wav_file), samples, sr)
+
+    detector = StrictBaseDetector(synthetic_score=0.88)
+    res = evaluate_audio(wav_file, detector=detector, min_speech_seconds=0.4)
+    assert res.status == "success"
+    assert len(res.windows) == 1
+    win = res.windows[0]
+    assert win.is_eligible is True
+    assert win.decision_reason != ReasonCode.INSUFFICIENT_SPEECH_DURATION.value
+    assert win.synthetic_score == 0.88
+    assert len(detector.call_args) == 1
+
+
+def test_evaluate_audio_min_speech_override_abstains(tmp_path: Path) -> None:
+    """Blocker 2.B: min_speech_seconds=1.0 with 0.9s speech abstains and detector is not called."""
+    sr = 16000
+    t_active = np.linspace(0, 0.9, int(round(0.9 * sr)), endpoint=False, dtype=np.float32)
+    s_active = 0.5 * np.sin(2 * np.pi * 400.0 * t_active)
+    s_silence = np.zeros(int(round(3.1 * sr)), dtype=np.float32)
+    samples = np.concatenate([s_active, s_silence]).astype(np.float32)
+
+    wav_file = tmp_path / "speech_0_9.wav"
+    sf.write(str(wav_file), samples, sr)
+
+    detector = StrictBaseDetector(synthetic_score=0.88)
+    res = evaluate_audio(wav_file, detector=detector, min_speech_seconds=1.0)
+    assert res.status == "insufficient_evidence"
+    assert res.abstain_reason == ReasonCode.INSUFFICIENT_SPEECH_DURATION.value
+    assert len(res.windows) == 1
+    win = res.windows[0]
+    assert win.is_eligible is False
+    assert win.synthetic_score is None
+    assert win.raw_spoof_logit is None
+    assert win.decision_reason == ReasonCode.INSUFFICIENT_SPEECH_DURATION.value
+    assert len(detector.call_args) == 0
+
+
+def test_evaluate_audio_does_not_mutate_caller_config(tmp_path: Path) -> None:
+    """Blocker 2.C: evaluate_audio leaves caller VoiceShieldConfig object completely unchanged."""
+    pcm = make_sine_mixture(4.0, 16000, 1)
+    wav_file = tmp_path / "cfg_immutability.wav"
+    sf.write(str(wav_file), pcm, 16000)
+
+    cfg = VoiceShieldConfig()
+    cfg_dump_before = cfg.model_dump()
+
+    detector = StrictBaseDetector()
+    evaluate_audio(
+        wav_file,
+        detector=detector,
+        config=cfg,
+        threshold=0.25,
+        min_speech_seconds=0.5,
+        hop_seconds=2.0,
+    )
+
+    cfg_dump_after = cfg.model_dump()
+    assert cfg_dump_before == cfg_dump_after
+
+
+def test_evaluate_audio_custom_hop_scheduler_grid(tmp_path: Path) -> None:
+    """Blocker 2.D: Non-default hop value (2.0s) produces expected scheduler grid and policy metadata."""
+    pcm = make_sine_mixture(6.0, 16000, 1)
+    wav_file = tmp_path / "custom_hop.wav"
+    sf.write(str(wav_file), pcm, 16000)
+
+    detector = StrictBaseDetector()
+    res = evaluate_audio(
+        wav_file,
+        detector=detector,
+        window_seconds=4.0,
+        hop_seconds=2.0,
+    )
+    assert res.total_windows == 2
+    assert res.windows[0].start_seconds == 0.0
+    assert res.windows[0].end_seconds == 4.0
+    assert res.windows[1].start_seconds == 2.0
+    assert res.windows[1].end_seconds == 6.0
+    assert res.metadata["hop_seconds"] == 2.0
+    assert res.metadata["window_seconds"] == 4.0
+
+
+# ==============================================================================
+# Blocker 3 Regression Tests: Resampler Kernel Explicit Constants
+# ==============================================================================
+
+
+def test_canonical_resampler_kernel_explicit_constants(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Blocker 3: Verify kernel construction uses explicit constants and fails clearly if torchaudio API changes."""
+    assert CANONICAL_LOWPASS_FILTER_WIDTH == 6
+    assert CANONICAL_ROLLOFF == 0.99
+    assert CANONICAL_RESAMPLING_METHOD == "sinc_interp_hann"
+
+    # Successful call
+    kernel, width = _get_sinc_kernel(44100, 16000, 100)
+    assert isinstance(kernel, torch.Tensor)
+    assert width > 0
+
+    # Test failure on missing function
+    import torchaudio.functional.functional as F_func
+
+    monkeypatch.delattr(F_func, "_get_sinc_resample_kernel", raising=False)
+
+    with pytest.raises(
+        UnsupportedAudioError, match="Failed to initialize bandlimited sinc resampling kernel"
+    ):
+        _get_sinc_kernel(44100, 16000, 100)

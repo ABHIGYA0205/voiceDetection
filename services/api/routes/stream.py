@@ -402,10 +402,12 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
         sample_rate = start_msg.sample_rate
         channels = start_msg.channels
         total_windows_evaluated = 0
+        total_eligible_evaluated = 0
+        had_model_inference_error = False
         audio_timeline_seconds = 0.0
 
         async def _dispatch_inference(win: WindowForInference) -> None:
-            nonlocal total_windows_evaluated
+            nonlocal total_windows_evaluated, total_eligible_evaluated, had_model_inference_error
             try:
                 if detector is not None:
                     # Model forward pass safely offloaded from the event loop
@@ -437,6 +439,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     return
 
                 total_windows_evaluated += 1
+                total_eligible_evaluated += 1
 
                 result_event = ServerWindowResult(
                     session_id=session_id,
@@ -457,6 +460,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                 await websocket.send_json(result_event.model_dump())
 
             except Exception as exc:
+                had_model_inference_error = True
                 logger.error("Inference execution failed in session %s: %s", session_id, exc)
                 if session is not None:
                     session._in_flight_inference = False
@@ -552,53 +556,32 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                         )
                         await websocket.send_json(abstained_event.model_dump())
 
-                    # 2. If resampler flush completed an eligible full window, evaluate and emit it
-                    for win in new_eligible:
-                        try:
-                            loop = asyncio.get_event_loop()
-                            res = await loop.run_in_executor(
-                                None,
-                                app.state.detector.predict,
-                                win.samples,
-                                session.sample_rate,
-                            )
-                            synth_score = float(res.synthetic_score)
-                            decision = session.temporal_policy.evaluate(
-                                synthetic_score=synth_score,
-                                speech_seconds=win.speech_seconds,
-                                window_index=win.window_index,
-                                window_start_sec=win.start_time,
-                                window_end_sec=win.end_time,
-                            )
-                            if decision is not None:
-                                total_windows_evaluated += 1
-                                result_event = ServerWindowResult(
-                                    session_id=session_id,
-                                    window_index=win.window_index,
-                                    window_start_sec=win.start_time,
-                                    window_end_sec=win.end_time,
-                                    speech_seconds=win.speech_seconds,
-                                    is_eligible=True,
-                                    synthetic_score=synth_score,
-                                    uncalibrated_synthetic_score=synth_score,
-                                    score_is_calibrated=False,
-                                    operating_threshold=0.65,
-                                    operating_threshold_source="unvalidated_heuristic",
-                                    raw_score=synth_score,
-                                    calibrated_score=None,
-                                    decision=decision.model_dump(),
-                                )
-                                await websocket.send_json(result_event.model_dump())
-                        except Exception as exc:
-                            logger.error("Finalize window inference failed: %s", exc)
+                    # 2. If the worker is idle and an eligible window is pending (e.g. from flush), dispatch it
+                    if session.has_pending_window and not session.in_flight_inference:
+                        pending_win = session.pop_pending_window()
+                        if pending_win is not None:
+                            task = asyncio.create_task(_dispatch_inference(pending_win))
+                            inference_tasks.add(task)
+                            task.add_done_callback(inference_tasks.discard)
+
+                    # 3. Wait for all in-flight and dynamically launched pending tasks to finish
+                    while inference_tasks:
+                        await asyncio.gather(*list(inference_tasks), return_exceptions=True)
 
                     elapsed = asyncio.get_event_loop().time() - stream_start_time
 
-                    final_status = "success"
-                    final_reason = None
                     if session.total_windows_generated == 0:
                         final_status = "insufficient_evidence"
                         final_reason = ReasonCode.INSUFFICIENT_CONTIGUOUS_AUDIO.value
+                    elif total_eligible_evaluated > 0:
+                        final_status = "success"
+                        final_reason = None
+                    elif had_model_inference_error:
+                        final_status = "error"
+                        final_reason = "model_inference_error"
+                    else:
+                        final_status = "insufficient_evidence"
+                        final_reason = ReasonCode.INSUFFICIENT_SPEECH_DURATION.value
 
                     await websocket.send_json(
                         ServerStopAck(

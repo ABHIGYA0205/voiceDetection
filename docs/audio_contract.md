@@ -28,8 +28,8 @@ flowchart LR
 ```
 
 ### 1. Algorithm & Bounded State
-- **Algorithm**: Bandlimited sinc interpolation using a precomputed polyphase Kaiser/sinc kernel.
-- **Bounded FIR History**: Bounded memory buffer ($O(1)$ with respect to stream length). The resampler retains only the unconsumed filter history needed for FIR convolution continuity across chunk boundaries; it never buffers the full audio stream and does not use $O(N^2)$ repeated batch-resampling workarounds.
+- **Algorithm**: Bandlimited polyphase sinc interpolation using a Hann-windowed sinc kernel (`sinc_interp_hann`) generated via `torchaudio.functional._get_sinc_resample_kernel`.
+- **Filter Parameters**: Explicit canonical parameters: lowpass filter width = 6 (`CANONICAL_LOWPASS_FILTER_WIDTH`), rolloff = 0.99 (`CANONICAL_ROLLOFF`), resampling method = `"sinc_interp_hann"` (`CANONICAL_RESAMPLING_METHOD`). The FIR filter width is rate-dependent (proportional to `in_ratio = orig_sr // gcd`), maintaining bounded memory history ($O(1)$ with respect to stream length). The resampler retains only the unconsumed filter history needed for FIR convolution continuity across chunk boundaries; it never buffers the full audio stream and does not use $O(N^2)$ repeated batch-resampling workarounds.
 - **16 kHz Identity**: When $F_s^{\text{orig}} = 16,000\text{ Hz}$, resampling executes as an exact identity operation: input samples are passed through directly with zero phase alteration, no filter delay, and an empty flush tail.
 
 ### 2. Exact Output-Length Rule
@@ -105,8 +105,9 @@ Offline and streaming pipelines share the identical `EnergyVAD` implementation (
 ## 5. Shared Temporal Decision Policy (TemporalDecisionPolicy)
 
 Both paths run the identical `TemporalDecisionPolicy` (`voiceshield.streaming.policy.TemporalDecisionPolicy`):
-- **Smoothing**: EWMA ($\alpha = 0.7$) or median filtering over recent eligible synthetic scores.
-- **Elevation**: $N$-of-$M$ elevation (default: 2 of 3 windows $\ge 0.65$) to reach `HIGH`.
-- **Hysteresis**: Requires consecutive scores $\le 0.45$ to clear anomaly from `HIGH` to `LOW`.
+- **Smoothing**: EWMA ($\alpha = 0.3$) or median filtering over recent eligible synthetic scores.
+- **Elevation**: $N$-of-$M$ elevation (default: 3 of 5 windows $\ge 0.65$) to reach `HIGH`.
+- **Thresholds**: High threshold 0.65 (`threshold_high`), low threshold 0.35 (`threshold_low`).
+- **Hysteresis**: Requires 3 consecutive low windows ($\le 0.35$) before de-escalating from `HIGH` to `LOW`.
 - **File-Level Decision**: In offline evaluation, `is_synthetic_suspected` is derived strictly from `policy.current_state == DecisionState.HIGH`. Custom count or consecutive-window heuristics are removed.
-- **Request Thresholds**: Request-level threshold overrides construct an effective copy of `TemporalPolicyConfig` without mutating shared objects.
+- **Request Thresholds**: Request-level threshold overrides construct an effective copy of `TemporalPolicyConfig` without mutating shared objects, ensuring `threshold_low <= threshold_high`.
