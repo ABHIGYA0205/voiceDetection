@@ -17,6 +17,9 @@ from services.api.resource_admission import (
 from services.api.resource_admission import (
     ApiErrorDetail as ApiErrorDetail,
 )
+from voiceshield.config.loader import ConfigError
+from voiceshield.config.overrides import apply_config_overrides
+from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.pipeline.file_evaluator import FileInferenceResult, evaluate_audio
 
 router = APIRouter(prefix="/api/v1", tags=["Analysis"])
@@ -91,6 +94,40 @@ async def analyze_audio_file(
     - Concurrency-protected via process-wide single-worker inference executor suitable for Apple Silicon M3 unified memory.
     - Advisory output only: does NOT determine caller identity or fraud likelihood.
     """
+    # 0. Effective configuration readiness and integrity check
+    effective_cfg = getattr(request.app.state, "effective_config", None)
+    stored_hash = getattr(request.app.state, "effective_config_hash", None)
+    if (
+        effective_cfg is None
+        or not isinstance(effective_cfg, VoiceShieldConfig)
+        or not stored_hash
+        or effective_cfg.compute_hash() != stored_hash
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=ApiErrorDetail(
+                error_code="CONFIG_UNAVAILABLE",
+                message="VoiceShield effective configuration is unavailable or not initialized.",
+            ).model_dump(),
+        )
+
+    # Validate and apply request overrides using centralized helper
+    try:
+        request_config = apply_config_overrides(
+            base_config=effective_cfg,
+            hop_seconds=hop_seconds,
+            threshold=threshold,
+        )
+    except ConfigError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=ApiErrorDetail(
+                error_code="INVALID_CONFIG_OVERRIDE",
+                message=str(exc),
+                details={"hop_seconds": hop_seconds, "threshold": threshold},
+            ).model_dump(),
+        ) from exc
+
     raw_filename = file.filename or "unknown.wav"
     clean_name = sanitize_filename(raw_filename)
     extension = Path(clean_name).suffix.lower()
@@ -160,14 +197,11 @@ async def analyze_audio_file(
         )
 
     try:
-        effective_cfg = getattr(request.app.state, "effective_config", None)
         result = await worker.execute(
             evaluate_audio,
             source=io.BytesIO(content),
             detector=detector,
-            config=effective_cfg,
-            hop_seconds=hop_seconds,
-            threshold=threshold,
+            config=request_config,
             file_name=clean_name,
             max_duration_seconds=MAX_AUDIO_SECONDS,
         )

@@ -17,10 +17,14 @@ def _check_finite(val: float, field_name: str) -> float:
     return val
 
 
-class AudioConfig(BaseModel):
-    """Specification of strict input audio format."""
+class StrictFrozenConfigModel(BaseModel):
+    """Shared base model enforcing strict schema validation and deep immutability."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class AudioConfig(StrictFrozenConfigModel):
+    """Specification of strict input audio format."""
 
     sample_rate: int = Field(default=16000, description="Sampling rate in Hz (strictly 16,000 Hz).")
     channels: int = Field(default=1, description="Number of audio channels (strictly 1 mono).")
@@ -74,10 +78,8 @@ class AudioConfig(BaseModel):
         return v
 
 
-class WindowingConfig(BaseModel):
+class WindowingConfig(StrictFrozenConfigModel):
     """Sliding window and temporal segmentation parameters."""
-
-    model_config = ConfigDict(extra="forbid")
 
     window_seconds: float = Field(
         default=4.0, gt=0, description="Model window duration in seconds."
@@ -120,10 +122,8 @@ class WindowingConfig(BaseModel):
         return int(round(self.hop_seconds * sample_rate))
 
 
-class ModelConfig(BaseModel):
+class ModelConfig(StrictFrozenConfigModel):
     """Acoustic detector model architecture and hardware execution parameters."""
-
-    model_config = ConfigDict(extra="forbid")
 
     architecture: Literal["aasist_l"] = Field(
         default="aasist_l",
@@ -156,10 +156,8 @@ class ModelConfig(BaseModel):
         return norm
 
 
-class TemporalPolicyConfig(BaseModel):
+class TemporalPolicyConfig(StrictFrozenConfigModel):
     """Multi-hop temporal reasoning and decision policy parameters."""
-
-    model_config = ConfigDict(extra="forbid")
 
     threshold_high: float = Field(
         default=0.65,
@@ -227,10 +225,8 @@ class TemporalPolicyConfig(BaseModel):
         return self
 
 
-class DCFConfig(BaseModel):
+class DCFConfig(StrictFrozenConfigModel):
     """Detection Cost Function (DCF) parameters for minDCF calculation."""
-
-    model_config = ConfigDict(extra="forbid")
 
     c_miss: float = Field(default=1.0, gt=0, description="Cost of a false negative (missed spoof).")
     c_fa: float = Field(
@@ -246,10 +242,8 @@ class DCFConfig(BaseModel):
         return _check_finite(v, info.field_name)
 
 
-class EvaluationConfig(BaseModel):
+class EvaluationConfig(StrictFrozenConfigModel):
     """Configuration parameters for evaluation and reporting toolkit."""
-
-    model_config = ConfigDict(extra="forbid")
 
     dcf: DCFConfig = Field(default_factory=DCFConfig)
     target_tpr_levels: list[float] = Field(
@@ -281,10 +275,8 @@ class EvaluationConfig(BaseModel):
         return v
 
 
-class VoiceShieldConfig(BaseModel):
+class VoiceShieldConfig(StrictFrozenConfigModel):
     """Canonical root configuration for VoiceShield."""
-
-    model_config = ConfigDict(extra="forbid")
 
     audio: AudioConfig = Field(default_factory=AudioConfig)
     windowing: WindowingConfig = Field(default_factory=WindowingConfig)
@@ -294,7 +286,12 @@ class VoiceShieldConfig(BaseModel):
 
     def compute_hash(self) -> str:
         """Compute deterministic SHA-256 hash of this configuration."""
-        canonical_json = json.dumps(self.model_dump(), sort_keys=True, separators=(",", ":"))
+        canonical_json = json.dumps(
+            self.model_dump(),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
         return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:

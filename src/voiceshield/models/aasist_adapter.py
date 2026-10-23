@@ -206,29 +206,31 @@ class AASISTLDetector(BaseDetector):
             if item.shape[0] != self.target_length:
                 item = pad_for_aasist(item, max_len=self.target_length)
             processed_items.append(item)
-        tensor_in = torch.stack(processed_items, dim=0).to(self.device)
+        batch_cpu = torch.stack(processed_items, dim=0)
 
         fallback_used = False
-        try:
+        if self.device.type == "cpu":
             with torch.no_grad():
-                # Official forward returns: (last_hidden, output_logits)
-                _, logits = self.model(tensor_in)
-        except Exception as exc:
-            if self.fallback_to_cpu and self.device.type != "cpu":
+                _, logits = self.model(batch_cpu)
+        else:
+            try:
+                tensor_in = batch_cpu.to(self.device)
+                with torch.no_grad():
+                    # Official forward returns: (last_hidden, output_logits)
+                    _, logits = self.model(tensor_in)
+            except Exception as exc:
+                if not self.fallback_to_cpu:
+                    raise
                 logger.warning(
-                    "AASIST forward failed on %s (%s). Executing CPU fallback.",
+                    "AASIST execution failed on %s (%s). Executing CPU fallback.",
                     self.device,
                     exc,
                 )
                 fallback_used = True
                 self.model.to("cpu")
-                tensor_cpu = tensor_in.to("cpu")
-                with torch.no_grad():
-                    _, logits = self.model(tensor_cpu)
-                # Keep CPU or restore device
                 self.device = torch.device("cpu")
-            else:
-                raise
+                with torch.no_grad():
+                    _, logits = self.model(batch_cpu)
 
         # Label Mapping Invariant:
         # Index 0: spoof (synthetic)

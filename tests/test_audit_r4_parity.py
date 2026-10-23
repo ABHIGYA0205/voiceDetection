@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from services.api.main import app
+from voiceshield.config.loader import ConfigError
 from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.dsp.exceptions import UnsupportedAudioError
 from voiceshield.dsp.preprocessor import load_audio
@@ -1132,7 +1133,7 @@ def test_evaluate_audio_rejects_negative_hop(tmp_path: Path) -> None:
     sf.write(str(wav_file), pcm, 16000)
 
     detector = StrictBaseDetector()
-    with pytest.raises(ValidationError):
+    with pytest.raises((ValidationError, ConfigError)):
         evaluate_audio(wav_file, detector=detector, hop_seconds=-1.0)
     assert len(detector.call_args) == 0
 
@@ -1144,7 +1145,7 @@ def test_evaluate_audio_rejects_negative_min_speech(tmp_path: Path) -> None:
     sf.write(str(wav_file), pcm, 16000)
 
     detector = StrictBaseDetector()
-    with pytest.raises(ValidationError):
+    with pytest.raises((ValidationError, ConfigError)):
         evaluate_audio(wav_file, detector=detector, min_speech_seconds=-0.5)
     assert len(detector.call_args) == 0
 
@@ -1156,7 +1157,7 @@ def test_evaluate_audio_rejects_threshold_greater_than_one(tmp_path: Path) -> No
     sf.write(str(wav_file), pcm, 16000)
 
     detector = StrictBaseDetector()
-    with pytest.raises(ValidationError):
+    with pytest.raises((ValidationError, ConfigError)):
         evaluate_audio(wav_file, detector=detector, threshold=2.0)
     assert len(detector.call_args) == 0
 
@@ -1168,7 +1169,7 @@ def test_evaluate_audio_rejects_threshold_nan(tmp_path: Path) -> None:
     sf.write(str(wav_file), pcm, 16000)
 
     detector = StrictBaseDetector()
-    with pytest.raises(ValidationError):
+    with pytest.raises((ValidationError, ConfigError)):
         evaluate_audio(wav_file, detector=detector, threshold=float("nan"))
     assert len(detector.call_args) == 0
 

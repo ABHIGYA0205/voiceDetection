@@ -7,8 +7,8 @@ import csv
 import sys
 from pathlib import Path
 
-from voiceshield.config.loader import load_config
-from voiceshield.config.schema import VoiceShieldConfig
+from voiceshield.config.loader import ConfigError, load_config
+from voiceshield.config.overrides import apply_config_overrides
 from voiceshield.models.aasist_adapter import (
     AASIST_L_DEFAULT_CONFIG,
     AASISTLDetector,
@@ -181,24 +181,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    base_config = load_config(args.config)
+    try:
+        base_config = load_config(args.config)
+        effective_config = apply_config_overrides(
+            base_config=base_config,
+            checkpoint_path=str(args.checkpoint) if args.checkpoint is not None else None,
+            device_preferred=args.device,
+            hop_seconds=args.hop_seconds,
+            threshold=args.threshold,
+        )
+    except ConfigError as exc:
+        sys.stderr.write(f"CONFIG ERROR: {exc}\n")
+        return 2
 
-    # Apply explicit CLI overrides with precedence:
-    # 1. canonical/default config; 2. --config selected YAML; 3. explicit CLI options.
-    config_dict = base_config.model_dump()
-    if args.checkpoint is not None:
-        config_dict["model"]["checkpoint_path"] = str(args.checkpoint)
-    if args.device is not None:
-        config_dict["model"]["device_preferred"] = args.device
-    if args.hop_seconds is not None:
-        config_dict["windowing"]["hop_seconds"] = float(args.hop_seconds)
-    if args.threshold is not None:
-        t_high = float(args.threshold)
-        config_dict["temporal_policy"]["threshold_high"] = t_high
-        if config_dict["temporal_policy"]["threshold_low"] > t_high:
-            config_dict["temporal_policy"]["threshold_low"] = t_high
-
-    effective_config = VoiceShieldConfig.model_validate(config_dict)
     effective_config_hash = effective_config.compute_hash()
 
     # 1. Initialize detector with effective config

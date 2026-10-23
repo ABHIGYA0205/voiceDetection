@@ -20,18 +20,38 @@ class ConfigError(Exception):
 
 
 def find_default_config_path() -> Path:
-    """Resolve canonical configs/default.yaml robustly across working directories."""
-    cwd_path = Path("configs/default.yaml")
-    if cwd_path.is_file():
-        return cwd_path
+    """Resolve canonical default configuration artifact without inspecting caller CWD.
 
-    # Check relative to this module: <repo_root>/src/voiceshield/config/loader.py -> <repo_root>/configs/default.yaml
+    Precedence:
+    1. Repository source tree artifact (<repo_root>/configs/default.yaml).
+    2. Packaged resource artifact (voiceshield/config/default.yaml).
+
+    Never inspects the current working directory for implicit default configuration.
+    """
+    # 1. Source-tree canonical location: <repo_root>/src/voiceshield/config/loader.py -> <repo_root>/configs/default.yaml
     repo_path = Path(__file__).resolve().parents[3] / "configs" / "default.yaml"
     if repo_path.is_file():
         return repo_path
 
+    # 2. Packaged wheel/installed resource location: voiceshield/config/default.yaml
+    pkg_path = Path(__file__).resolve().parent / "default.yaml"
+    if pkg_path.is_file():
+        return pkg_path
+
+    # 3. Fallback via importlib.resources for zip/archive imports
+    try:
+        import importlib.resources as pkg_resources
+
+        traversable = pkg_resources.files("voiceshield.config").joinpath("default.yaml")
+        candidate = Path(str(traversable))
+        if candidate.is_file():
+            return candidate
+    except Exception:
+        pass
+
     raise ConfigError(
-        f"Canonical default configuration file not found at {cwd_path} or {repo_path}."
+        f"Canonical default configuration file not found in repository ({repo_path}) "
+        f"or package resources ({pkg_path})."
     )
 
 

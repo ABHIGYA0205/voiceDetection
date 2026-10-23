@@ -122,14 +122,15 @@ def evaluate_sample_group(
     compute_bootstrap: bool = True,
 ) -> GroupEvaluationResult:
     """Evaluate discrimination and calibration metrics for a specific subset of manifest records."""
-    eval_cfg = config.evaluation if config else None
-    c_miss = eval_cfg.dcf.c_miss if eval_cfg else 1.0
-    c_fa = eval_cfg.dcf.c_fa if eval_cfg else 10.0
-    p_target = eval_cfg.dcf.p_target if eval_cfg else 0.05
-    target_tprs = eval_cfg.target_tpr_levels if eval_cfg else [0.90, 0.95, 0.99]
-    boot_iters = eval_cfg.bootstrap_iterations if eval_cfg else 300
-    boot_ci = eval_cfg.bootstrap_ci_level if eval_cfg else 0.95
-    ece_bins = eval_cfg.ece_num_bins if eval_cfg else 10
+    effective_cfg = config if config is not None else VoiceShieldConfig()
+    eval_cfg = effective_cfg.evaluation
+    c_miss = eval_cfg.dcf.c_miss
+    c_fa = eval_cfg.dcf.c_fa
+    p_target = eval_cfg.dcf.p_target
+    target_tprs = eval_cfg.target_tpr_levels
+    boot_iters = eval_cfg.bootstrap_iterations
+    boot_ci = eval_cfg.bootstrap_ci_level
+    ece_bins = eval_cfg.ece_num_bins
 
     # Collect labels, raw scores, and cluster IDs
     y_list: list[int] = []
@@ -689,11 +690,13 @@ def evaluate_deepfake_detector(
     latency_res = compute_latency_metrics(records, timing_data) if timing_data else None
 
     # Merge provenance metadata
+    effective_cfg = config if config is not None else VoiceShieldConfig()
     res_metadata: dict[str, Any] = {
         "score_direction": direction.value,
         "aggregation_rule": aggregation_rule.value,
         "total_records_in_manifest": len(records),
         "evaluated_records": len(matched_y),
+        "config_hash": effective_cfg.compute_hash(),
     }
     if metadata:
         res_metadata.update(metadata)

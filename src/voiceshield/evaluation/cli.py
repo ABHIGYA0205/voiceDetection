@@ -428,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    cfg = load_config(args.config) if args.config else None
+    cfg = load_config(args.config)
 
     # Load scores inside validation try-catch
     if not args.scores.exists():

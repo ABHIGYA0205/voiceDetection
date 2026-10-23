@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 from pydantic import BaseModel, Field, model_validator
 
-from voiceshield.config.loader import load_config
+from voiceshield.config.overrides import apply_config_overrides
 from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.core.schema import Disclaimers
 from voiceshield.dsp.exceptions import AudioPreprocessingError
@@ -288,22 +288,15 @@ def evaluate_audio(
     path_str = file_name or (str(source) if isinstance(source, (str, Path)) else "in_memory_audio")
 
     # 1. Establish validated effective configuration
-    base_cfg: VoiceShieldConfig = config if config is not None else load_config(None)
-    effective_dict = base_cfg.model_dump()
+    base_cfg: VoiceShieldConfig = config if config is not None else VoiceShieldConfig()
+    effective_cfg = apply_config_overrides(
+        base_config=base_cfg,
+        hop_seconds=hop_seconds,
+        window_seconds=window_seconds,
+        min_speech_seconds=min_speech_seconds,
+        threshold=threshold,
+    )
 
-    if hop_seconds is not None:
-        effective_dict["windowing"]["hop_seconds"] = float(hop_seconds)
-    if window_seconds is not None:
-        effective_dict["windowing"]["window_seconds"] = float(window_seconds)
-    if min_speech_seconds is not None:
-        effective_dict["windowing"]["min_speech_seconds"] = float(min_speech_seconds)
-    if threshold is not None:
-        t_high = float(threshold)
-        effective_dict["temporal_policy"]["threshold_high"] = t_high
-        if effective_dict["temporal_policy"]["threshold_low"] > t_high:
-            effective_dict["temporal_policy"]["threshold_low"] = t_high
-
-    effective_cfg = VoiceShieldConfig.model_validate(effective_dict)
     effective_config_hash = effective_cfg.compute_hash()
 
     effective_window_cfg = effective_cfg.windowing
@@ -370,7 +363,7 @@ def evaluate_audio(
         subframe_duration_seconds=vad_subframe_sec,
     )
     # File-level total active speech calculated over the full canonical waveform for reporting
-    total_active_speech = round(vad.compute_speech_duration(waveform, 16000), 2)
+    total_active_speech = round(vad.compute_speech_duration(waveform, target_sr), 2)
 
     # 4. Canonical window scheduler
     window_samples = effective_window_cfg.window_samples(target_sr)
@@ -403,11 +396,13 @@ def evaluate_audio(
     }
 
     # 5. Deterministic full-window and end-of-stream policy:
-    # If audio contains fewer than 64,000 canonical contiguous samples (< 4.0s), report insufficient evidence
+    # If audio contains fewer than window_samples (< window_seconds), report insufficient evidence
     if len(logical_windows) == 0:
+        req_samples = effective_window_cfg.window_samples(target_sr)
+        req_seconds = effective_window_cfg.window_seconds
         explanation = (
-            f"Audio duration ({metadata.duration_seconds:.2f}s) contains fewer than 64,000 "
-            "canonical contiguous samples (4.0s) required for inference. Decision abstained."
+            f"Audio duration ({metadata.duration_seconds:.2f}s) contains fewer than {req_samples:,} "
+            f"canonical contiguous samples ({req_seconds:.1f}s) required for inference. Decision abstained."
         )
         return FileInferenceResult(
             file_path=path_str,
@@ -443,7 +438,7 @@ def evaluate_audio(
         start_sec = lw.start_time
         end_sec = lw.end_time
         chunk_quality = compute_quality_metrics(chunk)
-        speech_sec = vad.compute_speech_duration(chunk, 16000)
+        speech_sec = vad.compute_speech_duration(chunk, target_sr)
 
         if speech_sec < effective_min_speech:
             decision = policy.evaluate_insufficient_speech(

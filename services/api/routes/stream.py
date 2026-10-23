@@ -449,12 +449,17 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
             )
             return
 
-        # Check effective config readiness
+        # Check effective config readiness and integrity
         effective_config: VoiceShieldConfig | None = getattr(app.state, "effective_config", None)
         effective_config_hash: str | None = getattr(app.state, "effective_config_hash", None)
-        if effective_config is None or effective_config_hash is None:
+        if (
+            effective_config is None
+            or not isinstance(effective_config, VoiceShieldConfig)
+            or effective_config_hash is None
+            or effective_config.compute_hash() != effective_config_hash
+        ):
             logger.error(
-                "Rejected WebSocket stream: effective config or hash unavailable on app.state."
+                "Rejected WebSocket stream: effective config or hash unavailable/mismatched on app.state."
             )
             await websocket.send_json(
                 ServerErrorEvent(

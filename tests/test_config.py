@@ -70,9 +70,11 @@ def test_deterministic_config_hashing() -> None:
     hash2 = cfg2.compute_hash()
     assert hash1 == hash2
 
-    # Mutating a configuration field must alter the hash
-    cfg2.temporal_policy.threshold_high = 0.85
-    assert cfg2.compute_hash() != hash1
+    # Constructing a configuration with a modified field must alter the hash
+    from voiceshield.config.overrides import apply_config_overrides
+
+    cfg_altered = apply_config_overrides(cfg2, threshold=0.85)
+    assert cfg_altered.compute_hash() != hash1
 
 
 def test_missing_or_invalid_yaml_raises_config_error(tmp_path: Path) -> None:
@@ -103,9 +105,10 @@ def test_missing_or_invalid_yaml_raises_config_error(tmp_path: Path) -> None:
 
 def test_dump_and_reload_roundtrip(tmp_path: Path) -> None:
     """Verify that dumping a config and reloading preserves values and hash."""
-    orig = VoiceShieldConfig()
-    orig.model.device_preferred = "cpu"
-    orig.temporal_policy.threshold_high = 0.8
+    from voiceshield.config.overrides import apply_config_overrides
+
+    base = VoiceShieldConfig()
+    orig = apply_config_overrides(base, device_preferred="cpu", threshold=0.8)
 
     dump_path = tmp_path / "custom_config.yaml"
     dump_config(orig, dump_path)

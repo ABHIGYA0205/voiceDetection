@@ -24,7 +24,7 @@ from services.api.routes.analyze_file import router as analyze_router
 from services.api.routes.stream import router as stream_router
 from voiceshield import __version__
 from voiceshield.config.loader import load_config
-from voiceshield.config.schema import VoiceShieldConfig
+from voiceshield.config.overrides import apply_config_overrides
 from voiceshield.core.device import resolve_device_status
 from voiceshield.core.schema import Disclaimers
 from voiceshield.models.aasist_adapter import (
@@ -66,6 +66,26 @@ def _parse_positive_int_env(key: str, default: int) -> int:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Load canonical configuration, initialize concurrency workers, and preload detector at startup."""
+    # 1. Load canonical or custom configuration path and reconcile explicit environment overrides FIRST
+    config_path_target = getattr(app.state, "_initial_config_path", None) or os.getenv(
+        "VOICESHIELD_CONFIG_PATH"
+    )
+    base_config = load_config(config_path_target)
+
+    env_checkpoint = os.getenv("VOICESHIELD_CHECKPOINT_PATH")
+    env_device = os.getenv("VOICESHIELD_DEVICE")
+
+    effective_config = apply_config_overrides(
+        base_config=base_config,
+        checkpoint_path=env_checkpoint,
+        device_preferred=env_device,
+    )
+    effective_config_hash = effective_config.compute_hash()
+
+    app.state.effective_config = effective_config
+    app.state.effective_config_hash = effective_config_hash
+
+    # 2. Concurrency workers and admission controllers are initialized ONLY after config is validated
     max_concurrent_sessions = _parse_positive_int_env(
         "VOICESHIELD_MAX_CONCURRENT_SESSIONS", MAX_CONCURRENT_SESSIONS_DEFAULT
     )
@@ -84,28 +104,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     app.state.inference_worker = InferenceWorker()
     app.state.active_streaming_sessions = {}
-
-    # 1. Load canonical or custom configuration path
-    config_path_target = getattr(app.state, "_initial_config_path", None) or os.getenv(
-        "VOICESHIELD_CONFIG_PATH"
-    )
-    base_config = load_config(config_path_target)
-
-    # 2. Reconcile explicit environment overrides
-    env_checkpoint = os.getenv("VOICESHIELD_CHECKPOINT_PATH")
-    env_device = os.getenv("VOICESHIELD_DEVICE")
-
-    config_dict = base_config.model_dump()
-    if env_checkpoint is not None and env_checkpoint.strip():
-        config_dict["model"]["checkpoint_path"] = env_checkpoint.strip()
-    if env_device is not None and env_device.strip():
-        config_dict["model"]["device_preferred"] = env_device.strip().lower()
-
-    effective_config = VoiceShieldConfig.model_validate(config_dict)
-    effective_config_hash = effective_config.compute_hash()
-
-    app.state.effective_config = effective_config
-    app.state.effective_config_hash = effective_config_hash
 
     # 3. Detector initialization using effective configuration
     checkpoint_path = Path(effective_config.model.checkpoint_path)
@@ -278,20 +276,34 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     @application.get("/health", tags=["System"])
     async def health_check() -> dict[str, Any]:
         """Return system liveness status, device acceleration diagnostics, and advisory disclaimers."""
+        detector = getattr(application.state, "detector", None)
+        effective_cfg = getattr(application.state, "effective_config", None)
+        actual_device = (
+            detector.device.type if detector is not None and hasattr(detector, "device") else None
+        )
+        configured_device = (
+            effective_cfg.model.device_preferred if effective_cfg is not None else None
+        )
         device_status = resolve_device_status()
         disclaimers = Disclaimers()
+
+        active_device_name = (
+            actual_device if actual_device is not None else device_status.device_name
+        )
 
         return {
             "status": "ok",
             "service": "VoiceShield",
             "version": __version__,
-            "model_loaded": getattr(application.state, "detector", None) is not None,
+            "model_loaded": detector is not None,
             "is_mock_detector": getattr(application.state, "is_mock_detector", False),
             "config_hash": getattr(application.state, "effective_config_hash", None),
             "device": {
-                "name": device_status.device_name,
-                "is_mps": device_status.is_mps,
+                "name": active_device_name,
+                "is_mps": active_device_name == "mps",
                 "mps_available": device_status.mps_available,
+                "configured_preference": configured_device,
+                "actual_detector_device": actual_device,
                 "explanation": device_status.explanation,
             },
             "disclaimers": disclaimers.model_dump(),
@@ -317,14 +329,14 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
                 },
             )
 
-        device_status = resolve_device_status()
+        actual_device = detector.device.type if hasattr(detector, "device") else "cpu"
         return {
             "status": "ready",
             "service": "VoiceShield",
             "version": __version__,
             "model_loaded": True,
             "is_mock_detector": getattr(request.app.state, "is_mock_detector", False),
-            "device": device_status.device_name,
+            "device": actual_device,
             "config_hash": config_hash,
         }
 

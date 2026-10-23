@@ -71,6 +71,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/voiceshield", "services/api"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"configs/default.yaml" = "voiceshield/config/default.yaml"
+
+[tool.hatch.build.targets.sdist.force-include]
+"configs/default.yaml" = "configs/default.yaml"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
@@ -130,6 +136,7 @@ module = [
     "tests.test_aasist_adapter",
     "tests.test_file_inference",
     "tests.test_benchmark_suite",
+    "tests.test_canonical_config_runtime",
 ]
 disallow_untyped_calls = false
 

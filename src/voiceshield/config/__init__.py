@@ -6,6 +6,7 @@ from voiceshield.config.loader import (
     dump_config,
     load_config,
 )
+from voiceshield.config.overrides import apply_config_overrides
 from voiceshield.config.schema import (
     AudioConfig,
     DCFConfig,
@@ -25,6 +26,7 @@ __all__ = [
     "TemporalPolicyConfig",
     "VoiceShieldConfig",
     "WindowingConfig",
+    "apply_config_overrides",
     "compute_config_hash",
     "dump_config",
     "load_config",

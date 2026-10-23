@@ -29,6 +29,8 @@ from voiceshield.benchmark.stages import (
     benchmark_feature_extraction,
     benchmark_model_inference,
 )
+from voiceshield.config.loader import load_config
+from voiceshield.config.overrides import apply_config_overrides
 from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.core.device import resolve_device_status
 from voiceshield.models.aasist_adapter import (
@@ -93,10 +95,12 @@ class BenchmarkRunner:
         devices: list[str] | None = None,
         soak_duration_seconds: float = 0.0,
     ) -> None:
-        self.config = config or VoiceShieldConfig()
-        self.checkpoint_path = (
-            Path(checkpoint_path) if checkpoint_path else Path("models/weights/AASIST-L.pth")
-        )
+        base = config or load_config(None)
+        if checkpoint_path is not None:
+            self.config = apply_config_overrides(base, checkpoint_path=str(checkpoint_path))
+        else:
+            self.config = base
+        self.checkpoint_path = Path(self.config.model.checkpoint_path)
         self.iterations = iterations
         self.warmup = warmup
         self.devices = devices or ["cpu", "mps"]
@@ -304,6 +308,12 @@ class BenchmarkRunner:
         )
         lines.append(
             f"| **Weights Status** | `{'MOCK WEIGHTS' if report.provenance.is_mock_weights else 'REAL OFFICIAL AASIST-L'}` |"
+        )
+        lines.append(
+            f"| **Configured Device Preference** | `{self.config.model.device_preferred}` |"
+        )
+        lines.append(
+            f"| **Evaluated Devices Matrix** | `{', '.join(self.devices)}` (cross-device benchmark suite) |"
         )
         lines.append("")
 

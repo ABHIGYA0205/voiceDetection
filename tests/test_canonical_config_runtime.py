@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -29,6 +30,7 @@ from voiceshield.config.loader import (
     dump_config,
     load_config,
 )
+from voiceshield.config.overrides import apply_config_overrides
 from voiceshield.config.schema import (
     AudioConfig,
     TemporalPolicyConfig,
@@ -154,8 +156,7 @@ def test_non_finite_numeric_values_rejected(invalid_val: float) -> None:
 
 def test_config_loaded_once_at_startup_not_per_request(tmp_path: Path) -> None:
     """Verify that configuration is loaded once during app lifespan and not re-read per request."""
-    custom_cfg = VoiceShieldConfig()
-    custom_cfg.temporal_policy.threshold_high = 0.72
+    custom_cfg = apply_config_overrides(VoiceShieldConfig(), threshold=0.72)
     cfg_file = tmp_path / "test_app_config.yaml"
     dump_config(custom_cfg, cfg_file)
 
@@ -205,19 +206,26 @@ def test_invalid_selected_config_path_fails_startup(tmp_path: Path) -> None:
 
 def test_streaming_session_injected_with_effective_config(tmp_path: Path) -> None:
     """Verify that validated effective configuration is injected into StreamingSession and reported in session_started."""
-    custom_cfg = VoiceShieldConfig()
-    custom_cfg.windowing.window_seconds = 4.0
-    custom_cfg.windowing.hop_seconds = 0.5
-    custom_cfg.windowing.min_speech_seconds = 0.5
-    custom_cfg.windowing.energy_threshold = 0.02
-    custom_cfg.temporal_policy.threshold_high = 0.80
-    custom_cfg.temporal_policy.threshold_low = 0.40
-    custom_cfg.temporal_policy.smoothing_method = "median"
-    custom_cfg.temporal_policy.median_window_size = 7
-    custom_cfg.temporal_policy.elevation_n = 4
-    custom_cfg.temporal_policy.elevation_m = 6
-    custom_cfg.temporal_policy.hysteresis_consecutive_drops = 2
-    custom_cfg.temporal_policy.timing_gap_threshold_seconds = 0.40
+    custom_cfg = VoiceShieldConfig.model_validate(
+        {
+            "windowing": {
+                "window_seconds": 4.0,
+                "hop_seconds": 0.5,
+                "min_speech_seconds": 0.5,
+                "energy_threshold": 0.02,
+            },
+            "temporal_policy": {
+                "threshold_high": 0.80,
+                "threshold_low": 0.40,
+                "smoothing_method": "median",
+                "median_window_size": 7,
+                "elevation_n": 4,
+                "elevation_m": 6,
+                "hysteresis_consecutive_drops": 2,
+                "timing_gap_threshold_seconds": 0.40,
+            },
+        }
+    )
 
     cfg_file = tmp_path / "streaming_config.yaml"
     dump_config(custom_cfg, cfg_file)
@@ -290,9 +298,11 @@ def test_streaming_fails_closed_without_app_state_config() -> None:
 
 def test_file_eval_uses_yaml_defaults_when_request_params_omitted(tmp_path: Path) -> None:
     """Verify custom YAML hop_seconds and threshold take effect when REST query parameters are omitted."""
-    custom_cfg = VoiceShieldConfig()
-    custom_cfg.windowing.hop_seconds = 0.5
-    custom_cfg.temporal_policy.threshold_high = 0.82
+    custom_cfg = apply_config_overrides(
+        VoiceShieldConfig(),
+        hop_seconds=0.5,
+        threshold=0.82,
+    )
     cfg_file = tmp_path / "file_eval_config.yaml"
     dump_config(custom_cfg, cfg_file)
     expected_hash = custom_cfg.compute_hash()
@@ -375,8 +385,7 @@ def test_cli_omitted_flags_use_yaml_defaults(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Verify CLI loads canonical config and preserves effective hash when options are omitted."""
-    custom_cfg = VoiceShieldConfig()
-    custom_cfg.temporal_policy.threshold_high = 0.77
+    custom_cfg = apply_config_overrides(VoiceShieldConfig(), threshold=0.77)
     cfg_file = tmp_path / "cli_cfg.yaml"
     dump_config(custom_cfg, cfg_file)
     expected_hash = custom_cfg.compute_hash()
@@ -476,8 +485,7 @@ def test_detector_fallback_to_cpu_false_does_not_silently_fallback_on_inference(
 
 def test_readiness_hash_matches_stream_and_file_result(tmp_path: Path) -> None:
     """Verify /ready, session_started, and no-override file result expose the identical config hash."""
-    custom_cfg = VoiceShieldConfig()
-    custom_cfg.temporal_policy.threshold_high = 0.74
+    custom_cfg = apply_config_overrides(VoiceShieldConfig(), threshold=0.74)
     cfg_file = tmp_path / "unified_config.yaml"
     dump_config(custom_cfg, cfg_file)
     expected_hash = custom_cfg.compute_hash()
@@ -528,8 +536,7 @@ def test_ready_503_exposes_config_hash_when_checkpoint_missing(tmp_path: Path) -
 
     # In this test, VOICESHIELD_CHECKPOINT_PATH overrides model.checkpoint_path.
     # The effective hash reported in 503 detail must reflect that post-override configuration.
-    override_cfg = custom_cfg.model_copy(deep=True)
-    override_cfg.model.checkpoint_path = str(tmp_path / "missing.pth")
+    override_cfg = apply_config_overrides(custom_cfg, checkpoint_path=str(tmp_path / "missing.pth"))
     expected_hash = override_cfg.compute_hash()
 
     test_app = create_app(config_path=cfg_file)
@@ -548,3 +555,475 @@ def test_ready_503_exposes_config_hash_when_checkpoint_missing(tmp_path: Path) -
             detail = ready_resp.json()["detail"]
             assert detail["status"] == "not_ready"
             assert detail["config_hash"] == expected_hash
+
+
+# ------------------------------------------------------------------------------
+# 12. Corrective Pass Regressions (12.A - 12.K)
+# ------------------------------------------------------------------------------
+
+
+def test_12a_unrelated_cwd_shadow_cannot_alter_load_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """12.A: A temp CWD containing configs/default.yaml must NOT shadow load_config(None)."""
+    fake_cfg_dir = tmp_path / "configs"
+    fake_cfg_dir.mkdir(parents=True)
+    rogue_yaml = fake_cfg_dir / "default.yaml"
+    rogue_yaml.write_text(
+        "audio:\n  sample_rate: 16000\n  channels: 1\n  dtype: float32\n  normalize_range: [-1.0, 1.0]\n"
+        "windowing:\n  window_seconds: 4.0\n  hop_seconds: 1.0\n  min_speech_seconds: 0.8\n  energy_threshold: 0.015\n"
+        "model:\n  architecture: aasist_l\n  checkpoint_path: rogue.pth\n  device_preferred: cpu\n  fallback_to_cpu: true\n"
+        "temporal_policy:\n  threshold_high: 0.999\n  threshold_low: 0.001\n"
+        "evaluation:\n  bootstrap_iterations: 100\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    loaded = load_config(None)
+    canonical = VoiceShieldConfig()
+
+    assert loaded.temporal_policy.threshold_high == canonical.temporal_policy.threshold_high
+    assert loaded.compute_hash() == canonical.compute_hash()
+    assert loaded.model.checkpoint_path == canonical.model.checkpoint_path
+
+
+def test_12b_wheel_contains_canonical_yaml_and_loads_outside_repo(tmp_path: Path) -> None:
+    """12.B: Wheel artifact contains canonical YAML, and load_config(None) works from unrelated CWD with matching hash."""
+    import subprocess
+    import sys
+    import zipfile
+
+    subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(tmp_path), "--offline"],
+        check=True,
+    )
+    wheels = list(tmp_path.glob("*.whl"))
+    assert len(wheels) == 1
+    wheel_path = wheels[0]
+
+    with zipfile.ZipFile(wheel_path, "r") as zf:
+        namelist = zf.namelist()
+        assert "voiceshield/config/default.yaml" in namelist
+        pkg_yaml_bytes = zf.read("voiceshield/config/default.yaml")
+
+    repo_yaml_path = Path(__file__).resolve().parents[1] / "configs" / "default.yaml"
+    repo_yaml_bytes = repo_yaml_path.read_bytes()
+    assert pkg_yaml_bytes == repo_yaml_bytes
+
+    # Extract wheel and run standalone script from an unrelated working directory
+    extract_dir = tmp_path / "extracted"
+    with zipfile.ZipFile(wheel_path, "r") as zf:
+        zf.extractall(extract_dir)
+
+    run_script = extract_dir / "verify_load.py"
+    run_script.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, r'{extract_dir}')\n"
+        "from voiceshield.config.loader import load_config\n"
+        "from voiceshield.config.schema import VoiceShieldConfig\n"
+        "cfg = load_config(None)\n"
+        "expected = VoiceShieldConfig()\n"
+        "assert cfg.compute_hash() == expected.compute_hash(), f'{cfg.compute_hash()} != {expected.compute_hash()}'\n"
+        "print('LOAD_SUCCESS')\n",
+        encoding="utf-8",
+    )
+    unrelated_cwd = tmp_path / "unrelated_cwd"
+    unrelated_cwd.mkdir()
+    res = subprocess.run(
+        [sys.executable, str(run_script)],
+        cwd=str(unrelated_cwd),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "LOAD_SUCCESS" in res.stdout
+
+
+def test_12c_effective_config_deep_immutability() -> None:
+    """12.C: Root and nested assignments fail, and compute_hash rejects non-standard JSON numbers."""
+    cfg = VoiceShieldConfig()
+    original_hash = cfg.compute_hash()
+
+    with pytest.raises(ValidationError):
+        cfg.windowing.hop_seconds = 2.0
+
+    with pytest.raises(ValidationError):
+        cfg.temporal_policy.threshold_high = 0.9
+
+    with pytest.raises(ValidationError):
+        cfg.model.checkpoint_path = "changed.pth"
+
+    with pytest.raises(ValidationError):
+        cfg.audio.sample_rate = 8000
+
+    with pytest.raises(ValidationError):
+        cfg.windowing = WindowingConfig()
+
+    # Hash remains untouched
+    assert cfg.compute_hash() == original_hash
+
+    # compute_hash rejects NaN/Infinity if bypass occurred
+    object.__setattr__(cfg.windowing, "hop_seconds", float("nan"))
+    with pytest.raises(ValueError, match="Out of range float values"):
+        cfg.compute_hash()
+
+
+def test_12d_file_api_missing_or_corrupted_config_fails_closed_503(tmp_path: Path) -> None:
+    """12.D: Missing or invalid config returns structured 503 CONFIG_UNAVAILABLE and reservation is released."""
+    test_app = create_app()
+    wav_bytes = _synthesize_test_wav(duration_seconds=4.5)
+
+    with patch.dict("os.environ", {"VOICESHIELD_MOCK_MODEL": "true"}):
+        with TestClient(test_app) as client:
+            # 1. Missing config on app.state
+            test_app.state.effective_config = None
+            resp = client.post(
+                "/api/v1/analyze/file",
+                files={"file": ("test.wav", wav_bytes, "audio/wav")},
+            )
+            assert resp.status_code == 503
+            assert resp.json()["detail"]["error_code"] == "CONFIG_UNAVAILABLE"
+            assert test_app.state.file_upload_admission.reserved_count == 0
+
+            # 2. Corrupted hash mismatch on app.state
+            test_app.state.effective_config = VoiceShieldConfig()
+            test_app.state.effective_config_hash = "mismatched_corrupt_hash"
+            resp2 = client.post(
+                "/api/v1/analyze/file",
+                files={"file": ("test.wav", wav_bytes, "audio/wav")},
+            )
+            assert resp2.status_code == 503
+            assert resp2.json()["detail"]["error_code"] == "CONFIG_UNAVAILABLE"
+            assert test_app.state.file_upload_admission.reserved_count == 0
+
+
+def test_12e_invalid_cross_field_rest_override_returns_422(tmp_path: Path) -> None:
+    """12.E: REST query override exceeding custom window returns HTTP 422 with INVALID_CONFIG_OVERRIDE and zero leaks."""
+    custom_cfg = VoiceShieldConfig.model_validate(
+        {
+            "windowing": {
+                "window_seconds": 1.0,
+                "hop_seconds": 0.5,
+                "min_speech_seconds": 0.5,
+            }
+        }
+    )
+    cfg_file = tmp_path / "small_window.yaml"
+    dump_config(custom_cfg, cfg_file)
+
+    test_app = create_app(config_path=cfg_file)
+    wav_bytes = _synthesize_test_wav(duration_seconds=3.0)
+
+    with patch.dict("os.environ", {"VOICESHIELD_MOCK_MODEL": "true"}):
+        with TestClient(test_app) as client:
+            resp = client.post(
+                "/api/v1/analyze/file?hop_seconds=2.0",
+                files={"file": ("test.wav", wav_bytes, "audio/wav")},
+            )
+            assert resp.status_code == 422
+            data = resp.json()
+            assert data["detail"]["error_code"] == "INVALID_CONFIG_OVERRIDE"
+            assert (
+                "Hop duration (2.0s) cannot be greater than window duration (1.0s)"
+                in data["detail"]["message"]
+            )
+            assert test_app.state.file_upload_admission.reserved_count == 0
+
+
+def test_12f_invalid_cli_override_clean_exit_without_detector(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """12.F: Invalid CLI override exits with code 2 without traceback and does not construct detector."""
+    custom_cfg = VoiceShieldConfig.model_validate(
+        {
+            "windowing": {
+                "window_seconds": 1.0,
+                "hop_seconds": 0.5,
+                "min_speech_seconds": 0.5,
+            }
+        }
+    )
+    cfg_file = tmp_path / "small_window.yaml"
+    dump_config(custom_cfg, cfg_file)
+    wav_file = tmp_path / "test.wav"
+    wav_file.write_bytes(_synthesize_test_wav(duration_seconds=3.0))
+
+    with patch("voiceshield.pipeline.cli.AASISTLDetector") as mock_det:
+        ret = cli_main(
+            [
+                "--input",
+                str(wav_file),
+                "--config",
+                str(cfg_file),
+                "--hop-seconds",
+                "2.0",
+            ]
+        )
+        assert ret == 2
+        mock_det.assert_not_called()
+
+    captured = capsys.readouterr()
+    assert "CONFIG ERROR: Invalid configuration override" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_12g_tensor_transfer_and_forward_fallback_matrix() -> None:
+    """12.G: Device transfer and model forward fallback matrix truthfully moves or retains device state."""
+    mock_raw = AASISTModel(AASIST_L_DEFAULT_CONFIG)
+    test_tensor = torch.randn(1, 64600)
+    orig_to = torch.Tensor.to
+
+    transfer_fails = False
+
+    def custom_to(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        if len(args) > 0 and isinstance(args[0], torch.device) and args[0].type == "mps":
+            if transfer_fails:
+                raise RuntimeError("MPS Out of Memory")
+            # Return self so tensor can be processed even without MPS hardware support
+            return self
+        return orig_to(self, *args, **kwargs)
+
+    # Case 1: Device transfer failure + fallback_to_cpu=True -> moves model to CPU and reports cpu
+    transfer_fails = True
+    det_transfer_fb = AASISTLDetector(
+        _instantiated_model=mock_raw, preferred_device="cpu", fallback_to_cpu=True
+    )
+    det_transfer_fb.device = torch.device("mps")
+
+    with patch.object(torch.Tensor, "to", custom_to):
+        out1 = det_transfer_fb.predict_batch(test_tensor)
+        assert len(out1) == 1
+        assert out1[0].device_used == "cpu"
+        assert det_transfer_fb.device.type == "cpu"
+        assert out1[0].metadata["fallback_used"] is True
+
+    # Case 2: Device transfer failure + fallback_to_cpu=False -> re-raises and does NOT move to CPU
+    det_transfer_no_fb = AASISTLDetector(
+        _instantiated_model=mock_raw, preferred_device="cpu", fallback_to_cpu=False
+    )
+    det_transfer_no_fb.device = torch.device("mps")
+
+    with patch.object(torch.Tensor, "to", custom_to):
+        with pytest.raises(RuntimeError, match="MPS Out of Memory"):
+            det_transfer_no_fb.predict_batch(test_tensor)
+        assert det_transfer_no_fb.device.type == "mps"
+
+    # Case 3: Model forward failure + fallback_to_cpu=True -> moves model to CPU and reports cpu
+    transfer_fails = False
+    det_forward_fb = AASISTLDetector(
+        _instantiated_model=mock_raw, preferred_device="cpu", fallback_to_cpu=True
+    )
+    det_forward_fb.device = torch.device("mps")
+    attempts = 0
+    orig_forward = mock_raw.forward
+
+    def fail_first_forward(x: torch.Tensor) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("MPS forward execution kernel failure")
+        return orig_forward(x)
+
+    with (
+        patch.object(torch.Tensor, "to", custom_to),
+        patch.object(mock_raw, "forward", fail_first_forward),
+    ):
+        out3 = det_forward_fb.predict_batch(test_tensor)
+        assert len(out3) == 1
+        assert out3[0].device_used == "cpu"
+        assert det_forward_fb.device.type == "cpu"
+        assert out3[0].metadata["fallback_used"] is True
+        assert attempts == 2
+
+    # Case 4: Model forward failure + fallback_to_cpu=False -> re-raises and does NOT move to CPU
+    det_forward_no_fb = AASISTLDetector(
+        _instantiated_model=mock_raw, preferred_device="cpu", fallback_to_cpu=False
+    )
+    det_forward_no_fb.device = torch.device("mps")
+
+    with (
+        patch.object(torch.Tensor, "to", custom_to),
+        patch.object(mock_raw, "forward", side_effect=RuntimeError("MPS forward failed")),
+    ):
+        with pytest.raises(RuntimeError, match="MPS forward failed"):
+            det_forward_no_fb.predict_batch(test_tensor)
+        assert det_forward_no_fb.device.type == "mps"
+
+
+def test_12h_readiness_reports_truthful_actual_device() -> None:
+    """12.H: /ready success reports the actual detector device after placement or fallback."""
+    orig_to = torch.Tensor.to
+
+    def custom_to(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        if len(args) > 0 and isinstance(args[0], torch.device) and args[0].type == "mps":
+            raise RuntimeError("MPS failed")
+        return orig_to(self, *args, **kwargs)
+
+    # 1. Config requests CPU on MPS-capable host -> reports cpu
+    with patch("voiceshield.core.device.torch.backends.mps.is_available", return_value=True):
+        with patch.dict(
+            "os.environ", {"VOICESHIELD_MOCK_MODEL": "true", "VOICESHIELD_DEVICE": "cpu"}
+        ):
+            test_app = create_app()
+            with TestClient(test_app) as client:
+                r = client.get("/ready")
+                assert r.status_code == 200
+                assert r.json()["device"] == "cpu"
+
+                h = client.get("/health")
+                assert h.status_code == 200
+                assert h.json()["device"]["name"] == "cpu"
+                assert h.json()["device"]["configured_preference"] == "cpu"
+
+    # 2. MPS detector falls back to CPU -> /ready reports cpu
+    with patch.dict("os.environ", {"VOICESHIELD_MOCK_MODEL": "true"}):
+        test_app2 = create_app()
+        with TestClient(test_app2) as client:
+            det = test_app2.state.detector
+            det.device = torch.device("mps")
+            # Trigger fallback
+            with patch.object(torch.Tensor, "to", custom_to):
+                det.predict(np.zeros(64600, dtype=np.float32))
+
+            assert det.device.type == "cpu"
+            r2 = client.get("/ready")
+            assert r2.status_code == 200
+            assert r2.json()["device"] == "cpu"
+
+
+def test_12i_custom_window_insufficient_audio_explanation() -> None:
+    """12.I: Insufficient audio explanation dynamically reports window_samples and window_seconds from config."""
+    custom_cfg = VoiceShieldConfig.model_validate(
+        {
+            "windowing": {
+                "window_seconds": 2.0,
+                "hop_seconds": 1.0,
+                "min_speech_seconds": 0.5,
+            }
+        }
+    )
+    mock_raw = AASISTModel(AASIST_L_DEFAULT_CONFIG)
+    detector = AASISTLDetector(_instantiated_model=mock_raw, preferred_device="cpu")
+    short_audio = _synthesize_test_wav(duration_seconds=1.5)
+
+    res = evaluate_audio(source=short_audio, detector=detector, config=custom_cfg)
+    assert res.status == "insufficient_evidence"
+    assert "fewer than 32,000 canonical contiguous samples (2.0s)" in (
+        res.temporal_rule_explanation or ""
+    )
+    assert "64,000" not in (res.temporal_rule_explanation or "")
+    assert "4.0s" not in (res.temporal_rule_explanation or "")
+
+
+def test_12j_voiceshield_eval_cli_canonical_and_explicit_config(tmp_path: Path) -> None:
+    """12.J: voiceshield-eval uses canonical config (500 bootstrap iterations) on omission, and explicit config overrides."""
+    from voiceshield.evaluation.cli import main as eval_main
+
+    manifest_file = tmp_path / "manifest.csv"
+    manifest_file.write_text(
+        "sample_id,label,speaker_id\n"
+        "s1,spoof,spk1\n"
+        "s2,bonafide,spk2\n"
+        "s3,spoof,spk1\n"
+        "s4,bonafide,spk2\n",
+        encoding="utf-8",
+    )
+    scores_file = tmp_path / "scores.jsonl"
+    scores_file.write_text(
+        '{"sample_id": "s1", "score": 0.9}\n'
+        '{"sample_id": "s2", "score": 0.1}\n'
+        '{"sample_id": "s3", "score": 0.8}\n'
+        '{"sample_id": "s4", "score": 0.2}\n',
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "eval_out"
+
+    with (
+        patch("voiceshield.evaluation.cli.evaluate_deepfake_detector") as mock_eval,
+        patch("voiceshield.evaluation.cli.save_evaluation_report"),
+    ):
+        dummy_report = MagicMock()
+        dummy_report.overall.curves.eer = 0.05
+        dummy_report.overall.curves.roc_auc = 0.95
+        dummy_report.overall.dcf.min_dcf = 0.05
+        dummy_report.overall.accuracy.accuracy = 0.95
+        dummy_report.metadata = {"config_hash": VoiceShieldConfig().compute_hash()}
+        mock_eval.return_value = dummy_report
+
+        # 1. Omitted --config
+        ret = eval_main(
+            [
+                "--manifest",
+                str(manifest_file),
+                "--scores",
+                str(scores_file),
+                "--output-dir",
+                str(out_dir),
+            ]
+        )
+        assert ret == 0
+        mock_eval.assert_called_once()
+        used_cfg = mock_eval.call_args.kwargs["config"]
+        assert used_cfg is not None
+        assert used_cfg.evaluation.bootstrap_iterations == 500
+        assert used_cfg.compute_hash() == VoiceShieldConfig().compute_hash()
+
+        # 2. Explicit --config wins
+        custom_cfg = VoiceShieldConfig.model_validate({"evaluation": {"bootstrap_iterations": 200}})
+        custom_cfg_file = tmp_path / "custom_eval.yaml"
+        dump_config(custom_cfg, custom_cfg_file)
+
+        mock_eval.reset_mock()
+        ret2 = eval_main(
+            [
+                "--manifest",
+                str(manifest_file),
+                "--scores",
+                str(scores_file),
+                "--output-dir",
+                str(out_dir),
+                "--config",
+                str(custom_cfg_file),
+            ]
+        )
+        assert ret2 == 0
+        used_cfg2 = mock_eval.call_args.kwargs["config"]
+        assert used_cfg2.evaluation.bootstrap_iterations == 200
+        assert used_cfg2.compute_hash() == custom_cfg.compute_hash()
+
+
+def test_12k_no_config_disk_reads_during_requests_or_websocket(tmp_path: Path) -> None:
+    """12.K: Verify no config YAML disk reads occur during normal file requests or WebSocket sessions after lifespan."""
+    wav_bytes = _synthesize_test_wav(duration_seconds=4.5)
+    test_app = create_app()
+
+    with patch.dict("os.environ", {"VOICESHIELD_MOCK_MODEL": "true"}):
+        with TestClient(test_app) as client:
+            with patch("voiceshield.config.loader.open", wraps=open) as mock_open:
+                # 1. Multiple file requests
+                for _ in range(3):
+                    r = client.post(
+                        "/api/v1/analyze/file",
+                        files={"file": ("test.wav", wav_bytes, "audio/wav")},
+                    )
+                    assert r.status_code == 200
+
+                # 2. WebSocket session
+                with client.websocket_connect("/api/v1/stream") as ws:
+                    ws.send_json(
+                        {
+                            "type": "start",
+                            "protocol_version": "1.0",
+                            "sample_rate": 16000,
+                            "channels": 1,
+                            "pcm_encoding": "int16",
+                        }
+                    )
+                    ack = ws.receive_json()
+                    assert ack["type"] == "session_started"
+
+                # Prove that open was never called for any config YAML file
+                for call in mock_open.call_args_list:
+                    opened_path = str(call[0][0])
+                    assert not opened_path.endswith((".yaml", ".yml")), (
+                        f"Config file was re-read from disk during request: {opened_path}"
+                    )
