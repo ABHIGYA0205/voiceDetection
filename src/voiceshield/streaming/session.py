@@ -17,6 +17,7 @@ from voiceshield.dsp.exceptions import (
     InvalidAudioValueError,
     UnsupportedAudioError,
 )
+from voiceshield.dsp.scheduler import CanonicalWindowScheduler
 from voiceshield.streaming.policy import (
     ReasonCode,
     TemporalDecision,
@@ -103,9 +104,9 @@ class IngestResult(BaseModel):
 class StreamingSession:
     """Isolated, framework-independent streaming audio session.
 
-    Handles stateful resampling to 16 kHz mono, ring-buffered windowing, VAD gating,
-    bounded backpressure queuing (at most 1 in-flight inference and 1 pending window),
-    continuity segment resets, and temporal decision tracking.
+    Handles stateful resampling to 16 kHz mono, shared canonical ring-buffered windowing,
+    shared EnergyVAD gating, bounded backpressure queuing (at most 1 in-flight inference
+    and 1 pending window), continuity segment resets, and temporal decision tracking.
     """
 
     def __init__(
@@ -134,9 +135,14 @@ class StreamingSession:
             energy_threshold=self.config.windowing.energy_threshold
         )
 
-        # Ring buffer with 10.0-second bounded capacity
+        # Canonical sample-grid window scheduler with 10.0-second bounded capacity
         capacity_samples = max(self.window_samples * 2, self.sample_rate * 10)
-        self.ring_buffer = AudioRingBuffer(capacity_samples=capacity_samples)
+        self.scheduler = CanonicalWindowScheduler(
+            sample_rate=self.sample_rate,
+            window_samples=self.window_samples,
+            hop_samples=self.hop_samples,
+            capacity_samples=capacity_samples,
+        )
 
         # Stateful resampler (lazily initialized upon first declared input format)
         self._resampler: StatefulResampler | None = None
@@ -150,15 +156,6 @@ class StreamingSession:
             windowing_config=self.config.windowing,
         )
 
-        # Window scheduler and continuity tracking
-        self.segment_samples_written: int = 0
-        self.total_canonical_samples_written: int = 0
-        self.next_window_end_sample: int = self.window_samples
-        self.samples_since_last_hop: int = 0
-        self.window_index: int = 0
-        self.continuity_segment_id: int = 0
-
-        self.total_windows_generated: int = 0
         self.total_windows_dropped: int = 0
 
         self._stream_start_timestamp: float | None = None
@@ -174,6 +171,64 @@ class StreamingSession:
 
         # Cumulative quality flags
         self.quality_flags = AudioQualityFlags()
+        self._is_finalized: bool = False
+
+    @property
+    def is_finalized(self) -> bool:
+        """Return whether the session has been finalized at end-of-stream."""
+        return self._is_finalized
+
+    @property
+    def ring_buffer(self) -> AudioRingBuffer:
+        return self.scheduler.ring_buffer
+
+    @property
+    def segment_samples_written(self) -> int:
+        return self.scheduler.segment_samples_written
+
+    @segment_samples_written.setter
+    def segment_samples_written(self, val: int) -> None:
+        self.scheduler.segment_samples_written = val
+
+    @property
+    def total_canonical_samples_written(self) -> int:
+        return self.scheduler.total_samples_written
+
+    @property
+    def next_window_end_sample(self) -> int:
+        return self.scheduler.next_window_end_sample
+
+    @next_window_end_sample.setter
+    def next_window_end_sample(self, val: int) -> None:
+        self.scheduler.next_window_end_sample = val
+
+    @property
+    def window_index(self) -> int:
+        return self.scheduler.window_index
+
+    @window_index.setter
+    def window_index(self, val: int) -> None:
+        self.scheduler.window_index = val
+
+    @property
+    def continuity_segment_id(self) -> int:
+        return self.scheduler.continuity_segment_id
+
+    @continuity_segment_id.setter
+    def continuity_segment_id(self, val: int) -> None:
+        self.scheduler.continuity_segment_id = val
+
+    @property
+    def total_windows_generated(self) -> int:
+        return self.scheduler.total_windows_generated
+
+    @total_windows_generated.setter
+    def total_windows_generated(self, val: int) -> None:
+        self.scheduler.total_windows_generated = val
+
+    @property
+    def samples_since_last_hop(self) -> int:
+        return self.scheduler.samples_since_last_hop
 
     @property
     def in_flight_inference(self) -> bool:
@@ -192,20 +247,12 @@ class StreamingSession:
 
     def reset(self) -> None:
         """Reset the session state cleanly on disconnect or stream restart."""
-        self.ring_buffer.reset()
+        self.scheduler.reset()
         if self._resampler is not None:
             self._resampler.reset()
         self.temporal_policy.reset()
         self.vad.reset()
 
-        self.segment_samples_written = 0
-        self.total_canonical_samples_written = 0
-        self.next_window_end_sample = self.window_samples
-        self.samples_since_last_hop = 0
-        self.window_index = 0
-        self.continuity_segment_id = 0
-
-        self.total_windows_generated = 0
         self.total_windows_dropped = 0
 
         self._stream_start_timestamp = None
@@ -223,6 +270,62 @@ class StreamingSession:
         self._pending_window = None
 
         self.quality_flags = AudioQualityFlags()
+        self._is_finalized = False
+
+    def finalize(self) -> tuple[list[WindowForInference], list[TemporalDecision]]:
+        """Idempotently finalize the streaming session at end-of-stream.
+
+        Flushes the canonical resampler, passes flushed canonical samples into the scheduler,
+        generates any newly completed full windows and immediate abstentions, and marks the session finalized.
+
+        Returns:
+            tuple[list[WindowForInference], list[TemporalDecision]]: Newly completed eligible windows
+            and immediate abstentions resulting from resampler flush.
+        """
+        if self._is_finalized:
+            return [], []
+
+        self._is_finalized = True
+
+        new_eligible: list[WindowForInference] = []
+        new_abstentions: list[TemporalDecision] = []
+
+        if self._resampler is None:
+            return new_eligible, new_abstentions
+
+        flushed = self._resampler.flush()
+        if flushed.size == 0:
+            return new_eligible, new_abstentions
+
+        due_windows = self.scheduler.push_samples(flushed)
+        for lw in due_windows:
+            speech_sec = self.vad.compute_speech_duration(lw.samples, self.sample_rate)
+            if speech_sec < self.min_speech_seconds:
+                imm = self.temporal_policy.evaluate_insufficient_speech(
+                    window_index=lw.window_index,
+                    window_start_sec=lw.start_time,
+                    window_end_sec=lw.end_time,
+                    speech_seconds=speech_sec,
+                )
+                new_abstentions.append(imm)
+            else:
+                win = WindowForInference(
+                    window_index=lw.window_index,
+                    continuity_segment_id=lw.continuity_segment_id,
+                    samples=lw.samples,
+                    start_time=lw.start_time,
+                    end_time=lw.end_time,
+                    speech_seconds=speech_sec,
+                    is_eligible=True,
+                    abstain_reason=None,
+                    quality_flags=self.quality_flags,
+                )
+                new_eligible.append(win)
+                if self._pending_window is not None:
+                    self.total_windows_dropped += 1
+                self._pending_window = win
+
+        return new_eligible, new_abstentions
 
     def ingest_pcm(
         self,
@@ -247,6 +350,11 @@ class StreamingSession:
         Returns:
             IngestResult summarizing ingestion status, window availability, and quality flags.
         """
+        if self._is_finalized:
+            raise RuntimeError(
+                "Cannot ingest audio into a finalized StreamingSession. Call reset() first."
+            )
+
         # 1. Non-mutating validation & unsupported input detection
         if sample_rate < MIN_SUPPORTED_SAMPLE_RATE or sample_rate > MAX_SUPPORTED_SAMPLE_RATE:
             self.quality_flags.unsupported_input = True
@@ -320,6 +428,7 @@ class StreamingSession:
             elif self._stream_start_timestamp is None:
                 self._stream_start_timestamp = timestamp
                 self._segment_start_timestamp = timestamp
+                self.scheduler.segment_start_timestamp = timestamp
             elif self._expected_next_timestamp is not None:
                 delta = timestamp - self._expected_next_timestamp
                 timestamp_delta = delta
@@ -348,15 +457,23 @@ class StreamingSession:
             self.quality_flags.gap_count += 1
             frame_flags.gap_count = self.quality_flags.gap_count
 
-            # Continuity segment reset
-            self.ring_buffer.reset()
+            # Continuity segment reset: resets scheduler, resampler, policy, vad
+            new_segment_id = self.continuity_segment_id + 1
+            if timestamp is not None and math.isfinite(timestamp):
+                self._segment_start_timestamp = timestamp
+            else:
+                self._segment_start_timestamp = self._expected_next_timestamp or 0.0
+
+            self.scheduler.reset_continuity(
+                segment_id=new_segment_id,
+                segment_start_timestamp=self._segment_start_timestamp,
+            )
+
             if self._resampler is not None:
                 self._resampler.reset()
             self.temporal_policy.reset()
             self.vad.reset()
-
-            self.segment_samples_written = 0
-            self.next_window_end_sample = self.window_samples
+            self._is_finalized = False
 
             # Discard and count stale in-flight window
             if self._in_flight_window is not None and not self._in_flight_window_stale:
@@ -369,12 +486,6 @@ class StreamingSession:
                 self.total_windows_dropped += 1
                 windows_dropped_this_ingest += 1
                 self._pending_window = None
-
-            self.continuity_segment_id += 1
-            if timestamp is not None and math.isfinite(timestamp):
-                self._segment_start_timestamp = timestamp
-            else:
-                self._segment_start_timestamp = self._expected_next_timestamp or 0.0
 
         # Update expected timestamp for next frame
         frame_duration = num_raw_samples / sample_rate
@@ -434,96 +545,59 @@ class StreamingSession:
             frame_flags.is_silent = True
             self.quality_flags.is_silent = True
 
-        # 6. Sample-accurate window scheduling across frame boundaries
+        # 6. Sample-accurate window scheduling across frame boundaries via shared CanonicalWindowScheduler
         windows_generated_this_ingest = 0
         generated_window_indices: list[int] = []
         generated_window_end_times: list[float] = []
         immediate_decisions: list[TemporalDecision] = []
 
-        offset = 0
-        num_resampled = resampled.size
+        due_windows = self.scheduler.push_samples(resampled)
+        for lw in due_windows:
+            windows_generated_this_ingest += 1
+            generated_window_indices.append(lw.window_index)
+            generated_window_end_times.append(lw.end_time)
 
-        while offset < num_resampled:
-            remaining = num_resampled - offset
-            needed = self.next_window_end_sample - self.segment_samples_written
-            if remaining >= needed:
-                slice_to_write = resampled[offset : offset + needed]
-                self.ring_buffer.write(slice_to_write)
-                self.segment_samples_written += needed
-                self.total_canonical_samples_written += needed
-                offset += needed
+            speech_sec = self.vad.compute_speech_duration(lw.samples, self.sample_rate)
 
-                # Boundary reached: extract window ending at this exact canonical sample
-                window_samples = self.ring_buffer.read_tail(self.window_samples)
-
-                t_seg = (
-                    self._segment_start_timestamp
-                    if self._segment_start_timestamp is not None
-                    else (self._stream_start_timestamp or 0.0)
+            if speech_sec < self.min_speech_seconds:
+                # Abstain from inference
+                window = WindowForInference(
+                    window_index=lw.window_index,
+                    continuity_segment_id=lw.continuity_segment_id,
+                    samples=lw.samples,
+                    start_time=lw.start_time,
+                    end_time=lw.end_time,
+                    speech_seconds=speech_sec,
+                    is_eligible=False,
+                    abstain_reason=ReasonCode.INSUFFICIENT_SPEECH_DURATION,
+                    quality_flags=frame_flags,
                 )
-                window_end = t_seg + (self.next_window_end_sample / self.sample_rate)
-                window_start = window_end - (self.window_samples / self.sample_rate)
-
-                speech_sec = self.vad.compute_speech_duration(window_samples, self.sample_rate)
-
-                curr_window_index = self.window_index
-                self.window_index += 1
-                self.total_windows_generated += 1
-                windows_generated_this_ingest += 1
-                generated_window_indices.append(curr_window_index)
-                generated_window_end_times.append(window_end)
-
-                if speech_sec < self.min_speech_seconds:
-                    # Abstain from inference
-                    window = WindowForInference(
-                        window_index=curr_window_index,
-                        continuity_segment_id=self.continuity_segment_id,
-                        samples=window_samples,
-                        start_time=window_start,
-                        end_time=window_end,
-                        speech_seconds=speech_sec,
-                        is_eligible=False,
-                        abstain_reason=ReasonCode.INSUFFICIENT_SPEECH_DURATION,
-                        quality_flags=frame_flags,
-                    )
-                    decision = self.temporal_policy.evaluate_insufficient_speech(
-                        window_index=curr_window_index,
-                        window_start_sec=window_start,
-                        window_end_sec=window_end,
-                        speech_seconds=speech_sec,
-                    )
-                    immediate_decisions.append(decision)
-                else:
-                    # Window is eligible for model inference
-                    window = WindowForInference(
-                        window_index=curr_window_index,
-                        continuity_segment_id=self.continuity_segment_id,
-                        samples=window_samples,
-                        start_time=window_start,
-                        end_time=window_end,
-                        speech_seconds=speech_sec,
-                        is_eligible=True,
-                        abstain_reason=None,
-                        quality_flags=frame_flags,
-                    )
-                    # Bounded backpressure: at most 1 pending window.
-                    # If a pending window exists, replace it and increment dropped count.
-                    if self._pending_window is not None:
-                        self.total_windows_dropped += 1
-                        windows_dropped_this_ingest += 1
-                    self._pending_window = window
-
-                # Advance scheduler to next canonical hop boundary
-                self.next_window_end_sample += self.hop_samples
+                decision = self.temporal_policy.evaluate_insufficient_speech(
+                    window_index=lw.window_index,
+                    window_start_sec=lw.start_time,
+                    window_end_sec=lw.end_time,
+                    speech_seconds=speech_sec,
+                )
+                immediate_decisions.append(decision)
             else:
-                slice_to_write = resampled[offset:]
-                self.ring_buffer.write(slice_to_write)
-                self.segment_samples_written += slice_to_write.size
-                self.total_canonical_samples_written += slice_to_write.size
-                offset = num_resampled
-                break
-
-        self.samples_since_last_hop = self.segment_samples_written % self.hop_samples
+                # Window is eligible for model inference
+                window = WindowForInference(
+                    window_index=lw.window_index,
+                    continuity_segment_id=lw.continuity_segment_id,
+                    samples=lw.samples,
+                    start_time=lw.start_time,
+                    end_time=lw.end_time,
+                    speech_seconds=speech_sec,
+                    is_eligible=True,
+                    abstain_reason=None,
+                    quality_flags=frame_flags,
+                )
+                # Bounded backpressure: at most 1 pending window.
+                # If a pending window exists, replace it and increment dropped count.
+                if self._pending_window is not None:
+                    self.total_windows_dropped += 1
+                    windows_dropped_this_ingest += 1
+                self._pending_window = window
 
         current_stream_time = (
             self._stream_start_timestamp or 0.0

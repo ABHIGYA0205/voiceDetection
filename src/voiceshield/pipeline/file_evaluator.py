@@ -9,12 +9,20 @@ from typing import Any
 import numpy as np
 from pydantic import BaseModel, Field, model_validator
 
-from voiceshield.config.schema import VoiceShieldConfig
+from voiceshield.config.schema import TemporalPolicyConfig, VoiceShieldConfig, WindowingConfig
 from voiceshield.core.schema import Disclaimers
 from voiceshield.dsp.exceptions import AudioPreprocessingError
 from voiceshield.dsp.preprocessor import load_audio
 from voiceshield.dsp.quality import AudioQualityMetrics, compute_quality_metrics
+from voiceshield.dsp.scheduler import CanonicalWindowScheduler
 from voiceshield.models.base import BaseDetector, DetectorOutput
+from voiceshield.streaming.policy import (
+    DecisionState,
+    ReasonCode,
+    TemporalDecision,
+    TemporalDecisionPolicy,
+)
+from voiceshield.streaming.vad import EnergyVAD
 
 
 class WindowResult(BaseModel):
@@ -79,6 +87,30 @@ class WindowResult(BaseModel):
     )
     quality_status: AudioQualityMetrics = Field(
         description="Audio quality diagnostics for this window."
+    )
+    decision: TemporalDecision | None = Field(
+        default=None,
+        description="Structured temporal decision emitted for this window.",
+    )
+    decision_state: str | None = Field(
+        default=None,
+        description="Advisory decision level (low, uncertain, high, insufficient_evidence).",
+    )
+    decision_reason: str | None = Field(
+        default=None,
+        description="Machine-readable decision explanation code.",
+    )
+    decision_reason_details: str | None = Field(
+        default=None,
+        description="Human-readable contextual explanation of the decision.",
+    )
+    smoothed_score: float | None = Field(
+        default=None,
+        description="Smoothed anomaly score (EWMA or median filtered).",
+    )
+    history_scores: list[float] = Field(
+        default_factory=list,
+        description="Recent smoothed score trajectory used for elevation and hysteresis.",
     )
 
     @model_validator(mode="before")
@@ -163,7 +195,11 @@ class FileInferenceResult(BaseModel):
     )
     is_synthetic_suspected: bool = Field(
         default=False,
-        description="Overall file-level advisory classification.",
+        description="Overall file-level advisory classification derived from final temporal policy state.",
+    )
+    final_decision_state: str = Field(
+        default="uncertain",
+        description="Final categorical advisory decision state from the shared temporal policy.",
     )
     temporal_rule_explanation: str = Field(
         default="",
@@ -217,28 +253,6 @@ class FileInferenceResult(BaseModel):
         return data
 
 
-def _compute_active_speech_duration(
-    samples: np.ndarray[Any, np.dtype[np.float32]],
-    sample_rate: int = 16000,
-    frame_ms: float = 30.0,
-    energy_threshold: float = 0.015,
-) -> float:
-    """Estimate active speech duration within a chunk using frame-level RMS energy."""
-    frame_len = int(round(sample_rate * (frame_ms / 1000.0)))
-    if len(samples) < frame_len:
-        return 0.0
-
-    num_frames = len(samples) // frame_len
-    active_frames = 0
-    for i in range(num_frames):
-        frame = samples[i * frame_len : (i + 1) * frame_len]
-        rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)))
-        if rms >= energy_threshold:
-            active_frames += 1
-
-    return round(float(active_frames * (frame_ms / 1000.0)), 2)
-
-
 def evaluate_audio(
     source: str | Path | bytes | io.BytesIO,
     detector: BaseDetector,
@@ -250,12 +264,12 @@ def evaluate_audio(
     max_duration_seconds: float | None = None,
     min_speech_seconds: float | None = None,
 ) -> FileInferenceResult:
-    """Evaluate an audio file using sliding windows, reporting per-window scores and aggregation.
+    """Evaluate an audio file using canonical windowing, shared EnergyVAD, and TemporalDecisionPolicy.
 
     Args:
         source: Audio file path, bytes, or buffer.
         detector: Instantiated BaseDetector implementation.
-        config: Optional VoiceShieldConfig for provenance hashing.
+        config: Optional VoiceShieldConfig for provenance and policy configuration.
         hop_seconds: Step size between consecutive windows in seconds (default: 1.0s).
         window_seconds: Duration of each analysis window in seconds (default: 4.0s).
         threshold: Request-level decision threshold for synthetic suspicion (default: 0.65).
@@ -268,10 +282,13 @@ def evaluate_audio(
     """
     path_str = file_name or (str(source) if isinstance(source, (str, Path)) else "in_memory_audio")
 
-    # 1. Load and normalize audio via canonical preprocessor
+    # 1. Load audio via canonical preprocessor with strict amplitude validation (no silent normalization)
     try:
         preprocessed = load_audio(
-            source, target_sr=16000, max_duration_seconds=max_duration_seconds
+            source,
+            target_sr=16000,
+            normalize=False,
+            max_duration_seconds=max_duration_seconds,
         )
     except AudioPreprocessingError as exc:
         return FileInferenceResult(
@@ -305,93 +322,45 @@ def evaluate_audio(
             disclaimers=Disclaimers(),
         )
 
+    # 2. Shared EnergyVAD setup
+    vad_energy_thresh = config.windowing.energy_threshold if config is not None else 0.015
+    vad_subframe_sec = (
+        getattr(config.windowing, "subframe_duration_seconds", 0.02) if config is not None else 0.02
+    )
+    vad = EnergyVAD(
+        energy_threshold=vad_energy_thresh,
+        subframe_duration_seconds=vad_subframe_sec,
+    )
+
     effective_min_speech = (
         min_speech_seconds
         if min_speech_seconds is not None
         else (config.windowing.min_speech_seconds if config is not None else 0.8)
     )
-    total_active_speech = round(_compute_active_speech_duration(waveform), 2)
+    # File-level total active speech calculated over the full canonical waveform for reporting
+    total_active_speech = round(vad.compute_speech_duration(waveform, 16000), 2)
 
-    total_samples = len(waveform)
-    window_samples = int(round(window_seconds * 16000))  # 64,000 samples
-    hop_samples = int(round(hop_seconds * 16000))  # 16,000 samples
+    # 3. Request-level TemporalPolicyConfig effective copy
+    effective_policy_cfg = config.temporal_policy.model_copy() if config else TemporalPolicyConfig()
+    effective_policy_cfg.threshold_high = float(threshold)
+    if effective_policy_cfg.threshold_low > effective_policy_cfg.threshold_high:
+        effective_policy_cfg.threshold_low = effective_policy_cfg.threshold_high
 
-    window_slices: list[tuple[int, int, bool]] = []
-    if total_samples <= window_samples:
-        is_partial = total_samples < window_samples
-        window_slices.append((0, total_samples, is_partial))
-    else:
-        start_idx = 0
-        while start_idx + window_samples <= total_samples:
-            window_slices.append((start_idx, start_idx + window_samples, False))
-            start_idx += hop_samples
+    effective_window_cfg = config.windowing if config else WindowingConfig()
+    policy = TemporalDecisionPolicy(
+        policy_config=effective_policy_cfg,
+        windowing_config=effective_window_cfg,
+    )
 
-    windows: list[WindowResult] = []
-    for idx, (s_idx, e_idx, is_partial) in enumerate(window_slices):
-        chunk = waveform[s_idx:e_idx]
-        start_sec = round(s_idx / 16000.0, 3)
-        end_sec = round(e_idx / 16000.0, 3)
-
-        chunk_quality = compute_quality_metrics(chunk)
-        speech_sec = _compute_active_speech_duration(chunk)
-
-        if speech_sec < effective_min_speech:
-            # Task E: Insufficient speech: abstain window before inference/decision
-            windows.append(
-                WindowResult(
-                    window_index=idx,
-                    start_seconds=start_sec,
-                    end_seconds=end_sec,
-                    raw_spoof_logit=None,
-                    raw_bonafide_logit=None,
-                    raw_bonafide_score=None,
-                    synthetic_score=None,
-                    uncalibrated_synthetic_score=None,
-                    synthetic_likelihood=None,
-                    score_is_calibrated=False,
-                    calibrated_synthetic_likelihood=None,
-                    effective_threshold=threshold,
-                    is_synthetic_suspected=False,
-                    active_speech_seconds=speech_sec,
-                    is_eligible=False,
-                    is_partial=is_partial,
-                    abstain_reason="insufficient_speech_duration",
-                    quality_status=chunk_quality,
-                )
-            )
-        else:
-            # Run inference through BaseDetector
-            det_output: DetectorOutput = detector.predict(chunk)
-            score = float(det_output.synthetic_score)
-
-            # Task B: Calculate per-window decision using request effective threshold
-            is_suspected = bool(score >= threshold)
-
-            windows.append(
-                WindowResult(
-                    window_index=idx,
-                    start_seconds=start_sec,
-                    end_seconds=end_sec,
-                    raw_spoof_logit=det_output.raw_logits[0],
-                    raw_bonafide_logit=det_output.raw_logits[1],
-                    raw_bonafide_score=det_output.bonafide_score,
-                    synthetic_score=score,
-                    uncalibrated_synthetic_score=score,
-                    score_is_calibrated=False,
-                    calibrated_synthetic_likelihood=None,
-                    effective_threshold=threshold,
-                    is_synthetic_suspected=is_suspected,
-                    active_speech_seconds=speech_sec,
-                    is_eligible=True,
-                    is_partial=is_partial,
-                    abstain_reason=None,
-                    quality_status=chunk_quality,
-                )
-            )
-
-    eligible_windows = [w for w in windows if w.is_eligible]
-    num_windows = len(windows)
-    num_eligible = len(eligible_windows)
+    # 4. Canonical window scheduler
+    window_samples = int(round(window_seconds * 16000))
+    hop_samples = int(round(hop_seconds * 16000))
+    scheduler = CanonicalWindowScheduler(
+        sample_rate=16000,
+        window_samples=window_samples,
+        hop_samples=hop_samples,
+    )
+    logical_windows = scheduler.push_samples(waveform)
 
     is_mock = getattr(detector, "is_mock", False)
     res_metadata: dict[str, Any] = {
@@ -411,7 +380,127 @@ def evaluate_audio(
         "is_mock_detector": is_mock,
     }
 
-    # Task E: If no windows have sufficient active speech, return insufficient_evidence / abstain
+    # 5. Deterministic full-window and end-of-stream policy:
+    # If audio contains fewer than 64,000 canonical contiguous samples (< 4.0s), report insufficient evidence
+    if len(logical_windows) == 0:
+        explanation = (
+            f"Audio duration ({metadata.duration_seconds:.2f}s) contains fewer than 64,000 "
+            "canonical contiguous samples (4.0s) required for inference. Decision abstained."
+        )
+        return FileInferenceResult(
+            file_path=path_str,
+            status="insufficient_evidence",
+            abstain_reason=ReasonCode.INSUFFICIENT_CONTIGUOUS_AUDIO.value,
+            duration_seconds=round(metadata.duration_seconds, 3),
+            active_speech_duration_seconds=total_active_speech,
+            original_sample_rate=metadata.original_sample_rate,
+            original_channels=metadata.original_channels,
+            total_windows=0,
+            eligible_windows=0,
+            mean_synthetic_score=None,
+            max_synthetic_score=None,
+            mean_synthetic_likelihood=None,
+            max_synthetic_likelihood=None,
+            score_is_calibrated=False,
+            effective_threshold=threshold,
+            operating_threshold_source="unvalidated_heuristic",
+            is_synthetic_suspected=False,
+            final_decision_state=DecisionState.INSUFFICIENT_EVIDENCE.value,
+            temporal_rule_explanation=explanation,
+            windows=[],
+            is_mock_detector=is_mock,
+            metadata=res_metadata,
+            disclaimers=Disclaimers(),
+        )
+
+    # 6. Evaluate each logical window synchronously without drop semantics
+    windows: list[WindowResult] = []
+    for lw in logical_windows:
+        chunk = lw.samples
+        start_sec = lw.start_time
+        end_sec = lw.end_time
+        chunk_quality = compute_quality_metrics(chunk)
+        speech_sec = vad.compute_speech_duration(chunk, 16000)
+
+        if speech_sec < effective_min_speech:
+            decision = policy.evaluate_insufficient_speech(
+                window_index=lw.window_index,
+                window_start_sec=start_sec,
+                window_end_sec=end_sec,
+                speech_seconds=speech_sec,
+            )
+            windows.append(
+                WindowResult(
+                    window_index=lw.window_index,
+                    start_seconds=start_sec,
+                    end_seconds=end_sec,
+                    raw_spoof_logit=None,
+                    raw_bonafide_logit=None,
+                    raw_bonafide_score=None,
+                    synthetic_score=None,
+                    uncalibrated_synthetic_score=None,
+                    synthetic_likelihood=None,
+                    score_is_calibrated=False,
+                    calibrated_synthetic_likelihood=None,
+                    effective_threshold=threshold,
+                    is_synthetic_suspected=False,
+                    active_speech_seconds=speech_sec,
+                    is_eligible=False,
+                    is_partial=False,
+                    abstain_reason=ReasonCode.INSUFFICIENT_SPEECH_DURATION.value,
+                    quality_status=chunk_quality,
+                    decision=decision,
+                    decision_state=decision.state.value,
+                    decision_reason=decision.reason.value,
+                    decision_reason_details=decision.reason_details,
+                    smoothed_score=decision.smoothed_score,
+                    history_scores=decision.history_scores,
+                )
+            )
+        else:
+            det_output: DetectorOutput = detector.predict(chunk)
+            score = float(det_output.synthetic_score)
+            decision = policy.evaluate(
+                synthetic_score=score,
+                speech_seconds=speech_sec,
+                window_index=lw.window_index,
+                window_start_sec=start_sec,
+                window_end_sec=end_sec,
+            )
+            is_suspected = bool(decision.state == DecisionState.HIGH)
+            windows.append(
+                WindowResult(
+                    window_index=lw.window_index,
+                    start_seconds=start_sec,
+                    end_seconds=end_sec,
+                    raw_spoof_logit=det_output.raw_logits[0],
+                    raw_bonafide_logit=det_output.raw_logits[1],
+                    raw_bonafide_score=det_output.bonafide_score,
+                    synthetic_score=score,
+                    uncalibrated_synthetic_score=score,
+                    score_is_calibrated=False,
+                    calibrated_synthetic_likelihood=None,
+                    effective_threshold=threshold,
+                    is_synthetic_suspected=is_suspected,
+                    active_speech_seconds=speech_sec,
+                    is_eligible=True,
+                    is_partial=False,
+                    abstain_reason=None,
+                    quality_status=chunk_quality,
+                    decision=decision,
+                    decision_state=decision.state.value,
+                    decision_reason=decision.reason.value,
+                    decision_reason_details=decision.reason_details,
+                    smoothed_score=decision.smoothed_score,
+                    history_scores=decision.history_scores,
+                )
+            )
+
+    eligible_windows = [w for w in windows if w.is_eligible]
+    num_windows = len(windows)
+    num_eligible = len(eligible_windows)
+
+    # 7. If no windows have sufficient active speech, return insufficient_evidence / abstain
     if num_eligible == 0:
         explanation = (
             f"Insufficient active speech detected across file ({total_active_speech:.2f}s active speech "
@@ -422,7 +511,7 @@ def evaluate_audio(
         return FileInferenceResult(
             file_path=path_str,
             status="insufficient_evidence",
-            abstain_reason="insufficient_speech_duration",
+            abstain_reason=ReasonCode.INSUFFICIENT_SPEECH_DURATION.value,
             duration_seconds=round(metadata.duration_seconds, 3),
             active_speech_duration_seconds=total_active_speech,
             original_sample_rate=metadata.original_sample_rate,
@@ -437,6 +526,7 @@ def evaluate_audio(
             effective_threshold=threshold,
             operating_threshold_source="unvalidated_heuristic",
             is_synthetic_suspected=False,
+            final_decision_state=DecisionState.INSUFFICIENT_EVIDENCE.value,
             temporal_rule_explanation=explanation,
             windows=windows,
             is_mock_detector=is_mock,
@@ -448,54 +538,31 @@ def evaluate_audio(
     mean_score = float(np.mean(valid_scores)) if valid_scores else 0.0
     max_score = float(np.max(valid_scores)) if valid_scores else 0.0
 
-    # Task D: Actual consecutive-window logic
-    # Requires at least 2 consecutive sustained hop-aligned windows if multiple windows exist,
-    # or the single window if only 1 window exists.
-    if num_windows == 1:
-        is_suspected = bool(windows[0].is_eligible and windows[0].is_synthetic_suspected)
-    else:
-        max_consecutive = 0
-        current_consecutive = 0
-        prev_start_sec: float | None = None
-        for w in windows:
-            if w.is_eligible and w.is_synthetic_suspected:
-                if current_consecutive > 0:
-                    # Guard against near-duplicate or heavily overlapping non-hop windows
-                    hop_diff = w.start_seconds - (
-                        prev_start_sec if prev_start_sec is not None else 0.0
-                    )
-                    if hop_diff < (hop_seconds * 0.9):
-                        continue
-                current_consecutive += 1
-                prev_start_sec = w.start_seconds
-                if current_consecutive > max_consecutive:
-                    max_consecutive = current_consecutive
-            else:
-                current_consecutive = 0
-                prev_start_sec = None
+    # 8. File-level decision derived from final shared temporal-policy state
+    file_suspected = bool(policy.current_state == DecisionState.HIGH)
 
-        is_suspected = bool(max_consecutive >= 2)
-
-    if is_suspected:
+    if file_suspected:
         explanation = (
-            f"Advisory Warning: Elevated synthetic anomaly score sustained across at least 2 "
-            f"consecutive windows (Peak score: {max_score:.3f} >= threshold {threshold:.3f}). "
+            f"Advisory Warning: Sustained synthetic acoustic anomaly detected across temporal decision policy "
+            f"(Peak score: {max_score:.3f} >= threshold {threshold:.3f}). "
             "Pause and verify through a known independent channel. Do not automatically terminate or block calls."
         )
+    elif (
+        any(w.is_synthetic_suspected for w in eligible_windows)
+        or policy.current_state == DecisionState.UNCERTAIN
+    ):
+        explanation = (
+            f"Isolated or ambiguous synthetic acoustic anomaly detected, but anomaly was not sustained across "
+            f"temporal policy elevation criteria. "
+            f"Low anomaly overall across {num_eligible} evaluated window(s) (Mean score: {mean_score:.3f}, Peak score: {max_score:.3f} / threshold {threshold:.3f}). "
+            "Advisory metric only; does NOT prove identity of caller."
+        )
     else:
-        if any(w.is_synthetic_suspected for w in eligible_windows):
-            explanation = (
-                f"Isolated elevated window(s) detected, but synthetic anomaly was not sustained across "
-                f"consecutive elevated windows (max consecutive = {max_consecutive if num_windows > 1 else 1}, required = 2). "
-                f"Low anomaly overall across {num_eligible} evaluated window(s) (Mean score: {mean_score:.3f}, Peak score: {max_score:.3f} / threshold {threshold:.3f}). "
-                "Advisory metric only; does NOT prove identity of caller."
-            )
-        else:
-            explanation = (
-                f"Low acoustic anomaly score — does not authenticate speech across {num_eligible} evaluated "
-                f"window(s) (Mean score: {mean_score:.3f}, Peak score: {max_score:.3f} / threshold {threshold:.3f}). "
-                "Advisory metric only; does NOT prove identity of caller."
-            )
+        explanation = (
+            f"Low acoustic anomaly score — does not authenticate speech across {num_eligible} evaluated "
+            f"window(s) (Mean score: {mean_score:.3f}, Peak score: {max_score:.3f} / threshold {threshold:.3f}). "
+            "Advisory metric only; does NOT prove identity of caller."
+        )
 
     return FileInferenceResult(
         file_path=path_str,
@@ -513,7 +580,8 @@ def evaluate_audio(
         score_is_calibrated=False,
         effective_threshold=threshold,
         operating_threshold_source="unvalidated_heuristic",
-        is_synthetic_suspected=is_suspected,
+        is_synthetic_suspected=file_suspected,
+        final_decision_state=policy.current_state.value,
         temporal_rule_explanation=explanation,
         windows=windows,
         is_mock_detector=is_mock,

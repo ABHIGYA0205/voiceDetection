@@ -3,106 +3,110 @@
 ## 1. Overview & Strict Contract Invariants
 Every audio input ingested by VoiceShield—whether from an offline audio file (WAV/FLAC) or an online real-time PCM streaming session—is validated and transformed into an identical, deterministic mathematical representation:
 
-- **Source Sampling Rate**: Strictly between $8,000\text{ Hz}$ and $192,000\text{ Hz}$ inclusive ($8,000 \le F_s^{\text{orig}} \le 192,000$). Rates below 8,000 Hz or above 192,000 Hz are rejected.
+- **Source Sampling Rate**: Strictly between $8,000\text{ Hz}$ and $192,000\text{ Hz}$ inclusive ($8,000 \le F_s^{\text{orig}} \le 192,000$). Rates below 8,000 Hz or above 192,000 Hz are rejected with `UnsupportedAudioError`.
 - **Canonical Model Sampling Rate ($F_s$)**: Exactly $16,000\text{ Hz}$ (16 kHz).
-- **Channels ($C$)**: Exactly 1 (single-channel mono). Multi-channel streams ($C \in \{1, 2\}$ for streaming; $1 \le C \le 8$ for offline files) are averaged across channels to mono.
-- **Data Type**: 32-bit floating point (`numpy.float32`).
-- **Amplitude Range**: Strictly bounded to $[-1.0, 1.0]$. Non-finite samples (`NaN`, `±Inf`) or samples exceeding range are rejected.
+- **Channels ($C$)**: Exactly 1 (single-channel mono). Multi-channel streams ($C \in \{1, 2\}$ for streaming; $1 \le C \le 8$ for offline files) are deterministically downmixed via arithmetic mean across channels in `float32`.
+- **Data Type**: 32-bit floating point contiguous array (`numpy.float32`).
+- **Strict Amplitude Domain**: Strictly bounded to $[-1.0, 1.0]$. Decoded floating-point samples outside $[-1.0, 1.0]$ or non-finite values (`NaN`, `±Inf`) are strictly rejected with `InvalidAudioValueError` prior to resampling. PCM integer WAV/FLAC decoded into the normal $[-1.0, 1.0]$ domain remains supported. Silent whole-file peak normalization is barred from the canonical parity path.
 - **Window Length ($L_w$)**: Exactly $64,000\text{ samples}$ ($4.0\text{ seconds}$).
-- **Streaming Hop ($L_h$)**: Exactly $16,000\text{ samples}$ ($1.0\text{ second}$).
+- **Window Hop ($L_h$)**: Exactly $16,000\text{ samples}$ ($1.0\text{ second}$).
+- **Engineering Parity Scope**: Architectural and numerical parity guarantees that offline file evaluation and real-time streaming produce identical canonical samples, window boundaries, VAD decisions, detector inputs, and temporal policy states. Engineering parity does **not** validate detector accuracy, calibrate scores, prove cross-dataset generalization, or demonstrate production readiness.
 
 ---
 
-## 2. Step-by-Step Offline Processing Pipeline Order
+## 2. Canonical Stateful Resampler (`CanonicalResampler`)
+
+Offline file evaluation and real-time streaming use the single `CanonicalResampler` implementation (`voiceshield.dsp.resampler.CanonicalResampler`), replacing legacy separate scipy and streaming polyphase sinc implementations.
+
+```mermaid
+flowchart LR
+    IN[Mono float32 Input] --> RES[CanonicalResampler]
+    RES -->|process chunk| CHUNK_OUT[Canonical Samples]
+    RES -->|flush EOS| TAIL_OUT[Final Tail Samples]
+    CHUNK_OUT --> OUT[Exact Canonical Output]
+    TAIL_OUT --> OUT
+```
+
+### 1. Algorithm & Bounded State
+- **Algorithm**: Bandlimited sinc interpolation using a precomputed polyphase Kaiser/sinc kernel.
+- **Bounded FIR History**: Bounded memory buffer ($O(1)$ with respect to stream length). The resampler retains only the unconsumed filter history needed for FIR convolution continuity across chunk boundaries; it never buffers the full audio stream and does not use $O(N^2)$ repeated batch-resampling workarounds.
+- **16 kHz Identity**: When $F_s^{\text{orig}} = 16,000\text{ Hz}$, resampling executes as an exact identity operation: input samples are passed through directly with zero phase alteration, no filter delay, and an empty flush tail.
+
+### 2. Exact Output-Length Rule
+Across all `process(chunk)` calls and final `flush()`, the total output sample count strictly satisfies:
+$$\text{total\_canonical\_samples} = \left\lceil \frac{\text{total\_source\_frames} \times 16000}{F_s^{\text{orig}}} \right\rceil$$
+
+For exact integer-duration inputs:
+- An exact $4.0\text{s}$ source at any supported rate produces exactly $64,000\text{ samples}$.
+- An exact $5.0\text{s}$ source at any supported rate produces exactly $80,000\text{ samples}$.
+
+### 3. Explicit Lifecycle
+- `process(chunk) -> np.ndarray[float32]`: Ingests an arbitrary chunk, emits all completed convolution strides, and retains unconsumed tail history in the bounded buffer.
+- `flush() -> np.ndarray[float32]`: Emits all valid FIR tail samples required to meet the exact expected canonical output length. Flush is idempotent: a second flush returns an empty array. Calling `process()` after `flush()` raises `RuntimeError` until `reset()`.
+- `reset() -> None`: Clears all buffer history and frame counters for clean stream reuse.
+
+### 4. Numerical Parity Tolerance
+Output samples across arbitrary chunking patterns (single batch, 20 ms frames, 1.0s frames, seeded irregular partitions, and rational-boundary crossing partitions) match the canonical batch output within a documented tolerance:
+$$\max |y_{\text{chunked}} - y_{\text{batch}}| \le 1.0 \times 10^{-5}$$
+
+---
+
+## 3. Shared Canonical Window Scheduler (`CanonicalWindowScheduler`)
+
+Both offline and streaming pipelines employ the shared `CanonicalWindowScheduler` (`voiceshield.dsp.scheduler.CanonicalWindowScheduler`):
 
 ```mermaid
 flowchart TD
-    IN[Audio Source: Path, Bytes, or Buffer] --> STEP1[1. Container & Header Validation]
-    STEP1 --> STEP2[2. Raw Sample Decoding to float32]
-    STEP2 --> STEP3[3. Empty & Non-Finite Guard]
-    STEP3 --> STEP4[4. Untouched Pre-Norm Quality Measurement]
-    STEP4 --> STEP5[5. Deterministic Channel Conversion to Mono]
-    STEP5 --> STEP6[6. Polyphase Kaiser-Windowed Resampling to 16 kHz]
-    STEP6 --> STEP7[7. Bounding & Peak Normalization]
-    STEP7 --> STEP8[8. Post-Norm Quality Assessment]
-    STEP8 --> STEP9[9. Deterministic Crop or Pad to Model Window]
-    STEP9 --> OUT[Model Adapter Waveform: 64,000 samples float32]
+    IN[Canonical 16 kHz Samples] --> SCHED[CanonicalWindowScheduler]
+    SCHED --> RB[AudioRingBuffer: 10s Bounded Capacity]
+    SCHED -->|Boundary k*16,000 reached| WIN[LogicalWindow: 64,000 samples]
+    WIN --> VAD[Shared EnergyVAD: 20ms, 0.015 thresh]
+    VAD -->|Active >= 0.8s| DET[BaseDetector.predict]
+    VAD -->|Active < 0.8s| ABSTAIN[Abstain: insufficient_speech_duration]
+    DET --> POL[Shared TemporalDecisionPolicy]
 ```
 
-### Step 1: Container & Header Validation
-- Accepts `WAV` (RIFF/WAVE) and `FLAC` (Free Lossless Audio Codec) streams.
-- Rejects unsupported compressed audio containers (e.g. raw MP3, AAC) without transparent decoding.
-- Enforces source sample-rate boundaries ($8,000 \le F_s^{\text{orig}} \le 192,000\text{ Hz}$).
-- Enforces channel boundaries ($1 \le C \le 8$).
+### 1. Exact Canonical Hop Grid
+Windows are emitted strictly along the sample grid:
+- **Window 0**: samples $[0, 64000)$, timestamps $[0.0\text{s}, 4.0\text{s})$
+- **Window 1**: samples $[16000, 80000)$, timestamps $[1.0\text{s}, 5.0\text{s})$
+- **Window $k$**: samples $[k \times 16000, k \times 16000 + 64000)$, timestamps $[k \times 1.0\text{s}, k \times 1.0\text{s} + 4.0\text{s})$
 
-### Step 2: Raw Sample Decoding
-- Decodes integer PCM (`PCM_16`, `PCM_24`, `PCM_32`) or IEEE float containers directly into `float32` sample values without loss of significant bits.
+### 2. Full-Window-Only & End-of-Stream Tail Policy
+- Model inference and temporal decision evaluation require an exact, contiguous $64,000$-sample full window.
+- **No Partial / Padded Model Windows**: The pipeline never manufactures a padded or cyclically looped window from less than $4.0\text{s}$ of audio.
+- **Insufficient Contiguous Audio**: Any file or finalized stream with fewer than $64,000$ canonical contiguous samples skips inference, returns null scores, and reports status `insufficient_evidence` with reason `insufficient_contiguous_audio`.
+- **No Trailing Non-Hop Windows**: Non-hop-aligned or trailing padded windows after full windows are prohibited. Boundary durations behave deterministically:
+  - $3.99\text{s}$: 0 windows; `insufficient_contiguous_audio`.
+  - $4.00\text{s}$: window $[0.0, 4.0]$.
+  - $4.01\text{s}$: window $[0.0, 4.0]$ only.
+  - $4.99\text{s}$: window $[0.0, 4.0]$ only.
+  - $5.00\text{s}$: windows $[0.0, 4.0]$ and $[1.0, 5.0]$.
+  - $5.01\text{s}$: windows $[0.0, 4.0]$ and $[1.0, 5.0]$.
 
-### Step 3: Empty & Non-Finite Integrity Guard
-- Rejects zero-byte streams and zero-frame audio files with explicit `EmptyAudioError`.
-- Scans decoded samples for `NaN` or `±Inf`. Any non-finite value immediately triggers `InvalidAudioValueError`.
-
-### Step 4: Untouched Pre-Normalization Quality Measurement
-Before any mathematical alterations (channel downmixing, filtering, or scaling) occur, physical signal metrics are recorded:
-- **Peak Level**: $\max(|x|)$.
-- **RMS Energy**: $\sqrt{\frac{1}{N}\sum x_i^2}$.
-- **Clipping Fraction**: Ratio of samples where $|x_i| \ge 0.999$. Audio with $> 0.05\%$ clipped samples is flagged as `is_clipped=True`.
-- **Silence Check**: Flagged as `is_silent=True` if $\text{RMS} < 10^{-4}$.
-- **SNR Estimate**: Ratio between the 95th percentile signal envelope and 10th percentile noise floor in decibels ($20 \log_{10}(P_{95}/P_{10})$).
-
-### Step 5: Deterministic Channel Conversion
-Stereo and multi-channel streams are downmixed to mono using deterministic arithmetic mean across channels:
-$$x_{\text{mono}}[n] = \frac{1}{C} \sum_{c=1}^C x[n, c]$$
-This maintains phase parity and energy balance across stereo microphones without arbitrary channel dropping.
-
-### Step 6: Polyphase Kaiser Resampling to 16,000 Hz
-If the original sampling rate $F_s^{\text{orig}} \neq 16000$:
-- Rational factors are computed via the greatest common divisor:
-  $$\gcd = \gcd(F_s^{\text{orig}}, 16000), \quad \text{up} = \frac{16000}{\gcd}, \quad \text{down} = \frac{F_s^{\text{orig}}}{\gcd}$$
-- A Kaiser-windowed FIR lowpass filter ($\beta = 5.0$) is applied via polyphase decomposition (`scipy.signal.resample_poly`), preventing spectral aliasing and high-frequency distortion.
-- If $F_s^{\text{orig}} = 16000$, resampling is bypassed as a zero-overhead identity operation.
-
-### Step 7: Bounding & Peak Normalization
-- If $\max(|x_{\text{mono}}|) > 1.0$, the entire signal is scaled by $\frac{1.0}{\max(|x_{\text{mono}}|)}$ to prevent digital overflow.
-- Hard clamping (`np.clip(..., -1.0, 1.0)`) guarantees that no floating-point rounding artifact exceeds $[-1.0, 1.0]$.
-
-### Step 8: Post-Normalization Quality Assessment
-The quality metrics analyzer runs a secondary pass on the normalized 16 kHz mono waveform to populate `metadata.post_norm_quality`.
-
-### Step 9: Deterministic Crop / Pad to Model Adapter Window
-The detector requires exactly $64,000\text{ samples}$ ($4.0\text{s}$ at 16 kHz):
-- **Short Audio ($N < 64,000$)**: Zero-padded on the right (`pad_mode="right_zero"`) up to 64,000 samples.
-- **Long Audio ($N > 64,000$)**: Head-cropped deterministically to the first 64,000 samples for single-window inference, or passed directly to the sliding ring buffer ($4.0\text{s}$ window, $1.0\text{s}$ hop) for streaming analysis.
+### 3. Decoupled Inference Backpressure
+- Logical window scheduling is completely decoupled from worker backpressure.
+- Offline file evaluation synchronously evaluates every emitted logical window without dropping.
+- Real-time streaming employs bounded backpressure (at most 1 in-flight inference and 1 pending window); when backpressure forces window replacement, drops are explicitly counted (`total_windows_dropped`).
 
 ---
 
-## 3. Streaming PCM Invariants & Window Scheduling
+## 4. Shared Voice Activity Detection (EnergyVAD)
 
-For online streaming audio sessions (`StreamingSession` and `/api/v1/stream`):
-
-1. **Little-Endian PCM Encoding**:
-   - `int16`: 16-bit signed integer little-endian (`<i2`), normalized by $32,768.0$.
-   - `int32`: 32-bit signed integer little-endian (`<i4`), normalized by $2,147,483,648.0$.
-   - `float32`: 32-bit IEEE float little-endian (`<f4`).
-2. **Byte Alignment**: Every buffer must be an exact multiple of the frame width (`bytes_per_sample * channels`). Misaligned buffers are rejected with `AUDIO_DECODE_ERROR`.
-3. **Format Immutability**: The declared sample rate, channels, and PCM encoding are immutable once streaming begins. Mid-stream changes trigger immediate rejection.
-4. **Sample-Accurate Window Scheduling**: Windows are scheduled strictly along the canonical 16 kHz sample grid:
-   - Window 0 ends at sample 64,000 (4.0s).
-   - Window 1 ends at sample 80,000 (5.0s).
-   - Window $k$ ends at sample $64,000 + k \times 16,000$ ($4.0 + k \times 1.0\text{s}$).
-   Large frames that span multiple logical boundaries emit all due windows in chronological sequence.
-5. **Continuity Segment Model**:
-   - Discontinuities (timing jumps $> 0.25\text{s}$, materially overlapping frames, out-of-order timestamps, or non-finite timestamps) trigger a full continuity reset.
-   - Ring buffer, resampler state, window scheduler, VAD, and temporal history are reset.
-   - Audio from before and after the discontinuity is never concatenated.
-   - Exactly 4.0 contiguous post-gap seconds are required before inference resumes.
-   - Stale in-flight inferences from previous continuity segments are suppressed upon completion.
+Offline and streaming pipelines share the identical `EnergyVAD` implementation (`voiceshield.streaming.vad.EnergyVAD`):
+- **Subframe Duration**: Exactly $20\text{ ms}$ ($320\text{ samples}$ at 16 kHz).
+- **Energy Threshold**: $\text{RMS} \ge 0.015$.
+- **Speech Duration Threshold**: Minimum $0.8\text{ seconds}$ active speech per $4.0\text{s}$ window.
+- **Leftover Subframes**: Tail samples shorter than $20\text{ ms}$ are evaluated on their own partial RMS energy.
+- **Gating**: Windows with speech duration $< 0.8\text{s}$ skip detector inference, return null scores, set state to `insufficient_evidence`, set reason to `insufficient_speech_duration`, and are excluded from score smoothing and elevation history.
 
 ---
 
-## 4. Explicit Prohibitions in Preprocessing
+## 5. Shared Temporal Decision Policy (TemporalDecisionPolicy)
 
-1. **No Speculative Denoising**: Spectral subtraction, Wiener filtering, and neural denoisers alter spectral phase and remove high-frequency synthetic speech artifacts. Denoising is strictly barred from the core detection path.
-2. **No Implicit Silence Trimming**: Silence regions must remain intact so temporal window timestamps correspond exactly to wall-clock recording offsets.
-3. **No Random Cropping in Preprocessor**: Windowing must be deterministic across file analysis, streaming inference, and evaluation splits.
-4. **No Asymmetric Data Augmentation**: Channel simulations must be applied symmetrically across bona fide and synthetic classes.
+Both paths run the identical `TemporalDecisionPolicy` (`voiceshield.streaming.policy.TemporalDecisionPolicy`):
+- **Smoothing**: EWMA ($\alpha = 0.7$) or median filtering over recent eligible synthetic scores.
+- **Elevation**: $N$-of-$M$ elevation (default: 2 of 3 windows $\ge 0.65$) to reach `HIGH`.
+- **Hysteresis**: Requires consecutive scores $\le 0.45$ to clear anomaly from `HIGH` to `LOW`.
+- **File-Level Decision**: In offline evaluation, `is_synthetic_suspected` is derived strictly from `policy.current_state == DecisionState.HIGH`. Custom count or consecutive-window heuristics are removed.
+- **Request Thresholds**: Request-level threshold overrides construct an effective copy of `TemporalPolicyConfig` without mutating shared objects.

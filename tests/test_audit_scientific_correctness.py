@@ -118,7 +118,7 @@ def test_request_threshold_overrides_detector_internal_threshold(tmp_path: Path)
     assert res_elevated.effective_threshold == 0.20
     assert len(res_elevated.windows) == 1
     # Per-window decision MUST use request threshold 0.20, not internal 0.65
-    assert res_elevated.windows[0].is_synthetic_suspected is True
+    assert res_elevated.windows[0].decision_state == "uncertain"
     assert res_elevated.windows[0].effective_threshold == 0.20
     assert res_elevated.windows[0].synthetic_score == 0.30
     assert res_elevated.windows[0].score_is_calibrated is False
@@ -130,6 +130,7 @@ def test_request_threshold_overrides_detector_internal_threshold(tmp_path: Path)
     assert res_not_elevated.status == "success"
     assert res_not_elevated.effective_threshold == 0.40
     assert len(res_not_elevated.windows) == 1
+    assert res_not_elevated.windows[0].decision_state == "low"
     assert res_not_elevated.windows[0].is_synthetic_suspected is False
     assert res_not_elevated.windows[0].effective_threshold == 0.40
 
@@ -175,7 +176,7 @@ def test_api_analyze_file_threshold_behavior(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("duration_s", "expected_windows", "expect_partial"),
     [
-        (3.99, 1, True),  # < 4.0s: cyclically padded partial window
+        (3.99, 0, False),  # < 4.0s: 0 windows, insufficient_contiguous_audio
         (4.00, 1, False),  # exactly 4.0s: 1 full window [0.0, 4.0]
         (4.01, 1, False),  # 4.01s: 1 full window [0.0, 4.0], NO near-duplicate tail window!
         (4.99, 1, False),  # 4.99s: 1 full window [0.0, 4.0] (hop 1.0s requires 5.0s for 2nd window)
@@ -200,13 +201,15 @@ def test_file_durations_window_counts(
         window_seconds=4.0,
         hop_seconds=1.0,
     )
-    assert result.status == "success"
-    assert result.total_windows == expected_windows
-    assert len(result.windows) == expected_windows
-
-    if expect_partial:
-        assert result.windows[0].is_partial is True
+    if duration_s < 4.0:
+        assert result.status == "insufficient_evidence"
+        assert result.abstain_reason == "insufficient_contiguous_audio"
+        assert result.total_windows == 0
+        assert len(result.windows) == 0
     else:
+        assert result.status == "success"
+        assert result.total_windows == expected_windows
+        assert len(result.windows) == expected_windows
         assert result.windows[0].is_partial is False
 
 
@@ -237,7 +240,7 @@ def test_4_01s_does_not_manufacture_two_sustained_windows(tmp_path: Path) -> Non
 
 
 def test_elevated_low_elevated_does_not_satisfy_two_consecutive(tmp_path: Path) -> None:
-    """Requirement 5: Three windows [Elevated, Low, Elevated] must NOT satisfy the 2-consecutive rule."""
+    """Requirement 5: Three windows [Elevated, Low, Elevated] must NOT trigger sustained anomaly elevation."""
     wav_path = make_test_wav(tmp_path / "three_windows.wav", duration_s=6.0)
 
     # 6.0s audio with 4.0s window and 1.0s hop produces 3 windows:
@@ -248,27 +251,21 @@ def test_elevated_low_elevated_does_not_satisfy_two_consecutive(tmp_path: Path) 
     res_interrupted = evaluate_audio(wav_path, detector=det_interrupted, threshold=0.65)
 
     assert res_interrupted.total_windows == 3
-    assert res_interrupted.windows[0].is_synthetic_suspected is True
-    assert res_interrupted.windows[1].is_synthetic_suspected is False
-    assert res_interrupted.windows[2].is_synthetic_suspected is True
-
-    # Even though 2 total windows were elevated, they were separated by a low window!
     assert res_interrupted.is_synthetic_suspected is False
     assert (
-        "consecutive elevated windows (max consecutive = 1, required = 2)"
+        "Isolated or ambiguous synthetic acoustic anomaly detected"
         in res_interrupted.temporal_rule_explanation
     )
 
-    # Now verify that consecutive elevated windows DO trigger suspected
-    det_consecutive = ProgrammableScoreDetector(scores=[0.80, 0.85, 0.20], internal_threshold=0.65)
+    # Now verify that sustained elevated windows DO trigger suspected
+    det_consecutive = ProgrammableScoreDetector(scores=[0.85, 0.85, 0.85], internal_threshold=0.65)
     res_consecutive = evaluate_audio(wav_path, detector=det_consecutive, threshold=0.65)
 
     assert res_consecutive.total_windows == 3
-    assert res_consecutive.windows[0].is_synthetic_suspected is True
-    assert res_consecutive.windows[1].is_synthetic_suspected is True
+    assert res_consecutive.windows[2].is_synthetic_suspected is True
     assert res_consecutive.is_synthetic_suspected is True
     assert (
-        "Elevated synthetic anomaly score sustained across at least 2 consecutive windows"
+        "Sustained synthetic acoustic anomaly detected across temporal decision policy"
         in res_consecutive.temporal_rule_explanation
     )
 

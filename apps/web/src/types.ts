@@ -106,6 +106,8 @@ export interface ServerStopAck {
   total_windows_evaluated: number;
   total_windows_generated?: number;
   total_windows_dropped?: number;
+  status?: string;
+  final_reason?: string | null;
 }
 
 export interface ServerErrorEvent {

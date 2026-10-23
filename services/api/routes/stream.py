@@ -128,6 +128,8 @@ class ServerStopAck(BaseModel):
     total_windows_evaluated: int
     total_windows_generated: int = 0
     total_windows_dropped: int = 0
+    status: str = "success"
+    final_reason: str | None = None
 
 
 class ServerErrorEvent(BaseModel):
@@ -526,8 +528,78 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
 
                 if cmd_data.get("type") == "stop":
                     logger.info("Session %s received stop command from client.", session_id)
-                    elapsed = asyncio.get_event_loop().time() - stream_start_time
                     assert session is not None
+                    new_eligible, new_abstentions = session.finalize()
+
+                    # 1. Send immediate abstention events for any window completed during flush
+                    for imm in new_abstentions:
+                        total_windows_evaluated += 1
+                        abstained_event = ServerWindowResult(
+                            session_id=session_id,
+                            window_index=imm.window_index,
+                            window_start_sec=imm.window_start_sec,
+                            window_end_sec=imm.window_end_sec,
+                            speech_seconds=imm.speech_seconds,
+                            is_eligible=False,
+                            synthetic_score=None,
+                            uncalibrated_synthetic_score=None,
+                            score_is_calibrated=False,
+                            operating_threshold=0.65,
+                            operating_threshold_source="unvalidated_heuristic",
+                            raw_score=None,
+                            calibrated_score=None,
+                            decision=imm.model_dump(),
+                        )
+                        await websocket.send_json(abstained_event.model_dump())
+
+                    # 2. If resampler flush completed an eligible full window, evaluate and emit it
+                    for win in new_eligible:
+                        try:
+                            loop = asyncio.get_event_loop()
+                            res = await loop.run_in_executor(
+                                None,
+                                app.state.detector.predict,
+                                win.samples,
+                                session.sample_rate,
+                            )
+                            synth_score = float(res.synthetic_score)
+                            decision = session.temporal_policy.evaluate(
+                                synthetic_score=synth_score,
+                                speech_seconds=win.speech_seconds,
+                                window_index=win.window_index,
+                                window_start_sec=win.start_time,
+                                window_end_sec=win.end_time,
+                            )
+                            if decision is not None:
+                                total_windows_evaluated += 1
+                                result_event = ServerWindowResult(
+                                    session_id=session_id,
+                                    window_index=win.window_index,
+                                    window_start_sec=win.start_time,
+                                    window_end_sec=win.end_time,
+                                    speech_seconds=win.speech_seconds,
+                                    is_eligible=True,
+                                    synthetic_score=synth_score,
+                                    uncalibrated_synthetic_score=synth_score,
+                                    score_is_calibrated=False,
+                                    operating_threshold=0.65,
+                                    operating_threshold_source="unvalidated_heuristic",
+                                    raw_score=synth_score,
+                                    calibrated_score=None,
+                                    decision=decision.model_dump(),
+                                )
+                                await websocket.send_json(result_event.model_dump())
+                        except Exception as exc:
+                            logger.error("Finalize window inference failed: %s", exc)
+
+                    elapsed = asyncio.get_event_loop().time() - stream_start_time
+
+                    final_status = "success"
+                    final_reason = None
+                    if session.total_windows_generated == 0:
+                        final_status = "insufficient_evidence"
+                        final_reason = ReasonCode.INSUFFICIENT_CONTIGUOUS_AUDIO.value
+
                     await websocket.send_json(
                         ServerStopAck(
                             session_id=session_id,
@@ -535,6 +607,8 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                             total_windows_evaluated=total_windows_evaluated,
                             total_windows_generated=session.total_windows_generated,
                             total_windows_dropped=session.total_windows_dropped,
+                            status=final_status,
+                            final_reason=final_reason,
                         ).model_dump()
                     )
                     await websocket.close(
@@ -684,9 +758,9 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
 
                 # 7. Dispatch eligible window for inference if worker is idle
                 if session.has_pending_window and not session.in_flight_inference:
-                    win = session.pop_pending_window()
-                    if win is not None:
-                        task = asyncio.create_task(_dispatch_inference(win))
+                    pending_win = session.pop_pending_window()
+                    if pending_win is not None:
+                        task = asyncio.create_task(_dispatch_inference(pending_win))
                         inference_tasks.add(task)
                         task.add_done_callback(inference_tasks.discard)
 

@@ -57,7 +57,7 @@ class PreprocessedAudio(BaseModel):
 def load_audio(
     source: str | Path | bytes | io.BytesIO,
     target_sr: int = 16000,
-    normalize: bool = True,
+    normalize: bool = False,
     max_duration_seconds: float | None = None,
 ) -> PreprocessedAudio:
     """Load WAV or FLAC from path or bytes and normalize to 16 kHz mono float32 [-1.0, 1.0].
@@ -67,16 +67,18 @@ def load_audio(
     2. Header inspection & resource limit pre-checks (sampling rate, duration ceiling).
     3. Raw sample decoding to float32 (bounded to prevent decompression bombs).
     4. Rejection of empty or non-finite (NaN, Inf) samples.
-    5. Untouched pre-normalization quality measurement.
-    6. Deterministic multi-channel to mono conversion via channel mean.
-    7. Deterministic polyphase Kaiser-windowed resampling to target_sr (16 kHz).
-    8. Peak normalization / range bounding to [-1.0, 1.0].
-    9. Post-normalization quality measurement.
+    5. Amplitude validation: strictly enforce [-1.0, 1.0] domain (unless legacy normalize=True).
+    6. Untouched pre-normalization quality measurement.
+    7. Deterministic multi-channel to mono conversion via arithmetic mean in float32.
+    8. Canonical stateful sinc resampling to target_sr (16 kHz) via process + flush.
+    9. Optional legacy peak normalization to [-1.0, 1.0] (non-parity opt-in only).
+    10. Post-normalization quality measurement.
 
     Args:
         source: File path (str/Path), raw bytes, or BytesIO buffer.
         target_sr: Target sample rate in Hz (default: 16,000 Hz).
-        normalize: Whether to bound samples to [-1.0, 1.0] if peak exceeds 1.0.
+        normalize: Legacy opt-in non-parity flag. If True, out-of-range floating-point audio
+            is peak-normalized instead of rejected. Canonical parity path requires False (default).
         max_duration_seconds: Optional ceiling on acceptable audio duration in seconds.
 
     Returns:
@@ -86,7 +88,7 @@ def load_audio(
         EmptyAudioError: If input is empty (0 bytes or 0 samples).
         CorruptAudioError: If file header or audio payload is corrupt.
         UnsupportedAudioError: If format is not WAV/FLAC, rate is out of bounds, or duration limit is exceeded.
-        InvalidAudioValueError: If samples contain NaN or Infinite values.
+        InvalidAudioValueError: If samples contain NaN, Infinite, or out-of-range values.
     """
     # 1. Format inspection and source preparation
     bio: io.BytesIO | Path
@@ -172,20 +174,23 @@ def load_audio(
     if not np.all(np.isfinite(raw_samples)):
         raise InvalidAudioValueError("Audio stream contains NaN or Infinite sample values.")
 
-    # 5. Untouched pre-normalization quality measurement
+    # 5. Amplitude validation: strictly enforce [-1.0, 1.0] domain
+    if not normalize and (np.any(raw_samples < -1.0) or np.any(raw_samples > 1.0)):
+        raise InvalidAudioValueError("Decoded float audio samples out of valid range [-1.0, 1.0].")
+
+    # 6. Untouched pre-normalization quality measurement
     pre_norm_quality = compute_quality_metrics(raw_samples)
 
-    # 6. Deterministic channel conversion
+    # 7. Deterministic multi-channel to mono conversion via arithmetic mean
     if orig_channels == 1:
         mono_samples = raw_samples[:, 0]
     else:
-        # Arithmetic mean across channels in float32
         mono_samples = np.mean(raw_samples, axis=1, dtype=np.float32)
 
-    # 7. High-quality polyphase Kaiser resampling
+    # 8. Canonical stateful sinc resampling
     resampled = resample_audio(mono_samples, orig_sr=orig_sr, target_sr=target_sr)
 
-    # 8. Bounding / Peak normalization to [-1.0, 1.0]
+    # 9. Legacy opt-in peak normalization to [-1.0, 1.0]
     if normalize:
         peak = float(np.max(np.abs(resampled)))
         if peak > 1.0:
@@ -194,7 +199,7 @@ def load_audio(
 
     resampled = np.ascontiguousarray(resampled, dtype=np.float32)
 
-    # 9. Post-normalization quality measurement
+    # 10. Post-normalization quality measurement
     post_norm_quality = compute_quality_metrics(resampled)
 
     duration = float(num_samples / orig_sr)

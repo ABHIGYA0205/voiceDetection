@@ -8,7 +8,8 @@ The VoiceShield streaming protocol provides real-time, low-latency synthetic spe
 - **Advisory Likelihood Only**: Outputs reflect synthetic acoustic indicators. They do **not** verify speaker identity and do **not** compute fraud probability.
 - **Local Audio Only**: Designed for microphone or local audio feeds; does not intercept remote carrier cellular telephony.
 - **No Raw Audio Retention**: Audio is resampled and buffered strictly in volatile memory. No audio frames are written to disk.
-- **Engineering Status**: This implementation provides bounded-backpressure streaming and continuity tracking. It does not claim offline/streaming resampler flush parity, zero dropped windows under sustained overload, complete inference thread cancellation safety, or production readiness.
+- **Engineering Parity**: VoiceShield establishes strict engineering parity between offline WAV/FLAC evaluation and real-time streaming: both paths use the single canonical stateful sinc resampler (with identical filter kernels, bounded FIR history, exact sample output length, and end-of-stream flush), sample-grid window scheduler, EnergyVAD, and TemporalDecisionPolicy. Engineering parity does **not** demonstrate detector accuracy, calibration, cross-dataset generalization, or production readiness.
+- **Remaining Limitation**: Abrupt disconnect and inference thread cancellation safety remains deferred for the separate H-04 audit repair.
 
 ---
 
@@ -36,9 +37,9 @@ The VoiceShield streaming protocol provides real-time, low-latency synthetic spe
            |<-- 'quality_update' Event (anomalies / drops) -+
            |<-- 'continuity_reset' Event (timing gaps) -----+
            |
-           |--- 'stop' JSON ---------------------> [ 'session_stopped' ACK ] ---> [ Normal Close 1000 ]
-           |--- Disconnect ----------------------> [ Resource Cleanup ] ---------> [ Terminated ]
-           |--- Idle Timeout / Oversized Frame --> [ 'error' Event ] -----------> [ Close 1008/1009 ]
+           |--- 'stop' JSON ---------------------> [ Flush & Drain Final Window ] ---> [ 'session_stopped' ACK ] ---> [ Normal Close 1000 ]
+           |--- Disconnect ----------------------> [ Resource Cleanup ] -------------> [ Terminated ]
+           |--- Idle Timeout / Oversized Frame --> [ 'error' Event ] ----------------> [ Close 1008/1009 ]
 ```
 
 ---
@@ -83,7 +84,7 @@ Immediately upon establishing the WebSocket connection, the client must transmit
 
 ---
 
-### 4.2 Server Handshake Acknowledgement (`session_started`)
+## 4.2 Server Handshake Acknowledgement (`session_started`)
 Upon successful validation, the server generates a unique UUID session ID, initializes an isolated `StreamingSession`, and responds:
 
 ```json
@@ -108,7 +109,7 @@ Upon successful validation, the server generates a unique UUID session ID, initi
 
 ---
 
-### 4.3 Client Binary Audio Frames
+## 4.3 Client Binary Audio Frames
 After receiving `session_started`, the client streams raw binary audio frames matching the declared `pcm_encoding`, `channels`, and `sample_rate`.
 
 #### Audio Ingestion Invariants
@@ -122,7 +123,7 @@ After receiving `session_started`, the client streams raw binary audio frames ma
 
 ---
 
-### 4.4 Window Scheduling & Backpressure Guarantees
+## 4.4 Window Scheduling & Backpressure Guarantees
 
 Logical window scheduling and inference backpressure are decoupled:
 
@@ -131,7 +132,7 @@ Logical window scheduling and inference backpressure are decoupled:
    - Window 0 ends at exactly 64,000 canonical samples (4.0s).
    - Window 1 ends at 80,000 canonical samples (5.0s).
    - Window $k$ ends at $64,000 + k \times 16,000$ canonical samples ($4.0 + k \times 1.0\text{s}$).
-   Every due logical boundary is detected and assigned continuous, unique global window indices with zero cumulative timestamp drift, regardless of whether incoming audio arrives in small chunks (e.g. 20ms) or large multi-second frames.
+   Every due logical boundary is detected and assigned continuous, unique global window indices with zero cumulative timestamp drift, regardless of chunk arrival size.
 
 2. **Bounded Backpressure Queue**:
    To prevent unbounded latency and memory growth:
@@ -146,14 +147,14 @@ Logical window scheduling and inference backpressure are decoupled:
 
 ---
 
-### 4.5 Continuity Segment Model & Discontinuity Resets
+## 4.5 Continuity Segment Model & Discontinuity Resets
 
 Timing anomalies—positive gaps exceeding the configured threshold ($> 0.25\text{s}$), materially overlapping timestamps, out-of-order timestamps, or non-finite timestamps—trigger an explicit continuity segment reset:
 
 1. **No Concatenation Across Discontinuities**: Audio from before and after a timing discontinuity is never concatenated into the same inference window.
 2. **Buffer & Resampler Reset**: The ring buffer, streaming resampler filter history, window scheduler, VAD, and temporal policy history are reset.
 3. **Contiguity Requirement**: Exactly 4.0 contiguous seconds of post-discontinuity audio are required before model inference can resume.
-4. **Stale Pre-Gap Result Suppression**: Any in-flight inference started before the discontinuity is suppressed upon completion: its score is discarded, it is not applied to the reset temporal policy, and no `window_result` event is emitted. The freshest post-gap pending window is then allowed to proceed.
+4. **Stale Pre-Gap Result Suppression**: Any in-flight inference started before the discontinuity is suppressed upon completion: its score is discarded, it is not applied to the reset temporal policy, and no `window_result` event is emitted.
 5. **Continuity Reset Event**: A machine-readable event with reason `insufficient_contiguous_audio` is emitted to the client.
 
 ```json
@@ -170,7 +171,7 @@ Timing anomalies—positive gaps exceeding the configured threshold ($> 0.25\tex
 
 ---
 
-### 4.6 Server Quality Event (`quality_update`)
+## 4.6 Server Quality Event (`quality_update`)
 Emitted when signal quality anomalies or backpressure window drops occur:
 
 ```json
@@ -191,7 +192,7 @@ Emitted when signal quality anomalies or backpressure window drops occur:
 
 ---
 
-### 4.7 Server Window Result Event (`window_result`)
+## 4.7 Server Window Result Event (`window_result`)
 Emitted every 1.0-second hop once a 4.0-second window is evaluated:
 
 #### Eligible Window (Active Speech $\ge 0.8$s)
@@ -202,7 +203,7 @@ Emitted every 1.0-second hop once a 4.0-second window is evaluated:
   "window_index": 4,
   "window_start_sec": 4.0,
   "window_end_sec": 8.0,
-  "speech_seconds": 3.75,
+  "speech_seconds": 3.82,
   "is_eligible": true,
   "synthetic_score": 0.82,
   "uncalibrated_synthetic_score": 0.82,
@@ -216,17 +217,17 @@ Emitted every 1.0-second hop once a 4.0-second window is evaluated:
     "synthetic_score": 0.82,
     "score_is_calibrated": false,
     "calibrated_score": null,
-    "smoothed_score": 0.79,
+    "smoothed_score": 0.80,
     "reason": "sustained_anomaly_elevation",
-    "reason_details": "Elevated to HIGH: 3 of last 3 windows exceeded high threshold (0.65, unvalidated heuristic).",
+    "reason_details": "Elevated to HIGH: 2 of last 3 windows exceeded high threshold (0.65).",
     "window_index": 4,
-    "history_scores": [0.71, 0.76, 0.79]
+    "window_start_sec": 4.0,
+    "window_end_sec": 8.0,
+    "speech_seconds": 3.82,
+    "history_scores": [0.42, 0.78, 0.80]
   }
 }
 ```
-
-> [!NOTE]
-> `calibrated_score` is strictly `null` and `score_is_calibrated` is `false` until an empirical calibrator is fitted and loaded. The threshold `0.65` is an unvalidated heuristic. When scores are low, the decision reason details report: *"Low acoustic anomaly score — does not authenticate speech."*
 
 #### Abstained Window (Active Speech $< 0.8$s)
 ```json
@@ -252,6 +253,9 @@ Emitted every 1.0-second hop once a 4.0-second window is evaluated:
     "reason": "insufficient_speech_duration",
     "reason_details": "Active speech (0.32s) is below required minimum threshold (0.80s). Decision abstained.",
     "window_index": 5,
+    "window_start_sec": 5.0,
+    "window_end_sec": 9.0,
+    "speech_seconds": 0.32,
     "history_scores": [0.71, 0.76, 0.79]
   }
 }
@@ -259,16 +263,14 @@ Emitted every 1.0-second hop once a 4.0-second window is evaluated:
 
 ---
 
-### 4.8 Client Graceful Termination (`stop`)
-The client can terminate the stream gracefully at any time by sending:
+## 4.8 Client Graceful Termination & Finalization (`stop`)
 
-```json
-{
-  "type": "stop"
-}
-```
-
-Server replies with confirmation reporting cumulative generated, evaluated, and dropped counts, then closes the connection with code `1000 (Normal Closure)`:
+When the client requests termination by sending `{"type": "stop"}`:
+1. **Resampler Flush**: The server finalizes the `StreamingSession`, flushing all remaining FIR tail samples from `CanonicalResampler`.
+2. **Scheduler Drain**: Flushed canonical samples are passed into `CanonicalWindowScheduler`. If flush completes a full 64,000-sample window, it is emitted.
+3. **Pre-Stop Drain**: Any newly completed full window is either abstained immediately or dispatched for inference and evaluated before `session_stopped` is sent.
+4. **No Padded Windows**: The server never appends a padded or non-hop-aligned trailing window.
+5. **Stop Acknowledgement**: The server emits `session_stopped` and closes cleanly with code `1000`:
 
 ```json
 {
@@ -277,13 +279,17 @@ Server replies with confirmation reporting cumulative generated, evaluated, and 
   "total_duration_seconds": 24.5,
   "total_windows_evaluated": 18,
   "total_windows_generated": 21,
-  "total_windows_dropped": 3
+  "total_windows_dropped": 3,
+  "status": "success",
+  "final_reason": null
 }
 ```
 
+If the stream finalized with fewer than 64,000 canonical contiguous samples (< 4.0s), `ServerStopAck` indicates `status="insufficient_evidence"` and `final_reason="insufficient_contiguous_audio"`.
+
 ---
 
-### 4.9 Server Error Event (`error`)
+## 4.9 Server Error Event (`error`)
 Emitted prior to closing the connection or when a non-fatal corrupt frame is handled:
 
 ```json

@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import numpy as np
 import torch
-import torchaudio.functional.functional as F
 
 from voiceshield.dsp.exceptions import (
     AudioDecodingError,
@@ -16,9 +14,16 @@ from voiceshield.dsp.exceptions import (
     InvalidAudioValueError,
     UnsupportedAudioError,
 )
+from voiceshield.dsp.resampler import (
+    MAX_SUPPORTED_SAMPLE_RATE as MAX_SUPPORTED_SAMPLE_RATE,
+)
+from voiceshield.dsp.resampler import (
+    MIN_SUPPORTED_SAMPLE_RATE as MIN_SUPPORTED_SAMPLE_RATE,
+)
+from voiceshield.dsp.resampler import (
+    CanonicalResampler,
+)
 
-MIN_SUPPORTED_SAMPLE_RATE = 8000
-MAX_SUPPORTED_SAMPLE_RATE = 192000
 SUPPORTED_PCM_DTYPES = ("int16", "int32", "float32", "float")
 
 
@@ -213,11 +218,9 @@ def compute_raw_frame_count(
 
 
 class StatefulResampler:
-    """Stateful resampler that ingests arbitrary PCM audio frames and resamples to 16 kHz mono.
+    """Stateful audio resampler and channel downmixer providing chunk-boundary invariance.
 
-    Maintains filter history across chunk boundaries, guaranteeing chunk-boundary invariance:
-    streaming audio in small arbitrary chunks produces the identical output sequence as
-    processing the entire audio in a single call (within float32 precision limits).
+    Integrates input PCM decoding and channel downmixing with the single CanonicalResampler.
     """
 
     def __init__(
@@ -238,15 +241,6 @@ class StatefulResampler:
         Raises:
             UnsupportedAudioError: If sample rate, channel count, or dtype is not supported.
         """
-        if orig_sr < MIN_SUPPORTED_SAMPLE_RATE or orig_sr > MAX_SUPPORTED_SAMPLE_RATE:
-            raise UnsupportedAudioError(
-                f"Unsupported source sampling rate: {orig_sr} Hz. "
-                f"Permitted range is {MIN_SUPPORTED_SAMPLE_RATE:,} Hz to {MAX_SUPPORTED_SAMPLE_RATE:,} Hz."
-            )
-        if target_sr <= 0:
-            raise UnsupportedAudioError(
-                f"Target sampling rate must be positive, got target_sr={target_sr}."
-            )
         if channels not in (1, 2):
             raise UnsupportedAudioError(
                 f"Unsupported channel count: {channels}. Permitted channels are 1 or 2."
@@ -256,34 +250,58 @@ class StatefulResampler:
         if dtype_norm not in SUPPORTED_PCM_DTYPES:
             raise UnsupportedAudioError(f"Unsupported PCM encoding: {dtype!r}.")
 
-        self.orig_sr = int(orig_sr)
-        self.target_sr = int(target_sr)
         self.channels = int(channels)
         self.dtype = dtype_norm
 
-        # Rational resampling factors
-        self.gcd = math.gcd(self.orig_sr, self.target_sr)
-        self.in_ratio = self.orig_sr // self.gcd
-        self.out_ratio = self.target_sr // self.gcd
+        self._canonical = CanonicalResampler(orig_sr=orig_sr, target_sr=target_sr)
 
-        if self.orig_sr != self.target_sr:
-            # Precompute bandlimited sinc resampling kernel
-            self.kernel, self.width = F._get_sinc_resample_kernel(
-                self.orig_sr, self.target_sr, self.gcd
-            )
-            # Buffer holds unconsumed input history needed for FIR convolution continuity
-            self.buffer = torch.zeros(self.width, dtype=torch.float32)
-        else:
-            self.kernel = None
-            self.width = 0
-            self.buffer = torch.empty(0, dtype=torch.float32)
+    @property
+    def orig_sr(self) -> int:
+        return self._canonical.orig_sr
+
+    @property
+    def target_sr(self) -> int:
+        return self._canonical.target_sr
+
+    @property
+    def gcd(self) -> int:
+        return self._canonical.gcd
+
+    @property
+    def in_ratio(self) -> int:
+        return self._canonical.in_ratio
+
+    @property
+    def out_ratio(self) -> int:
+        return self._canonical.out_ratio
+
+    @property
+    def kernel(self) -> torch.Tensor | None:
+        return self._canonical.kernel
+
+    @property
+    def width(self) -> int:
+        return self._canonical.width
+
+    @property
+    def buffer(self) -> torch.Tensor:
+        return self._canonical.buffer
+
+    @property
+    def total_source_frames(self) -> int:
+        return self._canonical.total_source_frames
+
+    @property
+    def total_canonical_samples(self) -> int:
+        return self._canonical.total_canonical_samples
+
+    @property
+    def is_flushed(self) -> bool:
+        return self._canonical.is_flushed
 
     def reset(self) -> None:
         """Reset internal filter history and buffer state."""
-        if self.orig_sr != self.target_sr:
-            self.buffer = torch.zeros(self.width, dtype=torch.float32)
-        else:
-            self.buffer = torch.empty(0, dtype=torch.float32)
+        self._canonical.reset()
 
     def _convert_pcm_to_mono_float32(
         self,
@@ -291,52 +309,15 @@ class StatefulResampler:
         channels: int | None = None,
         dtype: str | None = None,
     ) -> torch.Tensor:
-        """Convert raw bytes, NumPy array, or Torch tensor into a 1D float32 mono torch.Tensor.
-
-        Validates byte alignment against complete frame width (bytes_per_sample * channels),
-        decodes little-endian PCM, verifies sample finiteness and range [-1.0, 1.0], and
-        downmixes channels.
-        """
+        """Convert raw bytes, NumPy array, or Torch tensor into a 1D float32 mono torch.Tensor."""
         num_channels = channels or self.channels
         sample_dtype = dtype or self.dtype
         tensor, _ = validate_and_decode_pcm(pcm_data, channels=num_channels, dtype=sample_dtype)
         return tensor
 
     def process_tensor(self, x: torch.Tensor) -> np.ndarray[Any, np.dtype[np.float32]]:
-        """Process validated 1D float32 mono tensor and return resampled 16 kHz mono array.
-
-        Args:
-            x: 1D float32 mono torch.Tensor.
-
-        Returns:
-            1D float32 NumPy array at 16,000 Hz.
-        """
-        if x.numel() == 0:
-            return np.empty(0, dtype=np.float32)
-
-        if self.orig_sr == self.target_sr:
-            return x.numpy()
-
-        assert self.kernel is not None
-        full = torch.cat([self.buffer, x])
-        k_len = self.kernel.shape[-1]
-        if full.shape[0] < k_len:
-            self.buffer = full
-            return np.empty(0, dtype=np.float32)
-
-        num_strides = (full.shape[0] - k_len) // self.in_ratio + 1
-        usable_in_len = (num_strides - 1) * self.in_ratio + k_len
-        to_process = full[:usable_in_len]
-
-        out = torch.nn.functional.conv1d(
-            to_process[None, None, :], self.kernel, stride=self.in_ratio
-        )
-        out_1d = out.transpose(1, 2).reshape(-1)
-
-        consumed = num_strides * self.in_ratio
-        self.buffer = full[consumed:]
-
-        return out_1d.numpy()
+        """Process validated 1D float32 mono tensor and return resampled 16 kHz mono array."""
+        return self._canonical.process(x)
 
     def process(
         self,
@@ -344,15 +325,10 @@ class StatefulResampler:
         channels: int | None = None,
         dtype: str | None = None,
     ) -> np.ndarray[Any, np.dtype[np.float32]]:
-        """Process incoming PCM audio chunk and return resampled 16 kHz mono float32 array.
-
-        Args:
-            pcm_data: Incoming raw bytes, NumPy array, or Torch tensor.
-            channels: Optional channels override.
-            dtype: Optional sample format override.
-
-        Returns:
-            1D float32 NumPy array at 16,000 Hz.
-        """
+        """Process incoming PCM audio chunk and return resampled 16 kHz mono float32 array."""
         x = self._convert_pcm_to_mono_float32(pcm_data, channels=channels, dtype=dtype)
         return self.process_tensor(x)
+
+    def flush(self) -> np.ndarray[Any, np.dtype[np.float32]]:
+        """Flush the resampler at end of stream, returning the exact remaining canonical tail."""
+        return self._canonical.flush()
