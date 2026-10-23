@@ -19,73 +19,19 @@ class ConfigError(Exception):
     """Raised when configuration file loading or validation fails."""
 
 
-def find_default_config_path() -> Path:
-    """Resolve canonical default configuration artifact without inspecting caller CWD.
-
-    Precedence:
-    1. Repository source tree artifact (<repo_root>/configs/default.yaml).
-    2. Packaged resource artifact (voiceshield/config/default.yaml).
-
-    Never inspects the current working directory for implicit default configuration.
-    """
-    # 1. Source-tree canonical location: <repo_root>/src/voiceshield/config/loader.py -> <repo_root>/configs/default.yaml
-    repo_path = Path(__file__).resolve().parents[3] / "configs" / "default.yaml"
-    if repo_path.is_file():
-        return repo_path
-
-    # 2. Packaged wheel/installed resource location: voiceshield/config/default.yaml
-    pkg_path = Path(__file__).resolve().parent / "default.yaml"
-    if pkg_path.is_file():
-        return pkg_path
-
-    # 3. Fallback via importlib.resources for zip/archive imports
+def _parse_and_validate_yaml(raw_text: str, source_description: str) -> VoiceShieldConfig:
+    """Parse YAML string and validate against VoiceShieldConfig schema."""
     try:
-        import importlib.resources as pkg_resources
-
-        traversable = pkg_resources.files("voiceshield.config").joinpath("default.yaml")
-        candidate = Path(str(traversable))
-        if candidate.is_file():
-            return candidate
-    except Exception:
-        pass
-
-    raise ConfigError(
-        f"Canonical default configuration file not found in repository ({repo_path}) "
-        f"or package resources ({pkg_path})."
-    )
-
-
-def load_config(path: str | Path | None = None) -> VoiceShieldConfig:
-    """Load and validate a VoiceShield configuration from a YAML file.
-
-    Args:
-        path: Path to the YAML file. If None, resolves the canonical default config file.
-
-    Returns:
-        Validated VoiceShieldConfig instance.
-
-    Raises:
-        ConfigError: If the file does not exist, YAML syntax is invalid, or schema validation fails.
-    """
-    if path is not None:
-        target_path = Path(path)
-        if not target_path.is_file():
-            raise ConfigError(f"Configuration file not found: {target_path}")
-    else:
-        target_path = find_default_config_path()
-
-    try:
-        with open(target_path, encoding="utf-8") as f:
-            raw_data = yaml.safe_load(f)
+        raw_data = yaml.safe_load(raw_text)
     except yaml.YAMLError as exc:
-        raise ConfigError(f"YAML syntax error while reading {target_path}: {exc}") from exc
+        raise ConfigError(f"YAML syntax error while reading {source_description}: {exc}") from exc
 
     if raw_data is None:
-        raise ConfigError(f"Configuration file {target_path} is empty.")
+        raise ConfigError(f"Configuration in {source_description} is empty.")
 
     if not isinstance(raw_data, dict):
         raise ConfigError(
-            f"Configuration in {target_path} must be a YAML mapping (dictionary), got {type(raw_data).__name__}."
+            f"Configuration in {source_description} must be a YAML mapping (dictionary), got {type(raw_data).__name__}."
         )
 
     try:
@@ -97,7 +43,84 @@ def load_config(path: str | Path | None = None) -> VoiceShieldConfig:
             msg = err["msg"]
             formatted_errors.append(f"  - [{loc}]: {msg}")
         joined = "\n".join(formatted_errors)
-        raise ConfigError(f"Validation failed for configuration {target_path}:\n{joined}") from exc
+        raise ConfigError(
+            f"Validation failed for configuration in {source_description}:\n{joined}"
+        ) from exc
+
+
+def find_default_config_path() -> Path:
+    """Resolve canonical default configuration artifact on the filesystem without inspecting caller CWD.
+
+    Precedence:
+    1. Packaged resource artifact (voiceshield/config/default.yaml).
+    2. Repository source tree artifact (<repo_root>/configs/default.yaml).
+
+    Never inspects the current working directory for implicit default configuration.
+    """
+    # 1. Packaged wheel/installed resource location: voiceshield/config/default.yaml
+    pkg_path = Path(__file__).resolve().parent / "default.yaml"
+    if pkg_path.is_file():
+        return pkg_path
+
+    # 2. Source-tree canonical location: <repo_root>/src/voiceshield/config/loader.py -> <repo_root>/configs/default.yaml
+    repo_path = Path(__file__).resolve().parents[3] / "configs" / "default.yaml"
+    if repo_path.is_file():
+        return repo_path
+
+    raise ConfigError(
+        f"Canonical default configuration file not found on filesystem in package ({pkg_path}) "
+        f"or repository checkout ({repo_path})."
+    )
+
+
+def load_config(path: str | Path | None = None) -> VoiceShieldConfig:
+    """Load and validate a VoiceShield configuration from a YAML file or canonical resource.
+
+    Precedence when path is None:
+    1. Packaged canonical resource (voiceshield.config/default.yaml), including zip/wheel imports.
+    2. Source-tree canonical location (<repo_root>/configs/default.yaml).
+
+    Args:
+        path: Path to the YAML file. If None, resolves the canonical default config resource.
+
+    Returns:
+        Validated VoiceShieldConfig instance.
+
+    Raises:
+        ConfigError: If the file does not exist, YAML syntax is invalid, or schema validation fails.
+    """
+    if path is not None:
+        target_path = Path(path)
+        if not target_path.is_file():
+            raise ConfigError(f"Configuration file not found: {target_path}")
+        return _parse_and_validate_yaml(target_path.read_text(encoding="utf-8"), str(target_path))
+
+    # Precedence 1: Packaged canonical resource via importlib.resources (handles zip/wheel archives and directories)
+    try:
+        import importlib.resources as pkg_resources
+
+        traversable = pkg_resources.files("voiceshield.config").joinpath("default.yaml")
+        if traversable.is_file():
+            raw_text = traversable.read_text(encoding="utf-8")
+            return _parse_and_validate_yaml(raw_text, f"packaged resource ({traversable})")
+    except ConfigError:
+        raise
+    except Exception:
+        pass
+
+    # Package directory relative to __file__
+    pkg_file = Path(__file__).resolve().parent / "default.yaml"
+    if pkg_file.is_file():
+        return _parse_and_validate_yaml(pkg_file.read_text(encoding="utf-8"), str(pkg_file))
+
+    # Precedence 2: Source-tree canonical location
+    repo_path = Path(__file__).resolve().parents[3] / "configs" / "default.yaml"
+    if repo_path.is_file():
+        return _parse_and_validate_yaml(repo_path.read_text(encoding="utf-8"), str(repo_path))
+
+    raise ConfigError(
+        "Canonical default configuration file not found in package resources or repository checkout."
+    )
 
 
 def dump_config(config: VoiceShieldConfig, path: str | Path) -> None:

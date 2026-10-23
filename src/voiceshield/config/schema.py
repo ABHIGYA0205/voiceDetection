@@ -246,8 +246,8 @@ class EvaluationConfig(StrictFrozenConfigModel):
     """Configuration parameters for evaluation and reporting toolkit."""
 
     dcf: DCFConfig = Field(default_factory=DCFConfig)
-    target_tpr_levels: list[float] = Field(
-        default_factory=lambda: [0.90, 0.95, 0.99],
+    target_tpr_levels: tuple[float, ...] = Field(
+        default=(0.90, 0.95, 0.99),
         description="Target TPR levels for evaluating operating FPR.",
     )
     bootstrap_iterations: int = Field(
@@ -265,14 +265,19 @@ class EvaluationConfig(StrictFrozenConfigModel):
     def validate_finite_ci_level(cls, v: float, info: Any) -> float:
         return _check_finite(v, info.field_name)
 
-    @field_validator("target_tpr_levels")
+    @field_validator("target_tpr_levels", mode="before")
     @classmethod
-    def validate_target_tpr_levels(cls, v: list[float]) -> list[float]:
+    def validate_target_tpr_levels(cls, v: Any) -> tuple[float, ...]:
+        if not isinstance(v, (list, tuple)):
+            raise ValueError(f"target_tpr_levels must be a list or tuple, got {type(v).__name__}")
+        levels: list[float] = []
         for i, level in enumerate(v):
-            _check_finite(level, f"target_tpr_levels[{i}]")
-            if level <= 0.0 or level >= 1.0:
-                raise ValueError(f"target_tpr_levels elements must be in (0, 1), got {level}")
-        return v
+            val = float(level)
+            _check_finite(val, f"target_tpr_levels[{i}]")
+            if val <= 0.0 or val >= 1.0:
+                raise ValueError(f"target_tpr_levels elements must be in (0, 1), got {val}")
+            levels.append(val)
+        return tuple(sorted(levels))
 
 
 class VoiceShieldConfig(StrictFrozenConfigModel):

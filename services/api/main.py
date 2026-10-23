@@ -25,6 +25,7 @@ from services.api.routes.stream import router as stream_router
 from voiceshield import __version__
 from voiceshield.config.loader import load_config
 from voiceshield.config.overrides import apply_config_overrides
+from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.core.device import resolve_device_status
 from voiceshield.core.schema import Disclaimers
 from voiceshield.models.aasist_adapter import (
@@ -313,7 +314,9 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     async def readiness_check(request: Request) -> dict[str, Any]:
         """Return model readiness status distinguishing API liveness from detector readiness."""
         detector = getattr(request.app.state, "detector", None)
-        config_hash = getattr(request.app.state, "effective_config_hash", None)
+        stored_hash = getattr(request.app.state, "effective_config_hash", None)
+        effective_cfg = getattr(request.app.state, "effective_config", None)
+
         if detector is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -325,7 +328,37 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
                         or "Detector model is not initialized or checkpoint is missing."
                     ),
                     "is_mock_detector": False,
-                    "config_hash": config_hash,
+                    "config_hash": stored_hash
+                    if isinstance(stored_hash, str) and stored_hash
+                    else None,
+                },
+            )
+
+        config_ok = False
+        if (
+            effective_cfg is not None
+            and isinstance(effective_cfg, VoiceShieldConfig)
+            and isinstance(stored_hash, str)
+            and len(stored_hash) > 0
+        ):
+            try:
+                recomputed_hash = effective_cfg.compute_hash()
+                if recomputed_hash == stored_hash:
+                    config_ok = True
+            except Exception:
+                config_ok = False
+
+        if not config_ok:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "status": "not_ready",
+                    "service": "VoiceShield",
+                    "reason": "Effective configuration unavailable or integrity check failed.",
+                    "is_mock_detector": getattr(request.app.state, "is_mock_detector", False),
+                    "config_hash": stored_hash
+                    if isinstance(stored_hash, str) and stored_hash
+                    else None,
                 },
             )
 
@@ -337,7 +370,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
             "model_loaded": True,
             "is_mock_detector": getattr(request.app.state, "is_mock_detector", False),
             "device": actual_device,
-            "config_hash": config_hash,
+            "config_hash": stored_hash,
         }
 
     return application

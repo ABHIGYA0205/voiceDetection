@@ -88,6 +88,7 @@ def benchmark_audio_decoding_and_resampling(
     sample_rate_in: int = 48000,
     channels: int = 2,
     duration_seconds: float = 4.0,
+    target_sr: int = 16000,
 ) -> StageLatency:
     """Benchmark stage 1: Audio container decoding, stereo mixing, and polyphase resampling."""
     # Create test WAV buffer in memory
@@ -103,13 +104,13 @@ def benchmark_audio_decoding_and_resampling(
     warmup_times: list[float] = []
     for _ in range(warmup):
         t0 = time.perf_counter()
-        _ = load_audio(io.BytesIO(wav_bytes), target_sr=16000)
+        _ = load_audio(io.BytesIO(wav_bytes), target_sr=target_sr)
         warmup_times.append((time.perf_counter() - t0) * 1000.0)
 
     steady_times: list[float] = []
     for _ in range(iterations):
         t0 = time.perf_counter()
-        _ = load_audio(io.BytesIO(wav_bytes), target_sr=16000)
+        _ = load_audio(io.BytesIO(wav_bytes), target_sr=target_sr)
         steady_times.append((time.perf_counter() - t0) * 1000.0)
 
     return _compute_stage_latency(
@@ -128,12 +129,13 @@ def benchmark_feature_extraction(
     warmup: int = 5,
     duration_seconds: float = 4.0,
     sample_rate: int = 16000,
+    energy_threshold: float = 0.015,
 ) -> StageLatency:
     """Benchmark stage 2: VAD speech calculation and deterministic AASIST cyclic padding."""
     num_samples = int(sample_rate * duration_seconds)
     t = np.linspace(0, duration_seconds, num_samples, endpoint=False, dtype=np.float32)
     waveform = (0.5 * np.sin(2 * np.pi * 440.0 * t)).astype(np.float32)
-    vad = EnergyVAD()
+    vad = EnergyVAD(energy_threshold=energy_threshold)
 
     def _run_features() -> torch.Tensor:
         _ = vad.compute_speech_duration(waveform, sample_rate)
@@ -217,9 +219,14 @@ def benchmark_calibration_and_temporal_policy(
     iterations: int = 50,
     warmup: int = 5,
     duration_seconds: float = 4.0,
+    policy_config: TemporalPolicyConfig | None = None,
+    windowing_config: Any = None,
 ) -> StageLatency:
     """Benchmark stage 4: Calibrated likelihood computation and TemporalDecisionPolicy tracking."""
-    policy = TemporalDecisionPolicy(policy_config=TemporalPolicyConfig())
+    policy = TemporalDecisionPolicy(
+        policy_config=policy_config or TemporalPolicyConfig(),
+        windowing_config=windowing_config,
+    )
     mock_score = 0.85
 
     def _run_policy(idx: int) -> Any:
@@ -228,7 +235,7 @@ def benchmark_calibration_and_temporal_policy(
             speech_seconds=3.5,
             window_index=idx,
             window_start_sec=float(idx),
-            window_end_sec=float(idx + 4.0),
+            window_end_sec=float(idx + duration_seconds),
         )
 
     warmup_times: list[float] = []
@@ -260,16 +267,23 @@ def benchmark_end_to_end_window_processing(
     iterations: int = 50,
     warmup: int = 5,
     duration_seconds: float = 4.0,
+    sample_rate: int = 16000,
+    energy_threshold: float = 0.015,
+    policy_config: TemporalPolicyConfig | None = None,
+    windowing_config: Any = None,
 ) -> StageLatency:
-    """Benchmark stage 5: End-to-end processing of a 4-second eligible audio window."""
-    # Raw 4.0-second 48 kHz stereo PCM input (realistic uncompressed mic or stream input)
+    """Benchmark stage 5: End-to-end processing of an eligible audio window."""
+    # Raw duration_seconds stereo PCM input (realistic uncompressed mic or stream input)
     num_samples_in = int(48000 * duration_seconds)
     t = np.linspace(0, duration_seconds, num_samples_in, endpoint=False, dtype=np.float32)
     sig = 0.5 * np.sin(2 * np.pi * 440.0 * t)
     stereo_pcm = np.column_stack([sig, sig]).astype(np.float32)
 
-    vad = EnergyVAD()
-    policy = TemporalDecisionPolicy(policy_config=TemporalPolicyConfig())
+    vad = EnergyVAD(energy_threshold=energy_threshold)
+    policy = TemporalDecisionPolicy(
+        policy_config=policy_config or TemporalPolicyConfig(),
+        windowing_config=windowing_config,
+    )
 
     raw_model: Any = getattr(detector, "model", None)
     if raw_model is not None:
@@ -277,9 +291,11 @@ def benchmark_end_to_end_window_processing(
         raw_model.to(device)
 
     def _run_e2e(step: int) -> Any:
-        resampler = StatefulResampler(orig_sr=48000, target_sr=16000, channels=2, dtype="float32")
+        resampler = StatefulResampler(
+            orig_sr=48000, target_sr=sample_rate, channels=2, dtype="float32"
+        )
         resampled = resampler.process(stereo_pcm)
-        speech_sec = vad.compute_speech_duration(resampled, 16000)
+        speech_sec = vad.compute_speech_duration(resampled, sample_rate)
         padded = pad_for_aasist(resampled, max_len=64600)
         batch = padded.unsqueeze(0).to(device)
 
@@ -300,7 +316,7 @@ def benchmark_end_to_end_window_processing(
             speech_seconds=speech_sec,
             window_index=step,
             window_start_sec=float(step),
-            window_end_sec=float(step + 4.0),
+            window_end_sec=float(step + duration_seconds),
         )
 
     warmup_times: list[float] = []

@@ -43,10 +43,16 @@ def parse_args() -> argparse.Namespace:
         help="Directory where markdown and JSON reports will be written.",
     )
     parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Optional path to explicit VoiceShield YAML configuration file.",
+    )
+    parser.add_argument(
         "--checkpoint",
         type=str,
-        default="models/weights/AASIST-L.pth",
-        help="Path to official AASIST-L checkpoint weights.",
+        default=None,
+        help="Optional path to AASIST-L checkpoint weights override.",
     )
     return parser.parse_args()
 
@@ -62,6 +68,7 @@ def main() -> None:
     print("Notice: Defined as an engineering target, not an achieved claim until measured.\n")
 
     runner = BenchmarkRunner(
+        config_path=args.config,
         checkpoint_path=args.checkpoint,
         iterations=args.iterations,
         warmup=args.warmup,

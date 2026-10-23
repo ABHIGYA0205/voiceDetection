@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from voiceshield.benchmark.schema import SoakSample, SoakTestReport
+from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.models.aasist_adapter import pad_for_aasist
 from voiceshield.models.base import BaseDetector
 from voiceshield.streaming.session import StreamingSession
@@ -42,6 +43,7 @@ def run_streaming_soak_test(
     sample_interval_seconds: float = 15.0,
     frame_duration_ms: float = 50.0,
     accelerated: bool = True,
+    config: VoiceShieldConfig | None = None,
 ) -> SoakTestReport:
     """Execute streaming soak test over declared duration to measure memory stability and queue backlog.
 
@@ -52,6 +54,7 @@ def run_streaming_soak_test(
         sample_interval_seconds: Cadence to capture timeseries memory/backlog snapshots.
         frame_duration_ms: Duration of each ingested PCM chunk in milliseconds.
         accelerated: If True, executes without artificial wall-clock sleeps to test high-throughput soaking.
+        config: Optional effective VoiceShieldConfig to initialize StreamingSession.
 
     Returns:
         Populated SoakTestReport.
@@ -62,7 +65,7 @@ def run_streaming_soak_test(
         device.type,
     )
 
-    session = StreamingSession()
+    session = StreamingSession(config=config)
     raw_model: Any = getattr(detector, "model", None)
     if raw_model is not None:
         raw_model.eval()

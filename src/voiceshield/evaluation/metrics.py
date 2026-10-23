@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from enum import StrEnum
 from typing import Any
 
@@ -274,7 +275,7 @@ def compute_eer_interpolated(
 def compute_fpr_at_target_tprs(
     y_true: np.ndarray[Any, np.dtype[np.int_]],
     scores_higher_spoof: np.ndarray[Any, np.dtype[np.float64]],
-    target_tprs: list[float],
+    target_tprs: Sequence[float],
 ) -> dict[str, float | None]:
     """Measure False Positive Rate at target True Positive Rates (e.g. 0.90, 0.95, 0.99)."""
     if len(np.unique(y_true)) < 2:
@@ -403,7 +404,7 @@ def compute_all_curve_metrics(
     y_true: np.ndarray[Any, np.dtype[np.int_]],
     scores_higher_spoof: np.ndarray[Any, np.dtype[np.float64]],
     raw_scores: np.ndarray[Any, np.dtype[np.float64]] | None = None,
-    target_tprs: list[float] | None = None,
+    target_tprs: Sequence[float] | None = None,
     c_miss: float = 1.0,
     c_fa: float = 10.0,
     p_target: float = 0.05,

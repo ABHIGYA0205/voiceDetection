@@ -309,6 +309,11 @@ def evaluate_audio(
         windowing_config=effective_window_cfg,
     )
 
+    error_metadata: dict[str, Any] = {
+        "config_hash": effective_config_hash,
+        "effective_threshold": effective_threshold,
+    }
+
     # 3. Load audio via canonical preprocessor with strict amplitude validation (no silent normalization)
     try:
         preprocessed = load_audio(
@@ -322,8 +327,9 @@ def evaluate_audio(
             file_path=path_str,
             status="error",
             error_message=str(exc),
+            effective_threshold=effective_threshold,
             config_hash=effective_config_hash,
-            metadata={"config_hash": effective_config_hash},
+            metadata=error_metadata,
             disclaimers=Disclaimers(),
         )
     except Exception as exc:
@@ -331,8 +337,9 @@ def evaluate_audio(
             file_path=path_str,
             status="error",
             error_message=f"Unexpected error loading audio: {exc}",
+            effective_threshold=effective_threshold,
             config_hash=effective_config_hash,
-            metadata={"config_hash": effective_config_hash},
+            metadata=error_metadata,
             disclaimers=Disclaimers(),
         )
 
@@ -350,8 +357,9 @@ def evaluate_audio(
             duration_seconds=round(metadata.duration_seconds, 3),
             original_sample_rate=metadata.original_sample_rate,
             original_channels=metadata.original_channels,
+            effective_threshold=effective_threshold,
             config_hash=effective_config_hash,
-            metadata={"config_hash": effective_config_hash},
+            metadata=error_metadata,
             disclaimers=Disclaimers(),
         )
 

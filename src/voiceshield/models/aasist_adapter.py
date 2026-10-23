@@ -199,10 +199,10 @@ class AASISTLDetector(BaseDetector):
             raise ValueError(f"batch must be 2D of shape (batch_size, samples), got {batch.shape}.")
 
         batch_size = batch.shape[0]
-        # Pad each item in batch to target length if needed
+        # Detach and place each item on CPU, padding or cropping to target length if needed
         processed_items: list[torch.Tensor] = []
         for i in range(batch_size):
-            item = batch[i]
+            item = batch[i].detach().to("cpu", dtype=torch.float32)
             if item.shape[0] != self.target_length:
                 item = pad_for_aasist(item, max_len=self.target_length)
             processed_items.append(item)

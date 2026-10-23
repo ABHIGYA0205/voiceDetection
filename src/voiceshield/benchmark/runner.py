@@ -89,13 +89,14 @@ class BenchmarkRunner:
     def __init__(
         self,
         config: VoiceShieldConfig | None = None,
+        config_path: str | Path | None = None,
         checkpoint_path: str | Path | None = None,
         iterations: int = 50,
         warmup: int = 5,
         devices: list[str] | None = None,
         soak_duration_seconds: float = 0.0,
     ) -> None:
-        base = config or load_config(None)
+        base = config or load_config(config_path)
         if checkpoint_path is not None:
             self.config = apply_config_overrides(base, checkpoint_path=str(checkpoint_path))
         else:
@@ -117,7 +118,12 @@ class BenchmarkRunner:
             logger.info(
                 "Loaded official AASIST-L checkpoint: %s (SHA-256: %s)", self.checkpoint_path, sha
             )
-            detector = AASISTLDetector(checkpoint_path=self.checkpoint_path)
+            detector = AASISTLDetector(
+                checkpoint_path=self.checkpoint_path,
+                threshold=self.config.temporal_policy.threshold_high,
+                preferred_device=self.config.model.device_preferred,
+                fallback_to_cpu=self.config.model.fallback_to_cpu,
+            )
             return detector, False, sha
 
         logger.warning(
@@ -125,7 +131,12 @@ class BenchmarkRunner:
             self.checkpoint_path,
         )
         mock_raw = AASISTModel(AASIST_L_DEFAULT_CONFIG)  # type: ignore[no-untyped-call]
-        detector = AASISTLDetector(_instantiated_model=mock_raw)
+        detector = AASISTLDetector(
+            _instantiated_model=mock_raw,
+            threshold=self.config.temporal_policy.threshold_high,
+            preferred_device=self.config.model.device_preferred,
+            fallback_to_cpu=self.config.model.fallback_to_cpu,
+        )
         return detector, True, None
 
     def run_suite(self) -> BenchmarkSuiteReport:
@@ -152,6 +163,12 @@ class BenchmarkRunner:
             is_mock_weights=is_mock,
         )
 
+        sample_rate = self.config.audio.sample_rate
+        window_seconds = self.config.windowing.window_seconds
+        energy_threshold = self.config.windowing.energy_threshold
+        policy_cfg = self.config.temporal_policy
+        windowing_cfg = self.config.windowing
+
         # 1. Run CPU Stages
         stages_cpu: dict[str, StageLatency] = {}
         cpu_dev = torch.device("cpu")
@@ -160,10 +177,17 @@ class BenchmarkRunner:
             "Executing CPU stage benchmarks (warmup=%d, steady=%d)...", self.warmup, self.iterations
         )
         stages_cpu["audio_decoding"] = benchmark_audio_decoding_and_resampling(
-            iterations=self.iterations, warmup=self.warmup
+            iterations=self.iterations,
+            warmup=self.warmup,
+            duration_seconds=window_seconds,
+            target_sr=sample_rate,
         )
         stages_cpu["feature_extraction"] = benchmark_feature_extraction(
-            iterations=self.iterations, warmup=self.warmup
+            iterations=self.iterations,
+            warmup=self.warmup,
+            duration_seconds=window_seconds,
+            sample_rate=sample_rate,
+            energy_threshold=energy_threshold,
         )
         stages_cpu["model_inference"] = benchmark_model_inference(
             detector=detector,
@@ -171,12 +195,25 @@ class BenchmarkRunner:
             batch_size=1,
             iterations=self.iterations,
             warmup=self.warmup,
+            duration_seconds=window_seconds,
         )
         stages_cpu["calibration_and_policy"] = benchmark_calibration_and_temporal_policy(
-            iterations=self.iterations, warmup=self.warmup
+            iterations=self.iterations,
+            warmup=self.warmup,
+            duration_seconds=window_seconds,
+            policy_config=policy_cfg,
+            windowing_config=windowing_cfg,
         )
         stages_cpu["end_to_end"] = benchmark_end_to_end_window_processing(
-            detector=detector, device=cpu_dev, iterations=self.iterations, warmup=self.warmup
+            detector=detector,
+            device=cpu_dev,
+            iterations=self.iterations,
+            warmup=self.warmup,
+            duration_seconds=window_seconds,
+            sample_rate=sample_rate,
+            energy_threshold=energy_threshold,
+            policy_config=policy_cfg,
+            windowing_config=windowing_cfg,
         )
 
         # 2. Run MPS Stages (if available and requested)
@@ -197,10 +234,19 @@ class BenchmarkRunner:
                 batch_size=1,
                 iterations=self.iterations,
                 warmup=self.warmup,
+                duration_seconds=window_seconds,
             )
             stages_mps["calibration_and_policy"] = stages_cpu["calibration_and_policy"]
             stages_mps["end_to_end"] = benchmark_end_to_end_window_processing(
-                detector=detector, device=mps_dev, iterations=self.iterations, warmup=self.warmup
+                detector=detector,
+                device=mps_dev,
+                iterations=self.iterations,
+                warmup=self.warmup,
+                duration_seconds=window_seconds,
+                sample_rate=sample_rate,
+                energy_threshold=energy_threshold,
+                policy_config=policy_cfg,
+                windowing_config=windowing_cfg,
             )
 
             # Compute speedup factors (CPU p50 / MPS p50)
@@ -240,14 +286,21 @@ class BenchmarkRunner:
         # 4. Optional Streaming Soak Test
         soak_report: SoakTestReport | None = None
         if self.soak_duration > 0:
-            target_dev = torch.device("mps") if env.mps_available else cpu_dev
-            logger.info("Executing streaming soak test for %.1f seconds...", self.soak_duration)
+            target_dev = (
+                torch.device("mps") if ("mps" in self.devices and env.mps_available) else cpu_dev
+            )
+            logger.info(
+                "Executing streaming soak test for %.1f seconds on %s...",
+                self.soak_duration,
+                target_dev.type,
+            )
             sample_interval = max(1.0, min(15.0, self.soak_duration / 20.0))
             soak_report = run_streaming_soak_test(
                 detector=detector,
                 device=target_dev,
                 duration_seconds=self.soak_duration,
                 sample_interval_seconds=sample_interval,
+                config=self.config,
             )
 
         return BenchmarkSuiteReport(
@@ -296,7 +349,7 @@ class BenchmarkRunner:
         lines.append("| Provenance Field | Value |")
         lines.append("| :--- | :--- |")
         lines.append(f"| **Model Architecture** | `{report.provenance.model_id}` |")
-        lines.append(f"| **Config Hash (SHA-256)** | `{report.provenance.config_hash}` |")
+        lines.append(f"| **Effective Canonical Config Hash** | `{report.provenance.config_hash}` |")
         lines.append(
             f"| **Checkpoint Path** | `{report.provenance.checkpoint_path or 'MOCK_WEIGHTS (NONE)'}` |"
         )
@@ -313,14 +366,21 @@ class BenchmarkRunner:
             f"| **Configured Device Preference** | `{self.config.model.device_preferred}` |"
         )
         lines.append(
-            f"| **Evaluated Devices Matrix** | `{', '.join(self.devices)}` (cross-device benchmark suite) |"
+            f"| **Configured Decision Threshold** | `{self.config.temporal_policy.threshold_high}` |"
         )
+        lines.append(
+            f"| **Evaluated Devices Matrix** | `{', '.join(self.devices)}` (suite parameter, not in config) |"
+        )
+        lines.append(
+            f"| **Benchmark Iterations** | `{self.iterations}` (warmup: `{self.warmup}`) |"
+        )
+        lines.append(f"| **Streaming Soak Duration** | `{self.soak_duration}s` |")
         lines.append("")
 
         lines.append("## 2. Pipeline Stage Latency Breakdown (Batch Size 1)")
         lines.append("")
         lines.append(
-            "All metrics measure steady-state execution over 4.0-second audio windows, with initial warm-up recorded separately."
+            f"All metrics measure steady-state execution over {self.config.windowing.window_seconds:.1f}-second audio windows, with initial warm-up recorded separately."
         )
         lines.append("")
         lines.append(
@@ -363,9 +423,17 @@ class BenchmarkRunner:
         prof = report.profiling_summary
         lines.append(f"- **Primary Execution Device**: `{prof.get('primary_device')}`")
         lines.append(f"- **End-to-End Window Latency (p50)**: `{prof.get('end_to_end_p50_ms')} ms`")
-        lines.append(
-            f"- **Real-Time Factor (RTF)**: `{report.stages_cpu['end_to_end'].real_time_factor}` (CPU) / `{(report.stages_mps['end_to_end'].real_time_factor if report.stages_mps else 'N/A')}` (MPS)"
+        cpu_rtf = (
+            f"{report.stages_cpu['end_to_end'].real_time_factor}"
+            if "end_to_end" in report.stages_cpu
+            else "N/A"
         )
+        mps_rtf = (
+            f"{report.stages_mps['end_to_end'].real_time_factor}"
+            if (report.stages_mps and "end_to_end" in report.stages_mps)
+            else "N/A"
+        )
+        lines.append(f"- **Real-Time Factor (RTF)**: `{cpu_rtf}` (CPU) / `{mps_rtf}` (MPS)")
         lines.append("")
         lines.append("### Stage Proportion Breakdown:")
         pcts = prof.get("stage_percentages", {})
