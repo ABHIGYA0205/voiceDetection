@@ -13,13 +13,16 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
 from services.api.inference_worker import InferenceWorker, InferenceWorkerClosedError
+from services.api.model_integrity import (
+    ModelIntegrityError,
+    validate_runtime_model_provenance,
+)
 from services.api.resource_admission import (
     AtomicAdmissionController,
 )
 from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.core.schema import Disclaimers
 from voiceshield.dsp.exceptions import AudioPreprocessingError
-from voiceshield.models.base import BaseDetector
 from voiceshield.streaming.policy import ReasonCode
 from voiceshield.streaming.session import StreamingSession, WindowForInference
 
@@ -221,7 +224,28 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
         )
         return
 
-    # 2. Atomic Session Admission Reservation
+    # 2. Model detector readiness and runtime provenance integrity check
+    try:
+        prov = validate_runtime_model_provenance(app.state)
+    except ModelIntegrityError as exc:
+        logger.warning(
+            "Rejected WebSocket connection: detector not ready / invalid provenance: %s",
+            exc.message,
+        )
+        await websocket.accept()
+        await websocket.send_json(
+            ServerErrorEvent(
+                error_code="DETECTOR_NOT_READY",
+                message=exc.message,
+            ).model_dump()
+        )
+        await websocket.close(
+            code=status.WS_1011_INTERNAL_ERROR,
+            reason="Detector model not initialized or provenance invalid.",
+        )
+        return
+
+    # 3. Atomic Session Admission Reservation
     session_id = str(uuid.uuid4())
     token = session_id
 
@@ -415,26 +439,8 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
             if custom_duration is not None:
                 max_stream_duration = float(custom_duration)
 
-        # 4. Check model detector readiness
-        detector: BaseDetector | None = getattr(app.state, "detector", None)
-        if detector is None:
-            load_error = getattr(
-                app.state,
-                "model_load_error",
-                "VoiceShield detector model is not initialized or checkpoint is missing.",
-            )
-            logger.warning("Rejected WebSocket stream: detector not initialized: %s", load_error)
-            await websocket.send_json(
-                ServerErrorEvent(
-                    error_code="DETECTOR_NOT_READY",
-                    message=load_error,
-                ).model_dump()
-            )
-            await websocket.close(
-                code=status.WS_1011_INTERNAL_ERROR,
-                reason="Detector model not initialized.",
-            )
-            return
+        # 5. Check inference worker readiness before session acknowledgement
+        detector = app.state.detector
 
         # Check inference worker readiness before session acknowledgement
         worker: InferenceWorker | None = getattr(app.state, "inference_worker", None)
@@ -492,9 +498,6 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
             idle_timeout,
         )
 
-        is_mock = getattr(app.state, "is_mock_detector", False)
-        prov = getattr(detector, "provenance", None)
-
         # 6. Send start acknowledgement
         start_ack = ServerStartAck(
             session_id=session_id,
@@ -507,13 +510,13 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
             max_frame_bytes=max_frame_bytes,
             max_stream_duration_seconds=max_stream_duration,
             idle_timeout_seconds=idle_timeout,
-            is_mock_detector=is_mock,
+            is_mock_detector=prov.is_mock,
             config_hash=effective_config_hash,
-            model_id=prov.model_id if prov is not None else None,
-            provenance_status=prov.provenance_status if prov is not None else None,
-            checkpoint_verified=prov.checkpoint_verified if prov is not None else False,
-            checkpoint_sha256=prov.checkpoint_sha256 if prov is not None else None,
-            model_provenance=prov.model_dump() if prov is not None else None,
+            model_id=prov.model_id,
+            provenance_status=prov.provenance_status,
+            checkpoint_verified=prov.checkpoint_verified,
+            checkpoint_sha256=prov.checkpoint_sha256,
+            model_provenance=prov.model_dump(),
         )
         await websocket.send_json(start_ack.model_dump())
 

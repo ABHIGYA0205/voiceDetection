@@ -20,6 +20,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import numpy as np
@@ -90,8 +91,8 @@ def test_section_a_registry_exact_values() -> None:
     )
     assert entry.checkpoint_size_bytes == 426428
     assert entry.parameter_count == 85306
-    assert entry.source_license_spdx == "MIT"
-    assert "VoiceShield does not independently assert checkpoint redistribution rights" in (
+    assert "The upstream source repository is MIT licensed" in (entry.checkpoint_rights_note or "")
+    assert "obtain checkpoint bytes from the pinned upstream source" in (
         entry.checkpoint_rights_note or ""
     )
 
@@ -113,6 +114,21 @@ def test_section_a_registry_immutability() -> None:
 
     with pytest.raises(TypeError):
         OFFICIAL_MODEL_REGISTRY["fake/model"] = entry  # type: ignore[index]
+
+
+def test_section_a_registry_no_mutable_backing_dict() -> None:
+    """A: Prove there is no mutable backing dictionary exposed that can mutate OFFICIAL_MODEL_REGISTRY."""
+    import voiceshield.models.registry as reg_mod
+
+    assert not hasattr(reg_mod, "_OFFICIAL_REGISTRY")
+    for _attr_name, attr_val in vars(reg_mod).items():
+        if isinstance(attr_val, dict):
+            assert "clovaai/aasist-l" not in attr_val
+
+    with pytest.raises(TypeError):
+        del OFFICIAL_MODEL_REGISTRY["clovaai/aasist-l"]  # type: ignore[attr-defined]
+
+    assert get_official_registry_entry("clovaai/aasist-l").model_id == "clovaai/aasist-l"
 
 
 def test_section_a_registry_unknown_id_fails() -> None:
@@ -185,6 +201,116 @@ def test_section_b_env_var_cannot_bypass_registry(tmp_path: Path) -> None:
         with pytest.raises(CheckpointIntegrityError) as exc_info:
             AASISTLDetector(checkpoint_path=ckpt_path, model_id="clovaai/aasist-l")
         assert "Official AASIST-L checkpoint SHA-256 mismatch" in str(exc_info.value)
+
+
+def test_section_b_provenance_truth_table_invariants_rejected() -> None:
+    """B: Prove contradictory ModelProvenance permutations are rejected with ValueError."""
+    from voiceshield.models.provenance import ModelProvenance
+
+    # 1. official_verified with checkpoint_verified=False
+    with pytest.raises(ValueError, match="checkpoint_verified=True"):
+        ModelProvenance(
+            model_id="clovaai/aasist-l",
+            architecture="aasist_l",
+            provenance_status="official_verified",
+            checkpoint_verified=False,
+            checkpoint_sha256=OFFICIAL_AASIST_L.checkpoint_sha256,
+            expected_checkpoint_sha256=OFFICIAL_AASIST_L.checkpoint_sha256,
+            upstream_repository=OFFICIAL_AASIST_L.upstream_repository,
+            upstream_commit=OFFICIAL_AASIST_L.upstream_commit,
+            parameter_count=85306,
+            checkpoint_size_bytes=426428,
+        )
+
+    # 2. official_verified with is_mock=True
+    with pytest.raises(ValueError, match="is_mock=False"):
+        ModelProvenance(
+            model_id="clovaai/aasist-l",
+            architecture="aasist_l",
+            provenance_status="official_verified",
+            checkpoint_verified=True,
+            is_mock=True,
+            checkpoint_sha256=OFFICIAL_AASIST_L.checkpoint_sha256,
+            expected_checkpoint_sha256=OFFICIAL_AASIST_L.checkpoint_sha256,
+            upstream_repository=OFFICIAL_AASIST_L.upstream_repository,
+            upstream_commit=OFFICIAL_AASIST_L.upstream_commit,
+            parameter_count=85306,
+            checkpoint_size_bytes=426428,
+        )
+
+    # 3. official_verified with None or mismatching SHA
+    with pytest.raises(ValueError):
+        ModelProvenance(
+            model_id="clovaai/aasist-l",
+            architecture="aasist_l",
+            provenance_status="official_verified",
+            checkpoint_verified=True,
+            checkpoint_sha256="0" * 64,
+            expected_checkpoint_sha256=OFFICIAL_AASIST_L.checkpoint_sha256,
+            upstream_repository=OFFICIAL_AASIST_L.upstream_repository,
+            upstream_commit=OFFICIAL_AASIST_L.upstream_commit,
+            parameter_count=85306,
+            checkpoint_size_bytes=426428,
+        )
+
+    # 4. official_verified with parameter count mismatch
+    with pytest.raises(ValueError, match="parameter_count"):
+        ModelProvenance(
+            model_id="clovaai/aasist-l",
+            architecture="aasist_l",
+            provenance_status="official_verified",
+            checkpoint_verified=True,
+            checkpoint_sha256=OFFICIAL_AASIST_L.checkpoint_sha256,
+            expected_checkpoint_sha256=OFFICIAL_AASIST_L.checkpoint_sha256,
+            upstream_repository=OFFICIAL_AASIST_L.upstream_repository,
+            upstream_commit=OFFICIAL_AASIST_L.upstream_commit,
+            parameter_count=1,
+            checkpoint_size_bytes=426428,
+        )
+
+    # 5. custom_unverified with checkpoint_verified=True
+    with pytest.raises(ValueError, match="checkpoint_verified=False"):
+        ModelProvenance(
+            model_id="custom/aasist-l",
+            architecture="aasist_l",
+            provenance_status="custom_unverified",
+            checkpoint_verified=True,
+            checkpoint_sha256="0" * 64,
+            parameter_count=85306,
+        )
+
+    # 6. custom_unverified with expected_checkpoint_sha256 attached
+    with pytest.raises(ValueError):
+        ModelProvenance(
+            model_id="custom/aasist-l",
+            architecture="aasist_l",
+            provenance_status="custom_unverified",
+            checkpoint_verified=False,
+            checkpoint_sha256="0" * 64,
+            expected_checkpoint_sha256="0" * 64,
+            parameter_count=85306,
+        )
+
+    # 7. mock with is_mock=False or with checkpoint_sha256
+    with pytest.raises(ValueError, match="is_mock=True"):
+        ModelProvenance(
+            model_id="mock/aasist-l",
+            architecture="aasist_l",
+            provenance_status="mock",
+            checkpoint_verified=False,
+            is_mock=False,
+            parameter_count=85306,
+        )
+    with pytest.raises(ValueError):
+        ModelProvenance(
+            model_id="mock/aasist-l",
+            architecture="aasist_l",
+            provenance_status="mock",
+            checkpoint_verified=False,
+            is_mock=True,
+            checkpoint_sha256="0" * 64,
+            parameter_count=85306,
+        )
 
 
 # ==============================================================================
@@ -280,6 +406,50 @@ def test_section_e_official_with_altered_config_rejected(tmp_path: Path) -> None
         )
 
 
+def test_section_d_canonical_config_protection_and_temperature_rejection() -> None:
+    """D: Mutating AASIST_L_DEFAULT_CONFIG does not affect canonical config; temperatures change is rejected."""
+    from voiceshield.models.aasist_adapter import (
+        AASIST_L_DEFAULT_CONFIG,
+        get_canonical_aasist_l_config,
+    )
+
+    orig_temp = list(AASIST_L_DEFAULT_CONFIG["temperatures"])
+    # Mutate public dictionary
+    AASIST_L_DEFAULT_CONFIG["temperatures"][0] = 999.0
+    AASIST_L_DEFAULT_CONFIG["nb_samp"] = 12345
+
+    # Fresh canonical copy must remain intact
+    fresh = get_canonical_aasist_l_config()
+    assert fresh["temperatures"] == orig_temp
+    assert fresh["nb_samp"] == 64600
+
+    # Restore public dict for hygiene
+    AASIST_L_DEFAULT_CONFIG["temperatures"] = orig_temp
+    AASIST_L_DEFAULT_CONFIG["nb_samp"] = 64600
+
+    # Altered temperatures (same parameter count!) must be rejected in official mode before checkpoint reading
+    altered_temps_config = get_canonical_aasist_l_config()
+    altered_temps_config["temperatures"] = [1.0, 1.0, 50.0, 50.0]
+
+    with pytest.raises(CheckpointIntegrityError, match="Noncanonical architecture configuration"):
+        AASISTLDetector(
+            checkpoint_path="nonexistent.pth",
+            model_id="clovaai/aasist-l",
+            model_config=altered_temps_config,
+        )
+
+    # Altered nb_samp must be rejected in official mode before checkpoint reading
+    altered_samp_config = get_canonical_aasist_l_config()
+    altered_samp_config["nb_samp"] = 64000
+
+    with pytest.raises(CheckpointIntegrityError, match="Noncanonical architecture configuration"):
+        AASISTLDetector(
+            checkpoint_path="nonexistent.pth",
+            model_id="clovaai/aasist-l",
+            model_config=altered_samp_config,
+        )
+
+
 # ==============================================================================
 # F. API Tests
 # ==============================================================================
@@ -363,6 +533,118 @@ def test_section_f_api_mock_mode_readiness() -> None:
             assert data["provenance_status"] == "mock"
             assert data["checkpoint_verified"] is False
             assert data["is_mock_detector"] is True
+
+
+def test_section_f_api_untyped_or_mismatched_provenance_fails_closed() -> None:
+    """F: API fails closed if detector has no provenance, plain dict, or mismatched state."""
+    from voiceshield.models.base import BaseDetector, DetectorOutput
+    from voiceshield.models.provenance import ModelProvenance
+
+    app = create_app()
+
+    class FakeDetectorNoProv(BaseDetector):
+        device = torch.device("cpu")
+        provenance = None
+
+        def predict(
+            self, audio: np.ndarray[Any, np.dtype[np.float32]] | torch.Tensor
+        ) -> DetectorOutput:
+            return DetectorOutput.from_scores(
+                raw_logits=(0.0, 0.0),
+                bonafide_score=0.5,
+                synthetic_score=0.5,
+                is_synthetic_suspected=False,
+                input_samples=16000,
+                device_used="cpu",
+                model_id="clovaai/aasist-l",
+            )
+
+        def predict_batch(self, batch: torch.Tensor) -> list[DetectorOutput]:
+            return []
+
+    with TestClient(app) as client:
+        app.state.detector = FakeDetectorNoProv()
+        r = client.get("/ready")
+        assert r.status_code == 503
+        assert "provenance is missing, untyped, or invalid" in r.json()["detail"]["reason"]
+
+        r_file = client.post(
+            "/api/v1/analyze/file",
+            files={"file": ("test.wav", io.BytesIO(_make_dummy_wav(4.0)), "audio/wav")},
+        )
+        assert r_file.status_code == 503
+
+        with client.websocket_connect("/api/v1/stream") as ws:
+            ws.send_text('{"type":"start","sample_rate":16000,"channels":1,"pcm_encoding":"int16"}')
+            err_event = ws.receive_json()
+            assert err_event["type"] == "error"
+            assert err_event["error_code"] == "DETECTOR_NOT_READY"
+
+    # Detector with plain dict provenance
+    class FakeDetectorDictProv(BaseDetector):
+        device = torch.device("cpu")
+        provenance = {"model_id": "clovaai/aasist-l", "provenance_status": "official_verified"}
+
+        def predict(
+            self, audio: np.ndarray[Any, np.dtype[np.float32]] | torch.Tensor
+        ) -> DetectorOutput:
+            return DetectorOutput.from_scores(
+                raw_logits=(0.0, 0.0),
+                bonafide_score=0.5,
+                synthetic_score=0.5,
+                is_synthetic_suspected=False,
+                input_samples=16000,
+                device_used="cpu",
+                model_id="clovaai/aasist-l",
+            )
+
+        def predict_batch(self, batch: torch.Tensor) -> list[DetectorOutput]:
+            return []
+
+    with TestClient(app) as client:
+        app.state.detector = FakeDetectorDictProv()
+        r = client.get("/ready")
+        assert r.status_code == 503
+
+    # Non-mock app state with mock provenance
+    mock_prov = ModelProvenance(
+        model_id="mock/aasist-l",
+        architecture="aasist_l",
+        provenance_status="mock",
+        checkpoint_verified=False,
+        is_mock=True,
+        parameter_count=85306,
+    )
+
+    class FakeDetectorMockProv(BaseDetector):
+        device = torch.device("cpu")
+        provenance = mock_prov
+
+        def predict(
+            self, audio: np.ndarray[Any, np.dtype[np.float32]] | torch.Tensor
+        ) -> DetectorOutput:
+            return DetectorOutput.from_scores(
+                raw_logits=(0.0, 0.0),
+                bonafide_score=0.5,
+                synthetic_score=0.5,
+                is_synthetic_suspected=False,
+                input_samples=16000,
+                device_used="cpu",
+                model_id="mock/aasist-l",
+            )
+
+        def predict_batch(self, batch: torch.Tensor) -> list[DetectorOutput]:
+            return []
+
+    with TestClient(app) as client:
+        app.state.detector = FakeDetectorMockProv()
+        app.state.is_mock_detector = False
+        r = client.get("/ready")
+        assert r.status_code == 503
+        assert (
+            "Non-mock runtime state cannot accept mock model provenance"
+            in r.json()["detail"]["reason"]
+        )
 
 
 # ==============================================================================
@@ -474,6 +756,40 @@ def test_section_h_benchmark_explicit_mock_mode() -> None:
     assert prov.is_mock_weights is True
 
 
+def test_section_h_benchmark_cli_clean_failure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """H: Benchmark CLI main() returns 1 with concise stderr message, no traceback, and creates no reports."""
+    from voiceshield.benchmark.cli import main as bm_main
+
+    wrong_ckpt = tmp_path / "wrong.pth"
+    _create_compatible_random_checkpoint(wrong_ckpt)
+    report_dir = tmp_path / "reports"
+
+    ret = bm_main(
+        [
+            "--checkpoint",
+            str(wrong_ckpt),
+            "--output-dir",
+            str(report_dir),
+            "--devices",
+            "cpu",
+            "--iterations",
+            "1",
+            "--warmup",
+            "0",
+            "--soak-duration",
+            "0",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert ret == 1
+    assert "Official AASIST-L checkpoint SHA-256 mismatch" in captured.err
+    assert "Traceback (most recent call last):" not in captured.err
+    assert not report_dir.exists()
+
+
 # ==============================================================================
 # I. Reproduction Script Tests
 # ==============================================================================
@@ -493,6 +809,37 @@ def test_section_i_reproduction_script_halts_on_wrong_checkpoint(
 
     assert exit_code != 0
     assert "HALTING: Checkpoint SHA-256 integrity verification failed" in captured.err
+
+
+def test_section_i_reproduction_report_template_facts() -> None:
+    """I: Reproduction report template renders with exact registry metadata and no obsolete facts."""
+    template_path = Path("reports/templates/asvspoof_reproduction_report_template.md")
+    content = template_path.read_text(encoding="utf-8")
+
+    reg = get_official_registry_entry("clovaai/aasist-l")
+
+    replacements = {
+        "{{ upstream_commit }}": reg.upstream_commit,
+        "{{ parameter_count }}": str(reg.parameter_count),
+        "{{ model_id }}": reg.model_id,
+        "{{ expected_checkpoint_sha256 }}": reg.checkpoint_sha256,
+        "{{ checkpoint_sha256 }}": reg.checkpoint_sha256,
+        "{{ provenance_status }}": "official_verified",
+    }
+    rendered = content
+    for k, v in replacements.items():
+        rendered = rendered.replace(k, v)
+
+    assert "clovaai/aasist" in rendered
+    assert "a04c9863f63d44471dde8a6abcb3b082b07cd1d1" in rendered
+    assert "814331d088032bb4c3fa61cc014789eadeed464209dd094ab3a2dd6ffbdce27a" in rendered
+    assert "85,306" in rendered or "85306" in rendered
+    assert "MIT (NAVER Corp / Clova AI)" in rendered
+
+    # Must NOT contain obsolete/incorrect AASIST-L identity facts
+    assert "342b3112" not in rendered
+    assert "85,386" not in rendered
+    assert "BSD-3-Clause" not in rendered
 
 
 # ==============================================================================

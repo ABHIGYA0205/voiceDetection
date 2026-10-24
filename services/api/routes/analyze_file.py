@@ -11,6 +11,10 @@ from typing import Annotated
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
 
 from services.api.inference_worker import InferenceWorker, InferenceWorkerClosedError
+from services.api.model_integrity import (
+    ModelIntegrityError,
+    validate_runtime_model_provenance,
+)
 from services.api.resource_admission import (
     MAX_FILE_BYTES as MAX_FILE_BYTES,
 )
@@ -169,21 +173,18 @@ async def analyze_audio_file(
             ).model_dump(),
         )
 
-    # 3. Model availability check
-    detector = getattr(request.app.state, "detector", None)
-    if detector is None:
-        load_error = getattr(
-            request.app.state,
-            "model_load_error",
-            "VoiceShield detector model is not initialized or checkpoint is missing.",
-        )
+    # 3. Model availability and runtime provenance integrity check
+    try:
+        validate_runtime_model_provenance(request.app.state)
+    except ModelIntegrityError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=ApiErrorDetail(
                 error_code="DETECTOR_NOT_LOADED",
-                message=load_error,
+                message=exc.message,
             ).model_dump(),
-        )
+        ) from exc
+    detector = request.app.state.detector
 
     # 4. Concurrency-guarded execution via process-wide single-worker executor
     worker: InferenceWorker | None = getattr(request.app.state, "inference_worker", None)

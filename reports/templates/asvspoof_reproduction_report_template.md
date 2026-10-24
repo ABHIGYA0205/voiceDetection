@@ -21,10 +21,10 @@
 
 - **Model Identifier**: AASIST-L (Integrated Spectro-Temporal Graph Attention Network - Lightweight)
 - **Upstream Repository**: [`clovaai/aasist`](https://github.com/clovaai/aasist)
-- **Upstream Git Commit**: `342b3112c3fbe59cd3e54b34b7f0f6222b640822`
-- **Upstream Licence**: BSD-3-Clause (NAVER Corp / Clova AI)
+- **Upstream Git Commit**: `{{ upstream_commit }}`
+- **Upstream Licence**: MIT (NAVER Corp / Clova AI)
 - **Citation**: Jung et al., *"AASIST: Audio Anti-Spoofing Using Integrated Spectro-Temporal Graph Attention Networks"*, ICASSP 2022.
-- **Model Parameters**: 85,386 parameters
+- **Model Parameters**: {{ parameter_count }} parameters
 - **Architecture Configuration**:
   - `nb_samp`: 64,600 (4.0375 seconds @ 16 kHz)
   - `first_conv`: 128

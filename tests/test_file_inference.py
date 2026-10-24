@@ -42,6 +42,7 @@ from voiceshield.models.aasist_adapter import (
     AASISTLDetector,
 )
 from voiceshield.models.base import BaseDetector, DetectorOutput
+from voiceshield.models.provenance import ModelProvenance
 from voiceshield.pipeline.cli import main as cli_main
 from voiceshield.pipeline.file_evaluator import evaluate_audio
 from voiceshield.vendor.aasist import AASISTModel
@@ -398,6 +399,15 @@ def test_api_concurrent_requests_guarded(tmp_path: Path) -> None:
 
 class ControlledUploadDetector(BaseDetector):
     """Detector mock that blocks on call 1 to test physical execution concurrency."""
+
+    provenance = ModelProvenance(
+        model_id="mock/aasist-l",
+        architecture="aasist_l",
+        provenance_status="mock",
+        checkpoint_verified=False,
+        is_mock=True,
+        parameter_count=85306,
+    )
 
     def __init__(self) -> None:
         self.lock = threading.Lock()

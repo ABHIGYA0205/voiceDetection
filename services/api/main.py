@@ -14,6 +14,11 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from services.api.inference_worker import InferenceWorker
+from services.api.model_integrity import (
+    ModelIntegrityError,
+    ensure_model_ready_for_http,
+    validate_runtime_model_provenance,
+)
 from services.api.resource_admission import (
     MAX_CONCURRENT_FILE_UPLOADS_DEFAULT,
     MAX_CONCURRENT_SESSIONS_DEFAULT,
@@ -284,11 +289,13 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
             actual_device if actual_device is not None else device_status.device_name
         )
 
-        model_provenance = (
-            detector.provenance.model_dump()
-            if detector is not None and hasattr(detector, "provenance")
-            else None
-        )
+        model_provenance = None
+        if detector is not None:
+            try:
+                validated_prov = validate_runtime_model_provenance(application.state)
+                model_provenance = validated_prov.model_dump()
+            except ModelIntegrityError:
+                model_provenance = None
 
         return {
             "status": "ok",
@@ -312,26 +319,8 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     @application.get("/ready", tags=["System"])
     async def readiness_check(request: Request) -> dict[str, Any]:
         """Return model readiness status distinguishing API liveness from detector readiness."""
-        detector = getattr(request.app.state, "detector", None)
         stored_hash = getattr(request.app.state, "effective_config_hash", None)
         effective_cfg = getattr(request.app.state, "effective_config", None)
-
-        if detector is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "status": "not_ready",
-                    "service": "VoiceShield",
-                    "reason": (
-                        getattr(request.app.state, "model_load_error", None)
-                        or "Detector model is not initialized or checkpoint is missing."
-                    ),
-                    "is_mock_detector": False,
-                    "config_hash": stored_hash
-                    if isinstance(stored_hash, str) and stored_hash
-                    else None,
-                },
-            )
 
         config_ok = False
         if (
@@ -361,8 +350,11 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
                 },
             )
 
+        # Validate detector and provenance fail-closed
+        prov = ensure_model_ready_for_http(request.app.state)
+        detector = request.app.state.detector
         actual_device = detector.device.type if hasattr(detector, "device") else "cpu"
-        prov = getattr(detector, "provenance", None)
+
         return {
             "status": "ready",
             "service": "VoiceShield",
@@ -371,18 +363,14 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
             "is_mock_detector": getattr(request.app.state, "is_mock_detector", False),
             "device": actual_device,
             "config_hash": stored_hash,
-            "model_id": prov.model_id if prov is not None else "clovaai/aasist-l",
-            "provenance_status": prov.provenance_status
-            if prov is not None
-            else "official_verified",
-            "checkpoint_verified": prov.checkpoint_verified if prov is not None else False,
-            "checkpoint_sha256": prov.checkpoint_sha256 if prov is not None else None,
-            "expected_checkpoint_sha256": prov.expected_checkpoint_sha256
-            if prov is not None
-            else None,
-            "upstream_commit": prov.upstream_commit if prov is not None else None,
-            "parameter_count": prov.parameter_count if prov is not None else 85306,
-            "model_provenance": prov.model_dump() if prov is not None else None,
+            "model_id": prov.model_id,
+            "provenance_status": prov.provenance_status,
+            "checkpoint_verified": prov.checkpoint_verified,
+            "checkpoint_sha256": prov.checkpoint_sha256,
+            "expected_checkpoint_sha256": prov.expected_checkpoint_sha256,
+            "upstream_commit": prov.upstream_commit,
+            "parameter_count": prov.parameter_count,
+            "model_provenance": prov.model_dump(),
         }
 
     return application

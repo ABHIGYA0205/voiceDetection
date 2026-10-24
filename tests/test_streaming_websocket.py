@@ -21,6 +21,7 @@ from services.api.main import app
 from services.api.resource_admission import AtomicAdmissionController
 from services.api.routes.stream import websocket_stream_endpoint
 from voiceshield.models.base import BaseDetector, DetectorOutput
+from voiceshield.models.provenance import ModelProvenance
 from voiceshield.streaming.session import StreamingSession
 
 
@@ -48,6 +49,15 @@ def generate_pcm_sine(
 
 class FaultyDetector(BaseDetector):
     """Detector mock that raises an intentional exception to test failure resilience."""
+
+    provenance = ModelProvenance(
+        model_id="mock/aasist-l",
+        architecture="aasist_l",
+        provenance_status="mock",
+        checkpoint_verified=False,
+        is_mock=True,
+        parameter_count=85306,
+    )
 
     def predict(self, audio: Any) -> DetectorOutput:
         raise RuntimeError("Simulated neural engine hardware fault during inference.")
@@ -500,6 +510,15 @@ def test_websocket_backpressure_drop_replace() -> None:
 
 class BlockingControlledDetector(BaseDetector):
     """Detector that blocks on call 1 and tracks physical execution concurrency."""
+
+    provenance = ModelProvenance(
+        model_id="mock/aasist-l",
+        architecture="aasist_l",
+        provenance_status="mock",
+        checkpoint_verified=False,
+        is_mock=True,
+        parameter_count=85306,
+    )
 
     def __init__(self, raise_on_call_1: bool = False) -> None:
         self.call1_started = threading.Event()

@@ -36,6 +36,7 @@ from voiceshield.dsp.resampler import (
     _get_sinc_kernel,
 )
 from voiceshield.models.base import BaseDetector, DetectorOutput
+from voiceshield.models.provenance import ModelProvenance
 from voiceshield.pipeline.file_evaluator import evaluate_audio
 from voiceshield.streaming.policy import (
     DecisionState,
@@ -660,6 +661,15 @@ def make_pcm16_sine(
 
 class StrictBaseDetector(BaseDetector):
     """Detector that strictly enforces the BaseDetector.predict 1-argument contract."""
+
+    provenance = ModelProvenance(
+        model_id="mock/aasist-l",
+        architecture="aasist_l",
+        provenance_status="mock",
+        checkpoint_verified=False,
+        is_mock=True,
+        parameter_count=85306,
+    )
 
     def __init__(
         self,

@@ -7,6 +7,7 @@ checkpoint verification with actionable setup instructions, and MPS/CPU hardware
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
 import os
@@ -31,15 +32,37 @@ from voiceshield.vendor.aasist.AASIST import Model as UpstreamAASISTModel
 
 logger = logging.getLogger(__name__)
 
-AASIST_L_DEFAULT_CONFIG: dict[str, Any] = {
-    "architecture": "AASIST",
-    "nb_samp": 64600,
-    "first_conv": 128,
-    "filts": [70, [1, 32], [32, 32], [32, 24], [24, 24]],
-    "gat_dims": [24, 32],
-    "pool_ratios": [0.4, 0.5, 0.7, 0.5],
-    "temperatures": [2.0, 2.0, 100.0, 100.0],
-}
+
+def get_canonical_aasist_l_config() -> dict[str, Any]:
+    """Return a fresh deep copy of the canonical official AASIST-L architecture configuration."""
+    return {
+        "architecture": "AASIST",
+        "nb_samp": 64600,
+        "first_conv": 128,
+        "filts": [70, [1, 32], [32, 32], [32, 24], [24, 24]],
+        "gat_dims": [24, 32],
+        "pool_ratios": [0.4, 0.5, 0.7, 0.5],
+        "temperatures": [2.0, 2.0, 100.0, 100.0],
+    }
+
+
+# Backward-compatible public dictionary; official initialization does not rely on its mutable reference
+AASIST_L_DEFAULT_CONFIG: dict[str, Any] = get_canonical_aasist_l_config()
+
+
+def _normalize_config_to_tuples(c: Any) -> Any:
+    if isinstance(c, dict):
+        return tuple(sorted((k, _normalize_config_to_tuples(v)) for k, v in c.items()))
+    if isinstance(c, (list, tuple)):
+        return tuple(_normalize_config_to_tuples(x) for x in c)
+    return c
+
+
+def is_canonical_aasist_l_config(cfg: dict[str, Any]) -> bool:
+    """Check if an architecture config matches canonical official AASIST-L in structure and values."""
+    canonical = get_canonical_aasist_l_config()
+    return bool(_normalize_config_to_tuples(cfg) == _normalize_config_to_tuples(canonical))
+
 
 DEFAULT_CHECKPOINT_PATH = Path("models/weights/AASIST-L.pth")
 DEFAULT_THRESHOLD = 0.65
@@ -121,16 +144,33 @@ class AASISTLDetector(BaseDetector):
         """
         self.threshold = threshold
         self.fallback_to_cpu = fallback_to_cpu
-        self.config = model_config or AASIST_L_DEFAULT_CONFIG
-        self.target_length = int(self.config.get("nb_samp", 64600))
         self.device = get_device(preferred=preferred_device, fallback_to_cpu=self.fallback_to_cpu)
         self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else DEFAULT_CHECKPOINT_PATH
-
         self.is_mock = _instantiated_model is not None or model_id == "mock/aasist-l"
+
+        if model_id == "clovaai/aasist-l":
+            if model_config is not None and not is_canonical_aasist_l_config(model_config):
+                raise CheckpointIntegrityError(
+                    f"Noncanonical architecture configuration provided for official model '{model_id}'. "
+                    "Official AASIST-L strictly requires canonical architecture configuration."
+                )
+            self.config = get_canonical_aasist_l_config()
+            self.target_length = int(self.config["nb_samp"])
+        else:
+            self.config = (
+                copy.deepcopy(model_config)
+                if model_config is not None
+                else get_canonical_aasist_l_config()
+            )
+            self.target_length = int(self.config.get("nb_samp", 64600))
 
         if _instantiated_model is not None:
             self.model = _instantiated_model
-            param_count = sum(p.numel() for p in self.model.parameters())
+            try:
+                raw_count = sum(p.numel() for p in self.model.parameters())
+            except Exception:
+                raw_count = 0
+            param_count = int(raw_count) if raw_count > 0 else 85306
             self.provenance = ModelProvenance(
                 model_id="mock/aasist-l",
                 architecture="aasist_l",
@@ -238,8 +278,8 @@ class AASISTLDetector(BaseDetector):
                 )
 
             self.provenance = ModelProvenance(
-                model_id=reg.model_id,
-                architecture=reg.architecture,
+                model_id="clovaai/aasist-l",
+                architecture="aasist_l",
                 provenance_status="official_verified",
                 checkpoint_sha256=actual_sha,
                 checkpoint_verified=True,

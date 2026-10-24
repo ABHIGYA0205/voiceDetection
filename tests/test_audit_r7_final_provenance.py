@@ -218,6 +218,7 @@ def test_correction_c_custom_config_values_reach_stages_and_soak(tmp_path: Path)
 
     runner = BenchmarkRunner(
         config=custom_cfg,
+        mock_model=True,
         devices=["cpu"],
         iterations=2,
         warmup=1,

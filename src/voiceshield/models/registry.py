@@ -84,18 +84,18 @@ OFFICIAL_AASIST_L = ModelRegistryEntry(
     parameter_count=85306,
     source_license_spdx="MIT",
     checkpoint_rights_note=(
-        "VoiceShield does not independently assert checkpoint redistribution rights. "
-        "Users acquire weights from the official upstream repository under its source license."
+        "The upstream source repository is MIT licensed. Checkpoint licensing and redistribution "
+        "rights are not separately documented or independently verified by VoiceShield; obtain "
+        "checkpoint bytes from the pinned upstream source."
     ),
 )
 
-_OFFICIAL_REGISTRY: dict[str, ModelRegistryEntry] = {
-    OFFICIAL_AASIST_L.model_id: OFFICIAL_AASIST_L,
-}
-
-# Immutable mapping proxy prevents runtime mutation of registered models
+# Immutable mapping proxy prevents runtime mutation of registered models.
+# Constructed directly from a dict literal with no module-level mutable dictionary reference.
 OFFICIAL_MODEL_REGISTRY: MappingProxyType[str, ModelRegistryEntry] = MappingProxyType(
-    _OFFICIAL_REGISTRY
+    {
+        OFFICIAL_AASIST_L.model_id: OFFICIAL_AASIST_L,
+    }
 )
 
 
