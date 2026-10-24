@@ -1,6 +1,7 @@
 """Pure DSP operations: normalization, resampling, quality metrics, and audio contracts."""
 
 from voiceshield.dsp.exceptions import (
+    AudioDurationLimitError,
     AudioPreprocessingError,
     CorruptAudioError,
     EmptyAudioError,
@@ -19,6 +20,7 @@ from voiceshield.dsp.resampler import resample_audio
 __all__ = [
     "AudioMetadata",
     "AudioPreprocessingError",
+    "AudioDurationLimitError",
     "AudioQualityMetrics",
     "CorruptAudioError",
     "EmptyAudioError",

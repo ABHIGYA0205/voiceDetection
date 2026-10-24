@@ -22,6 +22,25 @@ export function getWebSocketStreamUrl(): string {
   return `${protocol}//${window.location.host}/api/v1/stream`;
 }
 
+export function fileWindowState(win: FileInferenceResult['windows'][number]): {
+  label: string;
+  className: string;
+} {
+  if (win.is_eligible === false || win.decision_state === 'insufficient_evidence' || win.decision_state === 'ineligible') {
+    return { label: 'ABSTAINED', className: 'badge-insufficient_evidence' };
+  }
+  switch (win.decision_state) {
+    case 'high':
+      return { label: 'ELEVATED', className: 'badge-high' };
+    case 'uncertain':
+      return { label: 'UNCERTAIN', className: 'badge-uncertain' };
+    case 'low':
+      return { label: 'LOW ANOMALY', className: 'badge-low' };
+    default:
+      return { label: 'UNKNOWN', className: 'badge-unknown' };
+  }
+}
+
 export function App(): React.JSX.Element {
   // Navigation tab
   const [activeTab, setActiveTab] = useState<'stream' | 'file'>('stream');
@@ -41,7 +60,9 @@ export function App(): React.JSX.Element {
   // Status and score metrics for stream (uncalibrated decimal scores)
   const [status, setStatus] = useState<DetectionStatus>('insufficient_evidence');
   const [uncalibratedScore, setUncalibratedScore] = useState<number | null>(null);
-  const [operatingThreshold, setOperatingThreshold] = useState<number>(0.65);
+  const [smoothedScore, setSmoothedScore] = useState<number | null>(null);
+  const [thresholdLow, setThresholdLow] = useState<number>(0.35);
+  const [thresholdHigh, setThresholdHigh] = useState<number>(0.65);
   const [operatingThresholdSource, setOperatingThresholdSource] = useState<string>('unvalidated_heuristic');
   const [reasonDetails, setReasonDetails] = useState<string>(
     'Awaiting microphone activation. Press Start Microphone Stream to begin analysis.'
@@ -386,9 +407,14 @@ export function App(): React.JSX.Element {
               data.raw_score ??
               null;
             setUncalibratedScore(score);
+            const smoothed = data.is_eligible ? (data.decision.smoothed_score ?? null) : null;
+            setSmoothedScore(smoothed);
 
-            if (data.operating_threshold !== undefined) {
-              setOperatingThreshold(data.operating_threshold);
+            if (data.threshold_low !== undefined) {
+              setThresholdLow(data.threshold_low);
+            }
+            if (data.threshold_high !== undefined) {
+              setThresholdHigh(data.threshold_high);
             }
             if (data.operating_threshold_source !== undefined) {
               setOperatingThresholdSource(data.operating_threshold_source);
@@ -403,7 +429,10 @@ export function App(): React.JSX.Element {
               syntheticScore: score,
               scoreIsCalibrated: Boolean(data.score_is_calibrated),
               calibratedScore: data.calibrated_score ?? null,
-              rawScore: data.raw_score ?? null,
+              rawScore: data.raw_score ?? score,
+              smoothedScore: smoothed,
+              thresholdLow: data.threshold_low ?? thresholdLow,
+              thresholdHigh: data.threshold_high ?? data.operating_threshold ?? thresholdHigh,
               status: decState,
               reason: data.decision.reason,
               reasonDetails: data.decision.reason_details,
@@ -657,16 +686,16 @@ export function App(): React.JSX.Element {
                 </p>
               </div>
 
-              {/* Uncalibrated Score and Provenance Display */}
+              {/* Raw and temporally smoothed score display */}
               <div className="score-container" id="score-container">
                 {uncalibratedScore !== null ? (
                   <div className="score-block">
-                    <span className="score-type">Uncalibrated Synthetic Score:</span>
+                    <span className="score-type">Raw uncalibrated window score:</span>
                     <span className="score-value" id="raw-score-value">
-                      score {uncalibratedScore.toFixed(3)} / threshold {operatingThreshold.toFixed(3)}
+                      score {uncalibratedScore.toFixed(3)}
                     </span>
                     <span className="score-source-note" id="threshold-provenance-note" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                      Operating threshold: {operatingThreshold.toFixed(3)} ({operatingThresholdSource === 'unvalidated_heuristic' ? 'unvalidated heuristic' : operatingThresholdSource})
+                      Low threshold: {thresholdLow.toFixed(3)} | High threshold: {thresholdHigh.toFixed(3)} ({operatingThresholdSource === 'unvalidated_heuristic' ? 'unvalidated heuristic' : operatingThresholdSource}). The intermediate range is UNCERTAIN; thresholds apply to the smoothed score/history.
                     </span>
                   </div>
                 ) : (
@@ -677,6 +706,15 @@ export function App(): React.JSX.Element {
                     </span>
                   </div>
                 )}
+                <div className="score-block">
+                  <span className="score-type">EWMA-smoothed policy score:</span>
+                  <span className="score-value" id="smoothed-score-value">
+                    {smoothedScore !== null ? smoothedScore.toFixed(3) : 'N/A'}
+                  </span>
+                  <span className="score-source-note" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                    Temporal decisions and explanations use the smoothed policy score/history, not necessarily the latest raw score.
+                  </span>
+                </div>
               </div>
 
               {/* Control Actions (Require User Gesture) */}
@@ -796,9 +834,12 @@ export function App(): React.JSX.Element {
                       </span>
                       {item.syntheticScore !== null && (
                         <span className="timeline-score">
-                          Score: {item.syntheticScore.toFixed(3)}
+                          Raw: {item.syntheticScore.toFixed(3)}
                         </span>
                       )}
+                      <span className="timeline-score">
+                        Smoothed: {item.smoothedScore !== null ? item.smoothedScore.toFixed(3) : 'N/A'}
+                      </span>
                     </div>
                     <p className="timeline-reason">{item.reasonDetails}</p>
                   </article>
@@ -1002,9 +1043,10 @@ export function App(): React.JSX.Element {
                       <th>#</th>
                       <th>Time Range</th>
                       <th>Bona Fide Score</th>
-                      <th>Synthetic Score</th>
+                      <th>Raw Uncalibrated Score</th>
+                      <th>Smoothed Policy Score</th>
                       <th>Active Speech</th>
-                      <th>Window Verdict</th>
+                      <th>Temporal State</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1016,23 +1058,22 @@ export function App(): React.JSX.Element {
                         </td>
                         <td>{win.raw_bonafide_score !== null ? win.raw_bonafide_score.toFixed(3) : 'N/A'}</td>
                         <td>{win.synthetic_score !== null ? win.synthetic_score.toFixed(3) : 'N/A'}</td>
+                        <td>
+                          {win.is_eligible !== false &&
+                          win.smoothed_score !== null &&
+                          win.smoothed_score !== undefined
+                            ? win.smoothed_score.toFixed(3)
+                            : 'N/A'}
+                        </td>
                         <td>{win.active_speech_seconds.toFixed(2)}s</td>
                         <td>
-                          <span
-                            className={`timeline-badge ${
-                              win.is_eligible === false
-                                ? 'badge-insufficient_evidence'
-                                : win.is_synthetic_suspected
-                                ? 'badge-high'
-                                : 'badge-low'
-                            }`}
-                          >
-                            {win.is_eligible === false
-                              ? 'ABSTAINED'
-                              : win.is_synthetic_suspected
-                              ? 'ELEVATED'
-                              : 'LOW ANOMALY'}
-                          </span>
+                          {(() => {
+                            const state = fileWindowState(win);
+                            return <span className={`timeline-badge ${state.className}`}>{state.label}</span>;
+                          })()}
+                          {win.decision_reason_details && (
+                            <div className="timeline-reason">{win.decision_reason_details}</div>
+                          )}
                         </td>
                       </tr>
                     ))}

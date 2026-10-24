@@ -16,6 +16,7 @@ import soundfile as sf
 from pydantic import BaseModel, Field
 
 from voiceshield.dsp.exceptions import (
+    AudioDurationLimitError,
     CorruptAudioError,
     EmptyAudioError,
     InvalidAudioValueError,
@@ -138,7 +139,7 @@ def load_audio(
             if sfile.frames > 0:
                 header_duration = float(sfile.frames / orig_sr)
                 if max_duration_seconds is not None and header_duration > max_duration_seconds:
-                    raise UnsupportedAudioError(
+                    raise AudioDurationLimitError(
                         f"Audio duration ({header_duration:.2f}s) exceeds maximum allowed limit of {max_duration_seconds:.2f}s."
                     )
 
@@ -166,7 +167,7 @@ def load_audio(
 
     actual_duration = float(num_samples / orig_sr)
     if max_duration_seconds is not None and actual_duration > max_duration_seconds:
-        raise UnsupportedAudioError(
+        raise AudioDurationLimitError(
             f"Audio duration ({actual_duration:.2f}s) exceeds maximum allowed limit of {max_duration_seconds:.2f}s."
         )
 

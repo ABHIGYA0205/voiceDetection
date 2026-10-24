@@ -14,10 +14,10 @@ from voiceshield.benchmark.schema import BenchmarkSuiteReport, StageLatency
 from voiceshield.benchmark.soak import run_streaming_soak_test
 from voiceshield.benchmark.stages import (
     benchmark_audio_decoding_and_resampling,
-    benchmark_calibration_and_temporal_policy,
     benchmark_end_to_end_window_processing,
     benchmark_feature_extraction,
     benchmark_model_inference,
+    benchmark_score_smoothing_and_temporal_policy,
 )
 from voiceshield.models.aasist_adapter import (
     AASIST_L_DEFAULT_CONFIG,
@@ -83,11 +83,11 @@ def test_stage3_model_inference_benchmark() -> None:
         assert mps_lat.meets_project_target is True
 
 
-def test_stage4_calibration_and_temporal_policy_benchmark() -> None:
-    """Verify calibration and temporal policy state update benchmarking."""
-    lat = benchmark_calibration_and_temporal_policy(iterations=10, warmup=2)
+def test_stage4_score_smoothing_and_temporal_policy_benchmark() -> None:
+    """Verify score smoothing and temporal policy state update benchmarking."""
+    lat = benchmark_score_smoothing_and_temporal_policy(iterations=10, warmup=2)
     assert isinstance(lat, StageLatency)
-    assert lat.stage_name == "4_calibration_and_temporal_policy"
+    assert lat.stage_name == "4_score_smoothing_and_temporal_policy"
     assert lat.p50_ms > 0.0
     # Policy update is extremely fast (microsecond range)
     assert lat.p50_ms < 5.0
@@ -133,6 +133,23 @@ def test_streaming_soak_test_execution() -> None:
     assert not report.is_leak_suspected
     assert "PASSED" in report.verdict
     assert len(report.samples) >= 1
+    assert report.ingestion_mode == "accelerated"
+    assert report.frame_duration_ms == 50.0
+    assert report.measured_duration_seconds == report.duration_seconds
+
+    with (
+        patch("voiceshield.benchmark.soak._get_current_rss_mb", return_value=100.0),
+        patch("voiceshield.benchmark.soak._get_mps_allocated_mb", return_value=0.0),
+    ):
+        paced_report = run_streaming_soak_test(
+            detector=detector,
+            device=dev,
+            duration_seconds=0.06,
+            sample_interval_seconds=0.5,
+            accelerated=False,
+        )
+    assert paced_report.ingestion_mode == "real_time_paced"
+    assert paced_report.frame_duration_ms == 50.0
 
 
 def test_benchmark_missing_checkpoint_fails_without_mock(tmp_path: Path) -> None:
@@ -174,11 +191,32 @@ def test_benchmark_runner_full_suite_and_reporting(tmp_path: Path) -> None:
     assert "audio_decoding" in report.stages_cpu
     assert "model_inference" in report.stages_cpu
     assert "end_to_end" in report.stages_cpu
+    assert "score_smoothing_and_policy" in report.stages_cpu
 
     # Save reports to temporary directory
     md_file, json_file = runner.save_reports(report, output_dir=tmp_path)
     assert md_file.is_file()
     assert json_file.is_file()
+    assert report.soak_test is not None
+    for configured_duration in (10.0, 600.0, 3600.0):
+        report.soak_test.configured_duration_seconds = configured_duration
+        markdown = runner.generate_markdown_report(report)
+        assert "10-Minute" not in markdown
+        assert "Streaming Stress Soak Diagnostics" in markdown
+        assert "frames are ingested without real-time pacing" in markdown
+        assert "frames are paced according to represented frame duration" not in markdown
+        assert "Ingestion Mode" in markdown
+        assert "Measured Wall-Clock Duration" in markdown
+    assert "calibration" not in markdown.lower()
+
+    paced_report = report.model_copy(deep=True)
+    assert paced_report.soak_test is not None
+    paced_report.soak_test.ingestion_mode = "real_time_paced"
+    paced_markdown = runner.generate_markdown_report(paced_report)
+    assert "Streaming Stress Soak Diagnostics" in paced_markdown
+    assert "frames are paced according to represented frame duration" in paced_markdown
+    assert "frames are ingested without real-time pacing" not in paced_markdown
+    assert "10-Minute" not in paced_markdown
 
     md_text = md_file.read_text(encoding="utf-8")
     assert "# VoiceShield Benchmark Report: Apple MacBook Pro M3" in md_text

@@ -218,7 +218,24 @@ test.describe('VoiceShield live browser/API contract', () => {
       () => socket.received.some((frame) => JSON.parse(frame).type === 'window_result'),
       { timeout: 30000 }
     ).toBe(true);
-    await expect(page.locator('.timeline-card')).toHaveCount(1);
+    await expect.poll(() => {
+      const receivedCount = socket.received.filter(
+        (frame) => JSON.parse(frame).type === 'window_result'
+      ).length;
+      return page.locator('.timeline-card').count().then((cardCount) =>
+        cardCount === receivedCount && receivedCount > 0 ? receivedCount : 0
+      );
+    }).toBeGreaterThan(0);
+    const receivedWindows = socket.received
+      .map((frame) => JSON.parse(frame))
+      .filter((frame) => frame.type === 'window_result');
+    const receivedIndices = receivedWindows.map((frame) => frame.window_index);
+    expect(new Set(receivedIndices).size).toBe(receivedIndices.length);
+    const displayedIndices = await page.locator('.timeline-idx').evaluateAll((nodes) =>
+      nodes.map((node) => Number(node.textContent?.match(/\d+/)?.[0]))
+    );
+    expect(new Set(displayedIndices).size).toBe(displayedIndices.length);
+    expect(displayedIndices.sort((a, b) => a - b)).toEqual([...receivedIndices].sort((a, b) => a - b));
     await expect(page.locator('#status-heading')).not.toContainText('Calibrated');
 
     await page.getByRole('button', { name: /Stop Stream/i }).click();

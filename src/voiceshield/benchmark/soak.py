@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import resource
 import time
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -50,10 +50,10 @@ def run_streaming_soak_test(
     Args:
         detector: Detector model adapter.
         device: Hardware device ('cpu' or 'mps').
-        duration_seconds: Target soak duration in seconds (default: 600.0s = 10 minutes).
+        duration_seconds: Requested wall-clock stress-test duration in seconds.
         sample_interval_seconds: Cadence to capture timeseries memory/backlog snapshots.
         frame_duration_ms: Duration of each ingested PCM chunk in milliseconds.
-        accelerated: If True, executes without artificial wall-clock sleeps to test high-throughput soaking.
+        accelerated: If True, ingests frames without sleeps; otherwise paces ingestion in real time.
         config: Optional effective VoiceShieldConfig to initialize StreamingSession.
 
     Returns:
@@ -204,8 +204,15 @@ def run_streaming_soak_test(
             f"Queue backlog remained <= 1."
         )
 
+    ingestion_mode: Literal["accelerated", "real_time_paced"] = (
+        "accelerated" if accelerated else "real_time_paced"
+    )
     return SoakTestReport(
+        configured_duration_seconds=duration_seconds,
         duration_seconds=round(actual_duration, 1),
+        measured_duration_seconds=round(actual_duration, 1),
+        ingestion_mode=ingestion_mode,
+        frame_duration_ms=frame_duration_ms,
         total_frames_ingested=total_frames,
         total_windows_evaluated=total_windows_evaluated,
         total_windows_dropped=total_windows_dropped,

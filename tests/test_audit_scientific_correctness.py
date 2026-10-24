@@ -433,6 +433,8 @@ def test_streaming_api_uncalibrated_score_semantics() -> None:
                     assert "synthetic_score" in msg
                     assert "operating_threshold_source" in msg
                     assert msg["operating_threshold_source"] == "unvalidated_heuristic"
+                    assert msg["threshold_low"] == 0.35
+                    assert msg["threshold_high"] == 0.65
 
                     decision = msg["decision"]
                     assert decision["score_is_calibrated"] is False

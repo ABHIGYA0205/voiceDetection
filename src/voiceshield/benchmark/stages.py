@@ -215,14 +215,14 @@ def benchmark_model_inference(
     )
 
 
-def benchmark_calibration_and_temporal_policy(
+def benchmark_score_smoothing_and_temporal_policy(
     iterations: int = 50,
     warmup: int = 5,
     duration_seconds: float = 4.0,
     policy_config: TemporalPolicyConfig | None = None,
     windowing_config: Any = None,
 ) -> StageLatency:
-    """Benchmark stage 4: Calibrated likelihood computation and TemporalDecisionPolicy tracking."""
+    """Benchmark stage 4: Score smoothing and TemporalDecisionPolicy tracking."""
     policy = TemporalDecisionPolicy(
         policy_config=policy_config or TemporalPolicyConfig(),
         windowing_config=windowing_config,
@@ -231,7 +231,7 @@ def benchmark_calibration_and_temporal_policy(
 
     def _run_policy(idx: int) -> Any:
         return policy.evaluate(
-            calibrated_score=mock_score,
+            synthetic_score=mock_score,
             speech_seconds=3.5,
             window_index=idx,
             window_start_sec=float(idx),
@@ -251,7 +251,7 @@ def benchmark_calibration_and_temporal_policy(
         steady_times.append((time.perf_counter() - t0) * 1000.0)
 
     return _compute_stage_latency(
-        stage_name="4_calibration_and_temporal_policy",
+        stage_name="4_score_smoothing_and_temporal_policy",
         device_name="cpu",
         warmup_times=warmup_times,
         steady_times=steady_times,
@@ -259,6 +259,10 @@ def benchmark_calibration_and_temporal_policy(
         audio_duration_seconds=duration_seconds,
         check_target=False,
     )
+
+
+# Compatibility alias for callers of the pre-R11 internal helper name.
+benchmark_calibration_and_temporal_policy = benchmark_score_smoothing_and_temporal_policy
 
 
 def benchmark_end_to_end_window_processing(
@@ -310,9 +314,9 @@ def benchmark_end_to_end_window_processing(
 
         spoof_logit = float(logits[0, 0].item())
         bonafide_logit = float(logits[0, 1].item())
-        calibrated_score = 1.0 / (1.0 + float(np.exp(-(spoof_logit - bonafide_logit))))
+        synthetic_score = 1.0 / (1.0 + float(np.exp(-(spoof_logit - bonafide_logit))))
         return policy.evaluate(
-            calibrated_score=calibrated_score,
+            synthetic_score=synthetic_score,
             speech_seconds=speech_sec,
             window_index=step,
             window_start_sec=float(step),

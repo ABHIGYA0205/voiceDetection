@@ -342,6 +342,15 @@ def test_api_upload_corrupt_audio() -> None:
         assert resp.status_code == 422
         detail = resp.json()["detail"]
         assert detail["error_code"] == "AUDIO_PROCESSING_ERROR"
+        message = detail["message"]
+        assert (
+            message
+            == "Failed to decode audio. The selected file is not valid supported WAV or FLAC audio."
+        )
+        assert "0x" not in message
+        assert "BytesIO" not in message
+        assert "Traceback" not in message
+        assert "/tmp" not in message
 
 
 def test_api_upload_duration_limit(tmp_path: Path) -> None:

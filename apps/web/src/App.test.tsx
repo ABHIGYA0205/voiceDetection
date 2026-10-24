@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { StrictMode } from 'react';
-import { App, getWebSocketStreamUrl } from './App';
+import { App, fileWindowState, getWebSocketStreamUrl } from './App';
+import type { FileWindowResult } from './types';
 
 // Mock Web Audio API and MediaDevices
 class MockAudioWorklet {
@@ -85,6 +86,21 @@ class MockWebSocket {
 }
 
 describe('VoiceShield Dashboard State Transitions & Rendering', () => {
+  it.each([
+    ['high', 'ELEVATED', 'badge-high'],
+    ['uncertain', 'UNCERTAIN', 'badge-uncertain'],
+    ['low', 'LOW ANOMALY', 'badge-low'],
+    ['insufficient_evidence', 'ABSTAINED', 'badge-insufficient_evidence'],
+    ['ineligible', 'ABSTAINED', 'badge-insufficient_evidence'],
+    [undefined, 'UNKNOWN', 'badge-unknown'],
+  ])('maps file decision state %s without falling back to LOW', (state, label, className) => {
+    const window = {
+      is_eligible: state !== 'ineligible',
+      decision_state: state,
+    } as FileWindowResult;
+    expect(fileWindowState(window)).toEqual({ label, className });
+  });
+
   let mockTracks: { stop: ReturnType<typeof vi.fn> }[];
 
   beforeEach(() => {
@@ -259,6 +275,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
     expect(screen.getByText(/\[! HIGH ANOMALY\]/i)).toBeDefined();
     expect(screen.getByText(/High Acoustic Anomaly Score/i)).toBeDefined();
     expect(document.getElementById('raw-score-value')?.textContent).toContain('0.880');
+    expect(document.getElementById('smoothed-score-value')?.textContent).toContain('0.850');
 
     // Verify REQUIRED Action Directive
     expect(screen.getByText(/ACTION DIRECTIVE/i)).toBeDefined();
@@ -268,7 +285,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
     // Verify Rolling Timeline contains the item
     expect(screen.getByText(/Window #3/i)).toBeDefined();
-    expect(screen.getByText(/Score: 0.880/i)).toBeDefined();
+    expect(screen.getByText(/Raw: 0.880/i)).toBeDefined();
   });
 
   it('renders raw uncalibrated score clearly labelled when calibration is absent', async () => {
@@ -309,11 +326,97 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
       });
     });
 
-    // Check label explicitly specifies Uncalibrated Synthetic Score
-    expect(screen.getByText(/Uncalibrated Synthetic Score:/i)).toBeDefined();
+    // Check label explicitly distinguishes the raw uncalibrated score.
+    expect(screen.getByText(/Raw uncalibrated window score:/i)).toBeDefined();
+    expect(screen.getByText(/EWMA-smoothed policy score:/i)).toBeDefined();
     expect(document.getElementById('raw-score-value')?.textContent).toContain('0.742');
-    expect(screen.getByText(/Operating threshold: 0.650 \(unvalidated heuristic\)/i)).toBeDefined();
+    expect(screen.getByText(/Low threshold: 0.350 \| High threshold: 0.650 \(unvalidated heuristic\)/i)).toBeDefined();
     expect(screen.getByText(/\[\? UNCERTAIN\]/i)).toBeDefined();
+    expect(document.getElementById('smoothed-score-value')?.textContent).toContain('0.742');
+  });
+
+  it('renders crossed raw and smoothed live scores from temporal state', async () => {
+    render(<App />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Start Microphone Stream/i }));
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    const ws = MockWebSocket.instances[0];
+
+    await act(async () => {
+      ws.simulateServerMessage({
+        type: 'window_result',
+        session_id: 'test-session-123',
+        window_index: 1,
+        window_start_sec: 1,
+        window_end_sec: 5,
+        speech_seconds: 3.5,
+        is_eligible: true,
+        synthetic_score: 0.987,
+        decision: {
+          state: 'low',
+          smoothed_score: 0.345,
+          reason: 'normal_acoustics',
+          reason_details: 'Smoothed score remains below the low threshold.',
+          window_index: 1,
+        },
+        threshold_low: 0.35,
+        threshold_high: 0.65,
+      });
+    });
+    expect(screen.getByText('[✓ LOW ANOMALY]')).toBeDefined();
+    expect(screen.getByText('Raw uncalibrated window score:')).toBeDefined();
+    expect(document.getElementById('raw-score-value')?.textContent).toContain('0.987');
+    expect(document.getElementById('smoothed-score-value')?.textContent).toContain('0.345');
+    expect(screen.getByText(/Low threshold: 0.350 \| High threshold: 0.650/)).toBeDefined();
+
+    await act(async () => {
+      ws.simulateServerMessage({
+        type: 'window_result',
+        session_id: 'test-session-123',
+        window_index: 2,
+        window_start_sec: 2,
+        window_end_sec: 6,
+        speech_seconds: 3.5,
+        is_eligible: true,
+        synthetic_score: 0.036,
+        decision: {
+          state: 'uncertain',
+          smoothed_score: 0.613,
+          reason: 'ambiguous_score_zone',
+          reason_details: 'Smoothed score is in the intermediate uncertain range.',
+          window_index: 2,
+        },
+        threshold_low: 0.35,
+        threshold_high: 0.65,
+      });
+    });
+    expect(screen.getByText('[? UNCERTAIN]')).toBeDefined();
+    expect(document.getElementById('raw-score-value')?.textContent).toContain('0.036');
+    expect(document.getElementById('smoothed-score-value')?.textContent).toContain('0.613');
+
+    await act(async () => {
+      ws.simulateServerMessage({
+        type: 'window_result',
+        session_id: 'test-session-123',
+        window_index: 3,
+        window_start_sec: 3,
+        window_end_sec: 7,
+        speech_seconds: 0.1,
+        is_eligible: false,
+        synthetic_score: null,
+        decision: {
+          state: 'insufficient_evidence',
+          smoothed_score: 0,
+          reason: 'insufficient_speech',
+          reason_details: 'Insufficient active speech.',
+          window_index: 3,
+        },
+      });
+    });
+    expect(document.getElementById('raw-score-value')).toBeNull();
+    expect(document.getElementById('smoothed-score-value')?.textContent).toBe('N/A');
+    expect(screen.getByText('[... INSUFFICIENT SPEECH]')).toBeDefined();
   });
 
   it('asserts that Calibrated Synthetic Probability, Authentic, and Consistent with Natural Speech are absent', async () => {
@@ -731,6 +834,8 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
           raw_bonafide_score: 1.0,
           synthetic_score: 0.0,
           uncalibrated_synthetic_score: 0.0,
+          decision_state: 'low',
+          smoothed_score: 0.0,
           is_synthetic_suspected: false,
           reason: 'low_anomaly',
         },
@@ -793,6 +898,68 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
     expect(badge?.textContent).toBe('LOW ANOMALY');
     expect(badge?.classList.contains('badge-low')).toBe(true);
     expect(screen.getByText(/\[✓ LOW ANOMALY\]/i)).toBeDefined();
+  });
+
+  it('renders canonical file temporal states instead of inferring from the raw score', async () => {
+    const fileResult = {
+      filename: 'crossed.wav',
+      duration_seconds: 4,
+      total_windows: 1,
+      eligible_windows: 1,
+      mean_synthetic_score: 1,
+      max_synthetic_score: 1,
+      effective_threshold: 0.65,
+      operating_threshold_source: 'unvalidated_heuristic',
+      is_synthetic_suspected: false,
+      status: 'uncertain',
+      temporal_rule_explanation: 'Pre-confirmation temporal state.',
+      is_mock_detector: false,
+      windows: [{
+        window_index: 1,
+        start_seconds: 0,
+        end_seconds: 4,
+        raw_spoof_logit: 1,
+        raw_bonafide_logit: 0,
+        raw_bonafide_score: 0,
+        synthetic_score: 1,
+        uncalibrated_synthetic_score: 1,
+        score_is_calibrated: false,
+        is_synthetic_suspected: false,
+        active_speech_seconds: 3.5,
+        is_eligible: true,
+        decision_state: 'uncertain',
+        decision_reason: 'pre_confirmation',
+        decision_reason_details: 'Awaiting consecutive elevated windows.',
+        smoothed_score: 0.613,
+        history_scores: [0.613],
+      }],
+    };
+    vi.mocked(fetch).mockImplementation((url: RequestInfo | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/api/v1/ready')) {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ is_mock_detector: false, device: 'cpu' }) } as Response);
+      }
+      if (urlStr.includes('/api/v1/analyze/file')) {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fileResult) } as Response);
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) } as Response);
+    });
+    render(<App />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+    });
+    await act(async () => {
+      fireEvent.change(document.getElementById('audio-file-input') as HTMLInputElement, {
+        target: { files: [new File(['audio'], 'crossed.wav', { type: 'audio/wav' })] },
+      });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Analyze Audio File/i }));
+    });
+    expect(document.querySelector('.window-table .timeline-badge')?.textContent).toBe('UNCERTAIN');
+    expect(screen.queryByText('LOW ANOMALY')).toBeNull();
+    expect(screen.getByText('0.613')).toBeDefined();
+    expect(screen.getByText(/Awaiting consecutive elevated windows/)).toBeDefined();
   });
 
   it('switches between stream and file analysis tabs seamlessly', async () => {

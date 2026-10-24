@@ -25,3 +25,7 @@ class InvalidAudioValueError(AudioPreprocessingError):
 
 class UnsupportedAudioError(AudioPreprocessingError):
     """Raised when an audio format, channel configuration, or sample rate is not supported."""
+
+
+class AudioDurationLimitError(UnsupportedAudioError):
+    """Raised when decoded audio exceeds the configured duration ceiling."""

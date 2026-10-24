@@ -23,10 +23,10 @@ from voiceshield.benchmark.schema import (
 from voiceshield.benchmark.soak import run_streaming_soak_test
 from voiceshield.benchmark.stages import (
     benchmark_audio_decoding_and_resampling,
-    benchmark_calibration_and_temporal_policy,
     benchmark_end_to_end_window_processing,
     benchmark_feature_extraction,
     benchmark_model_inference,
+    benchmark_score_smoothing_and_temporal_policy,
 )
 from voiceshield.config.loader import load_config
 from voiceshield.config.overrides import apply_config_overrides
@@ -96,6 +96,7 @@ class BenchmarkRunner:
         warmup: int = 5,
         devices: list[str] | None = None,
         soak_duration_seconds: float = 0.0,
+        soak_ingestion_mode: str = "accelerated",
     ) -> None:
         base = config or load_config(config_path)
         if checkpoint_path is not None or model_id is not None:
@@ -112,6 +113,9 @@ class BenchmarkRunner:
         self.warmup = warmup
         self.devices = devices or ["cpu", "mps"]
         self.soak_duration = soak_duration_seconds
+        if soak_ingestion_mode not in {"accelerated", "real_time_paced"}:
+            raise ValueError("soak_ingestion_mode must be 'accelerated' or 'real_time_paced'.")
+        self.soak_ingestion_mode = soak_ingestion_mode
 
     def _resolve_detector(self) -> AASISTLDetector:
         """Instantiate detector with real checkpoint or explicit mock model."""
@@ -207,7 +211,7 @@ class BenchmarkRunner:
             warmup=self.warmup,
             duration_seconds=window_seconds,
         )
-        stages_cpu["calibration_and_policy"] = benchmark_calibration_and_temporal_policy(
+        stages_cpu["score_smoothing_and_policy"] = benchmark_score_smoothing_and_temporal_policy(
             iterations=self.iterations,
             warmup=self.warmup,
             duration_seconds=window_seconds,
@@ -246,7 +250,7 @@ class BenchmarkRunner:
                 warmup=self.warmup,
                 duration_seconds=window_seconds,
             )
-            stages_mps["calibration_and_policy"] = stages_cpu["calibration_and_policy"]
+            stages_mps["score_smoothing_and_policy"] = stages_cpu["score_smoothing_and_policy"]
             stages_mps["end_to_end"] = benchmark_end_to_end_window_processing(
                 detector=detector,
                 device=mps_dev,
@@ -285,8 +289,9 @@ class BenchmarkRunner:
                 "model_inference_pct": round(
                     (primary_stages["model_inference"].p50_ms / primary_e2e_ms) * 100.0, 1
                 ),
-                "calibration_and_policy_pct": round(
-                    (primary_stages["calibration_and_policy"].p50_ms / primary_e2e_ms) * 100.0, 1
+                "score_smoothing_and_policy_pct": round(
+                    (primary_stages["score_smoothing_and_policy"].p50_ms / primary_e2e_ms) * 100.0,
+                    1,
                 ),
             },
             "inference_meets_target": primary_stages["model_inference"].meets_project_target,
@@ -310,6 +315,7 @@ class BenchmarkRunner:
                 device=target_dev,
                 duration_seconds=self.soak_duration,
                 sample_interval_seconds=sample_interval,
+                accelerated=self.soak_ingestion_mode == "accelerated",
                 config=self.config,
             )
 
@@ -476,11 +482,20 @@ class BenchmarkRunner:
 
         if report.soak_test:
             soak = report.soak_test
-            lines.append("## 5. 10-Minute Streaming Soak Test Diagnostics")
+            lines.append("## 5. Streaming Stress Soak Diagnostics")
             lines.append("")
             lines.append(
-                f"- **Duration**: `{soak.duration_seconds:.1f}s` ({soak.duration_seconds / 60:.1f} min)"
+                "- **Ingestion Mode**: `accelerated` (frames are ingested without real-time pacing "
+                "and may represent more audio than elapsed wall time)"
+                if soak.ingestion_mode == "accelerated"
+                else "- **Ingestion Mode**: `real_time_paced` (frames are paced according to represented frame duration)"
             )
+            lines.append(f"- **Configured Duration**: `{soak.configured_duration_seconds:.1f}s`")
+            lines.append(
+                f"- **Measured Wall-Clock Duration**: `{soak.measured_duration_seconds:.1f}s` "
+                f"({soak.measured_duration_seconds / 60:.1f} min)"
+            )
+            lines.append(f"- **Frame Duration**: `{soak.frame_duration_ms:.1f} ms`")
             lines.append(f"- **Total Frames Ingested**: `{soak.total_frames_ingested}`")
             lines.append(f"- **Total Windows Evaluated**: `{soak.total_windows_evaluated}`")
             lines.append(f"- **Initial RSS Memory**: `{soak.initial_rss_mb:.2f} MB`")

@@ -26,6 +26,9 @@ export interface WindowHistoryItem {
   scoreIsCalibrated: boolean;
   calibratedScore: number | null;
   rawScore: number | null;
+  smoothedScore: number | null;
+  thresholdLow: number;
+  thresholdHigh: number;
   status: DetectionStatus;
   reason: string;
   reasonDetails: string;
@@ -84,6 +87,8 @@ export interface ServerWindowResult {
   uncalibrated_synthetic_score?: number | null;
   score_is_calibrated?: boolean;
   operating_threshold?: number;
+  threshold_low?: number;
+  threshold_high?: number;
   operating_threshold_source?: string;
   raw_score?: number | null;
   calibrated_score?: number | null;
@@ -135,6 +140,11 @@ export interface FileWindowResult {
   is_eligible?: boolean;
   is_partial?: boolean;
   abstain_reason?: string | null;
+  decision_state?: DetectionStatus | string | null;
+  decision_reason?: string | null;
+  decision_reason_details?: string | null;
+  smoothed_score?: number | null;
+  history_scores?: number[];
   quality_status: {
     peak_level: number;
     rms: number;

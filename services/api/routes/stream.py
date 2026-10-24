@@ -22,7 +22,14 @@ from services.api.resource_admission import (
 )
 from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.core.schema import Disclaimers
-from voiceshield.dsp.exceptions import AudioPreprocessingError
+from voiceshield.dsp.exceptions import (
+    AudioDecodingError,
+    AudioPreprocessingError,
+    CorruptAudioError,
+    EmptyAudioError,
+    InvalidAudioValueError,
+    UnsupportedAudioError,
+)
 from voiceshield.streaming.policy import ReasonCode
 from voiceshield.streaming.session import StreamingSession, WindowForInference
 
@@ -152,10 +159,32 @@ class ServerWindowResult(BaseModel):
     uncalibrated_synthetic_score: float | None = None
     score_is_calibrated: bool = False
     operating_threshold: float = 0.65
+    threshold_low: float = 0.35
+    threshold_high: float = 0.65
     operating_threshold_source: str = "unvalidated_heuristic"
     raw_score: float | None = None
     calibrated_score: float | None = None
     decision: dict[str, Any]
+
+
+def _safe_stream_audio_error(exc: AudioPreprocessingError) -> str:
+    """Expose actionable validation errors without leaking decoder internals."""
+    if isinstance(exc, EmptyAudioError):
+        return "Audio frame is empty. Send at least one complete PCM frame."
+    if isinstance(exc, (UnsupportedAudioError, InvalidAudioValueError)):
+        return str(exc)
+    if isinstance(exc, AudioDecodingError):
+        message = str(exc)
+        if (
+            "Odd-length int16 buffer rejected" in message
+            or "buffer length" in message
+            or "PCM byte buffer length" in message
+        ):
+            return message
+        return "Failed to decode audio. The selected stream frame is not valid PCM audio."
+    if isinstance(exc, CorruptAudioError):
+        return "Failed to decode audio. The selected stream frame is not valid PCM audio."
+    return "Failed to decode audio. The selected stream frame is not valid PCM audio."
 
 
 class ServerStopAck(BaseModel):
@@ -582,6 +611,8 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     uncalibrated_synthetic_score=synth_score,
                     score_is_calibrated=False,
                     operating_threshold=session.config.temporal_policy.threshold_high,
+                    threshold_low=session.config.temporal_policy.threshold_low,
+                    threshold_high=session.config.temporal_policy.threshold_high,
                     operating_threshold_source="unvalidated_heuristic",
                     raw_score=synth_score,
                     calibrated_score=None,
@@ -695,6 +726,8 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                             uncalibrated_synthetic_score=None,
                             score_is_calibrated=False,
                             operating_threshold=session.config.temporal_policy.threshold_high,
+                            threshold_low=session.config.temporal_policy.threshold_low,
+                            threshold_high=session.config.temporal_policy.threshold_high,
                             operating_threshold_source="unvalidated_heuristic",
                             raw_score=None,
                             calibrated_score=None,
@@ -819,11 +852,13 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                         dtype=pcm_enc,
                     )
                 except AudioPreprocessingError as exc:
-                    logger.warning("Session %s corrupt audio frame: %s", session_id, exc)
+                    logger.warning(
+                        "Session %s corrupt audio frame: %s", session_id, exc, exc_info=True
+                    )
                     await websocket.send_json(
                         ServerErrorEvent(
                             error_code="AUDIO_DECODE_ERROR",
-                            message=f"Invalid audio frame data: {exc}",
+                            message=_safe_stream_audio_error(exc),
                         ).model_dump()
                     )
                     continue
@@ -878,6 +913,8 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                         uncalibrated_synthetic_score=None,
                         score_is_calibrated=False,
                         operating_threshold=session.config.temporal_policy.threshold_high,
+                        threshold_low=session.config.temporal_policy.threshold_low,
+                        threshold_high=session.config.temporal_policy.threshold_high,
                         operating_threshold_source="unvalidated_heuristic",
                         raw_score=None,
                         calibrated_score=None,

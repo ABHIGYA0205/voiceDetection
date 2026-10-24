@@ -526,7 +526,9 @@ def test_websocket_malformed_frame_emits_audio_decode_error_and_recovers() -> No
             err = ws.receive_json()
             assert err["type"] == "error"
             assert err["error_code"] == "AUDIO_DECODE_ERROR"
-            assert "Odd-length int16 buffer rejected" in err["message"]
+            assert err["message"] == "Odd-length int16 buffer rejected: 3 bytes."
+            assert "0x" not in err["message"]
+            assert "BytesIO" not in err["message"]
 
             # 2. Connection and session remain alive: send valid 4.0s audio
             c4 = _generate_sine_pcm(4.0, sample_rate=16000, freq=350.0, amplitude=0.5)

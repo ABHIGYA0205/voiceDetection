@@ -204,7 +204,7 @@ async def analyze_audio_file(
     # 5. Result validation and error mapping
     if result.status == "error":
         err_msg = result.error_message or "Unknown evaluation error"
-        if "exceeds maximum allowed limit" in err_msg:
+        if result.error_code == "AUDIO_DURATION_EXCEEDED":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=ApiErrorDetail(

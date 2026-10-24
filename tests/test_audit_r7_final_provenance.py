@@ -229,7 +229,9 @@ def test_correction_c_custom_config_values_reach_stages_and_soak(tmp_path: Path)
         patch("voiceshield.benchmark.runner.benchmark_audio_decoding_and_resampling") as mock_s1,
         patch("voiceshield.benchmark.runner.benchmark_feature_extraction") as mock_s2,
         patch("voiceshield.benchmark.runner.benchmark_model_inference") as mock_s3,
-        patch("voiceshield.benchmark.runner.benchmark_calibration_and_temporal_policy") as mock_s4,
+        patch(
+            "voiceshield.benchmark.runner.benchmark_score_smoothing_and_temporal_policy"
+        ) as mock_s4,
         patch("voiceshield.benchmark.runner.benchmark_end_to_end_window_processing") as mock_s5,
         patch("voiceshield.benchmark.runner.run_streaming_soak_test") as mock_soak,
     ):
@@ -320,7 +322,7 @@ def test_correction_c_device_matrix_separated_in_markdown_report() -> None:
             "audio_decoding_pct": 10.0,
             "feature_extraction_pct": 10.0,
             "model_inference_pct": 70.0,
-            "calibration_and_policy_pct": 10.0,
+            "score_smoothing_and_policy_pct": 10.0,
         },
         "inference_meets_target": True,
         "end_to_end_meets_target": True,

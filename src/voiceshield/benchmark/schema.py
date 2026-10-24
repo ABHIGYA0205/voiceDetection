@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -70,7 +70,19 @@ class SoakSample(BaseModel):
 class SoakTestReport(BaseModel):
     """Results and health diagnostics from the streaming soak test."""
 
+    configured_duration_seconds: float = Field(
+        description="Requested wall-clock stress-test duration in seconds."
+    )
     duration_seconds: float = Field(description="Total duration of soak test in seconds.")
+    measured_duration_seconds: float = Field(
+        description="Measured wall-clock duration of the completed soak in seconds."
+    )
+    ingestion_mode: Literal["accelerated", "real_time_paced"] = Field(
+        description="Audio ingestion mode: accelerated or real_time_paced."
+    )
+    frame_duration_ms: float = Field(
+        description="Duration represented by each ingested PCM frame in milliseconds."
+    )
     total_frames_ingested: int = Field(description="Total frames pushed through the stream.")
     total_windows_evaluated: int = Field(description="Total 4.0s windows evaluated by model.")
     total_windows_dropped: int = Field(

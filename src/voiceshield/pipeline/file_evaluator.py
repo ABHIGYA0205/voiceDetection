@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,15 @@ from pydantic import BaseModel, Field, model_validator
 from voiceshield.config.overrides import apply_config_overrides
 from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.core.schema import Disclaimers
-from voiceshield.dsp.exceptions import AudioPreprocessingError
+from voiceshield.dsp.exceptions import (
+    AudioDecodingError,
+    AudioDurationLimitError,
+    AudioPreprocessingError,
+    CorruptAudioError,
+    EmptyAudioError,
+    InvalidAudioValueError,
+    UnsupportedAudioError,
+)
 from voiceshield.dsp.preprocessor import load_audio
 from voiceshield.dsp.quality import AudioQualityMetrics, compute_quality_metrics
 from voiceshield.dsp.scheduler import CanonicalWindowScheduler
@@ -24,6 +33,32 @@ from voiceshield.streaming.policy import (
     TemporalDecisionPolicy,
 )
 from voiceshield.streaming.vad import EnergyVAD
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_file_audio_error(exc: AudioPreprocessingError) -> tuple[str, str]:
+    """Map typed audio failures to actionable safe API messages."""
+    if isinstance(exc, EmptyAudioError):
+        return (
+            "EMPTY_AUDIO_FILE",
+            "Audio file is empty. Select a WAV or FLAC file containing audio.",
+        )
+    if isinstance(exc, AudioDurationLimitError):
+        return "AUDIO_DURATION_EXCEEDED", str(exc)
+    if isinstance(exc, UnsupportedAudioError):
+        return "UNSUPPORTED_AUDIO", str(exc)
+    if isinstance(exc, InvalidAudioValueError):
+        return "INVALID_AUDIO_VALUE", str(exc)
+    if isinstance(exc, (AudioDecodingError, CorruptAudioError)):
+        return (
+            "AUDIO_PROCESSING_ERROR",
+            "Failed to decode audio. The selected file is not valid supported WAV or FLAC audio.",
+        )
+    return (
+        "AUDIO_PROCESSING_ERROR",
+        "Failed to decode audio. The selected file is not valid supported WAV or FLAC audio.",
+    )
 
 
 class WindowResult(BaseModel):
@@ -144,6 +179,9 @@ class FileInferenceResult(BaseModel):
     )
     error_message: str | None = Field(
         default=None, description="Error details if status == 'error'."
+    )
+    error_code: str | None = Field(
+        default=None, description="Stable error code if status == 'error'."
     )
     abstain_reason: str | None = Field(
         default=None, description="Reason details if status == 'insufficient_evidence'."
@@ -334,20 +372,24 @@ def evaluate_audio(
             max_duration_seconds=max_duration_seconds,
         )
     except AudioPreprocessingError as exc:
+        logger.warning("Audio preprocessing failed for %s: %s", path_str, exc, exc_info=True)
+        error_code, error_message = _safe_file_audio_error(exc)
         return FileInferenceResult(
             file_path=path_str,
             status="error",
-            error_message=str(exc),
+            error_code=error_code,
+            error_message=error_message,
             effective_threshold=effective_threshold,
             config_hash=effective_config_hash,
             metadata=error_metadata,
             disclaimers=Disclaimers(),
         )
-    except Exception as exc:
+    except Exception:
+        logger.exception("Unexpected audio loading failure for %s", path_str)
         return FileInferenceResult(
             file_path=path_str,
             status="error",
-            error_message=f"Unexpected error loading audio: {exc}",
+            error_message="Failed to decode audio. The selected file is not valid supported WAV or FLAC audio.",
             effective_threshold=effective_threshold,
             config_hash=effective_config_hash,
             metadata=error_metadata,

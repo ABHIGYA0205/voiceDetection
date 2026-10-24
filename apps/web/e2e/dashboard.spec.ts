@@ -207,7 +207,8 @@ test.describe('VoiceShield Real-Time Microphone Dashboard', () => {
     const timelineCard = page.locator('.timeline-card').first();
     await expect(timelineCard).toBeVisible();
     await expect(timelineCard.locator('.timeline-idx')).toHaveText('Window #0');
-    await expect(timelineCard.locator('.timeline-score')).toContainText('Score: 0.870');
+    await expect(timelineCard.locator('.timeline-score').nth(0)).toContainText('Raw: 0.870');
+    await expect(timelineCard.locator('.timeline-score').nth(1)).toContainText('Smoothed: 0.850');
 
     // 7. Verify Compliance: forbidden claims are NEVER present
     const content = await page.content();

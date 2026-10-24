@@ -38,7 +38,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--soak-duration",
         type=float,
         default=600.0,
-        help="Streaming soak test duration in seconds (600s = 10 min; set 0 to skip).",
+        help="Wall-clock stress-test duration in seconds; accelerated ingestion may represent more audio than elapsed time (set 0 to skip).",
+    )
+    parser.add_argument(
+        "--soak-ingestion-mode",
+        choices=("accelerated", "real_time_paced"),
+        default="accelerated",
+        help="Streaming stress-test ingestion mode; accelerated is not real-time-paced.",
     )
     parser.add_argument(
         "--output-dir",
@@ -94,6 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             warmup=args.warmup,
             devices=device_list,
             soak_duration_seconds=args.soak_duration,
+            soak_ingestion_mode=args.soak_ingestion_mode,
         )
 
         report = runner.run_suite()
@@ -128,10 +135,23 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if report.soak_test:
             soak = report.soak_test
-            print("\n[10-Minute Streaming Soak Diagnostics]:")
+            print("\n[Streaming Stress Soak Diagnostics]:")
+            if soak.ingestion_mode == "accelerated":
+                print(
+                    "  - Ingestion mode: accelerated (frames are ingested without real-time pacing "
+                    "and may represent more audio than elapsed wall time)"
+                )
+            else:
+                print(
+                    "  - Ingestion mode: real_time_paced "
+                    "(frames are paced according to represented frame duration)"
+                )
+            print(f"  - Configured duration: {soak.configured_duration_seconds:.1f}s")
             print(
-                f"  - Duration: {soak.duration_seconds:.1f}s ({soak.duration_seconds / 60:.1f} min)"
+                f"  - Measured wall-clock duration: {soak.measured_duration_seconds:.1f}s "
+                f"({soak.measured_duration_seconds / 60:.1f} min)"
             )
+            print(f"  - Frame duration: {soak.frame_duration_ms:.1f} ms")
             print(
                 f"  - Initial RSS: {soak.initial_rss_mb:.1f} MB | Peak: {soak.peak_rss_mb:.1f} MB | Final: {soak.final_rss_mb:.1f} MB"
             )
