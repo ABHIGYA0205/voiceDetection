@@ -235,6 +235,7 @@ export function App(): React.JSX.Element {
 
   // Cleanup on component unmount
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       forceCleanup();
@@ -305,7 +306,11 @@ export function App(): React.JSX.Element {
         `;
         const blob = new Blob([workletCode], { type: 'application/javascript' });
         const blobUrl = URL.createObjectURL(blob);
-        await audioCtx.audioWorklet.addModule(blobUrl);
+        try {
+          await audioCtx.audioWorklet.addModule(blobUrl);
+        } finally {
+          URL.revokeObjectURL(blobUrl);
+        }
       }
 
       const sourceNode = audioCtx.createMediaStreamSource(stream);
@@ -509,12 +514,17 @@ export function App(): React.JSX.Element {
       </header>
 
       {/* Model Not Ready Alert (if real mode without checkpoint) */}
-      {readiness.status === 'not_ready' && (
+      {(readiness.status === 'not_ready' || readiness.status === 'error') && (
         <div className="model-not-ready-banner" role="alert" id="model-not-ready-banner">
-          <strong>⚠️ DETECTOR MODEL NOT READY</strong>
+          <strong>
+            {readiness.status === 'not_ready'
+              ? '⚠️ DETECTOR MODEL NOT READY'
+              : '⚠️ DETECTOR READINESS UNAVAILABLE'}
+          </strong>
           <p>
-            VoiceShield is running in real mode but the AASIST-L checkpoint weights are absent. Real mode
-            refuses to mark model as ready without verified weights.
+            {readiness.status === 'not_ready'
+              ? 'VoiceShield is running in real mode but the detector is not ready. Real mode refuses to mark model as ready without verified weights.'
+              : 'VoiceShield could not verify detector readiness. Streaming and file analysis remain unavailable until the API responds successfully.'}
           </p>
           {readiness.reason && <pre>{readiness.reason}</pre>}
         </div>

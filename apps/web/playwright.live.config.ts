@@ -14,17 +14,19 @@ export default defineConfig({
       command:
         `cd ../.. && VOICESHIELD_MOCK_MODEL=true VOICESHIELD_DEVICE=cpu ` +
         `VOICESHIELD_CORS_ORIGINS=http://127.0.0.1:${mockPreviewPort} ` +
-        `uv run uvicorn services.api.main:app --host 127.0.0.1 --port ${mockApiPort}`,
+        `uv run --offline uvicorn services.api.main:app --host 127.0.0.1 --port ${mockApiPort}`,
       url: `http://127.0.0.1:${mockApiPort}/health`,
       reuseExistingServer: false,
       timeout: 60000,
     },
     {
       command:
-        `cd ../.. && VOICESHIELD_DEVICE=cpu ` +
+        `cd ../.. && rm -rf /tmp/voiceshield-r9-missing && mkdir -p /tmp/voiceshield-r9-missing && ` +
+        `trap 'rm -rf /tmp/voiceshield-r9-missing' EXIT && ` +
+        `VOICESHIELD_DEVICE=cpu ` +
         `VOICESHIELD_CORS_ORIGINS=http://127.0.0.1:${missingPreviewPort} ` +
         `VOICESHIELD_CHECKPOINT_PATH=/tmp/voiceshield-r9-missing/AASIST-L.pth ` +
-        `uv run uvicorn services.api.main:app --host 127.0.0.1 --port ${missingApiPort}`,
+        `uv run --offline uvicorn services.api.main:app --host 127.0.0.1 --port ${missingApiPort}`,
       url: `http://127.0.0.1:${missingApiPort}/health`,
       reuseExistingServer: false,
       timeout: 60000,
@@ -32,7 +34,7 @@ export default defineConfig({
     {
       command:
         `VOICESHIELD_API_TARGET=http://127.0.0.1:${mockApiPort} ` +
-        `npm run preview -- --host 127.0.0.1 --port ${mockPreviewPort}`,
+        `npm run preview -- --host 127.0.0.1 --port ${mockPreviewPort} --strictPort`,
       url: `http://127.0.0.1:${mockPreviewPort}`,
       reuseExistingServer: false,
       timeout: 60000,
@@ -40,7 +42,7 @@ export default defineConfig({
     {
       command:
         `VOICESHIELD_API_TARGET=http://127.0.0.1:${missingApiPort} ` +
-        `npm run preview -- --host 127.0.0.1 --port ${missingPreviewPort}`,
+        `npm run preview -- --host 127.0.0.1 --port ${missingPreviewPort} --strictPort`,
       url: `http://127.0.0.1:${missingPreviewPort}`,
       reuseExistingServer: false,
       timeout: 60000,

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { App, getWebSocketStreamUrl } from './App';
 
 // Mock Web Audio API and MediaDevices
@@ -8,30 +9,42 @@ class MockAudioWorklet {
 }
 
 class MockAudioContext {
+  static instances: MockAudioContext[] = [];
+  static initialState: 'running' | 'suspended' = 'running';
   sampleRate = 48000;
-  state = 'running';
+  state: 'running' | 'suspended' | 'closed' = MockAudioContext.initialState;
   destination = {};
   audioWorklet = new MockAudioWorklet();
-  resume = vi.fn().mockResolvedValue(undefined);
-  createGain = vi.fn().mockReturnValue({
-    gain: { value: 1 },
+  resume = vi.fn().mockImplementation(async () => {
+    this.state = 'running';
+  });
+  createGain = vi.fn().mockImplementation(() => {
+    const gain = { gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() };
+    return gain;
+  });
+  createMediaStreamSource = vi.fn().mockImplementation(() => ({
     connect: vi.fn(),
     disconnect: vi.fn(),
-  });
-  createMediaStreamSource = vi.fn().mockReturnValue({
-    connect: vi.fn(),
-    disconnect: vi.fn(),
-  });
+  }));
   close = vi.fn().mockResolvedValue(undefined);
+
+  constructor() {
+    MockAudioContext.instances.push(this);
+  }
 }
 
 class MockAudioWorkletNode {
+  static instances: MockAudioWorkletNode[] = [];
   port = {
     onmessage: null as ((event: MessageEvent) => void) | null,
     postMessage: vi.fn(),
   };
   connect = vi.fn();
   disconnect = vi.fn();
+
+  constructor() {
+    MockAudioWorkletNode.instances.push(this);
+  }
 }
 
 // Mock WebSocket
@@ -76,6 +89,9 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
   beforeEach(() => {
     MockWebSocket.instances = [];
+    MockAudioContext.instances = [];
+    MockAudioContext.initialState = 'running';
+    MockAudioWorkletNode.instances = [];
     mockTracks = [{ stop: vi.fn() }];
 
     vi.stubGlobal('AudioContext', MockAudioContext);
@@ -131,6 +147,17 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
     expect(bodyText).not.toContain('identity verified');
     expect(bodyText).not.toContain('fraud detected');
     expect(bodyText).not.toContain('100% real');
+  });
+
+  it('renders guidance for a readiness transport error', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: vi.fn().mockResolvedValue({}),
+    } as unknown as Response);
+    render(<App />);
+    expect((await screen.findByRole('alert')).textContent).toContain('READINESS UNAVAILABLE');
+    expect(screen.getByText(/HTTP 500/i)).toBeDefined();
   });
 
   it('transitions state on startStream user gesture and WebSocket handshake', async () => {
@@ -405,6 +432,8 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
     // Verify all hardware tracks stopped
     expect(mockTracks[0].stop).toHaveBeenCalled();
+    expect(MockAudioContext.instances[0].close).toHaveBeenCalledOnce();
+    expect(MockAudioWorkletNode.instances[0].disconnect).toHaveBeenCalledOnce();
     expect(JSON.parse(ws.sentMessages[ws.sentMessages.length - 1] as string).type).toBe('stop');
     await act(async () => {
       ws.simulateServerMessage({
@@ -418,6 +447,137 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
     // Also verify unmount calls cleanup safely
     unmount();
+  });
+
+  it('completes graceful stop through ACK in StrictMode', async () => {
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Start Microphone Stream/i }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    const ws = MockWebSocket.instances[0];
+    await act(async () => {
+      ws.simulateServerMessage({ type: 'session_started', session_id: 'strict-mode-session' });
+      fireEvent.click(screen.getByRole('button', { name: /Stop Stream & Disconnect/i }));
+      ws.simulateServerMessage({
+        type: 'session_stopped',
+        session_id: 'strict-mode-session',
+        total_duration_seconds: 1,
+        total_windows_evaluated: 0,
+      });
+    });
+
+    expect(screen.getByText(/Mic: idle/i)).toBeDefined();
+    expect(screen.getByText(/Connection: disconnected/i)).toBeDefined();
+    expect(ws.sentMessages.filter((message) => {
+      return typeof message === 'string' && JSON.parse(message).type === 'stop';
+    })).toHaveLength(1);
+  });
+
+  it('uses the bounded timeout and sends only one stop command for duplicate clicks', async () => {
+    vi.useFakeTimers();
+    try {
+      render(<App />);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /Start Microphone Stream/i }));
+        await vi.advanceTimersByTimeAsync(10);
+      });
+      const ws = MockWebSocket.instances[0];
+      await act(async () => {
+        ws.simulateServerMessage({ type: 'session_started', session_id: 'timeout-session' });
+        fireEvent.click(screen.getByRole('button', { name: /Stop Stream & Disconnect/i }));
+        fireEvent.click(screen.getByRole('button', { name: /Stop Stream & Disconnect/i }));
+      });
+      expect(ws.sentMessages.filter((message) => {
+        return typeof message === 'string' && JSON.parse(message).type === 'stop';
+      })).toHaveLength(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1800);
+      });
+      expect(screen.getByText(/Mic: idle/i)).toBeDefined();
+      expect(screen.getByText(/Connection: disconnected/i)).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resumes suspended audio and builds the source-worklet-silent graph', async () => {
+    MockAudioContext.initialState = 'suspended';
+    render(<App />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Start Microphone Stream/i }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    const context = MockAudioContext.instances[0];
+    const source = context.createMediaStreamSource.mock.results[0].value;
+    const gain = context.createGain.mock.results[0].value;
+    const worklet = MockAudioWorkletNode.instances[0];
+    expect(context.resume).toHaveBeenCalledOnce();
+    expect(source.connect).toHaveBeenCalledWith(worklet);
+    expect(worklet.connect).toHaveBeenCalledWith(gain);
+    expect(gain.connect).toHaveBeenCalledWith(context.destination);
+  });
+
+  it('cleans up stream resources on network error without leaving active state', async () => {
+    render(<App />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Start Microphone Stream/i }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    const ws = MockWebSocket.instances[0];
+    await act(async () => {
+      ws.onerror?.();
+    });
+    expect(screen.getByText(/Mic: idle/i)).toBeDefined();
+    expect(screen.getByText(/Connection: disconnected/i)).toBeDefined();
+    expect(mockTracks[0].stop).toHaveBeenCalledOnce();
+  });
+
+  it('renders a final window result received before the stop ACK', async () => {
+    render(<App />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Start Microphone Stream/i }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    const ws = MockWebSocket.instances[0];
+    await act(async () => {
+      ws.simulateServerMessage({ type: 'session_started', session_id: 'final-window-session' });
+      fireEvent.click(screen.getByRole('button', { name: /Stop Stream & Disconnect/i }));
+      ws.simulateServerMessage({
+        type: 'window_result',
+        session_id: 'final-window-session',
+        window_index: 9,
+        window_start_sec: 9,
+        window_end_sec: 13,
+        speech_seconds: 3,
+        is_eligible: true,
+        synthetic_score: 0.77,
+        score_is_calibrated: false,
+        decision: {
+          state: 'high',
+          smoothed_score: 0.77,
+          reason: 'final_window',
+          reason_details: 'Final window received before stop acknowledgement.',
+          window_index: 9,
+        },
+      });
+    });
+    expect(screen.getByText(/Window #9/i)).toBeDefined();
+    await act(async () => {
+      ws.simulateServerMessage({
+        type: 'session_stopped',
+        session_id: 'final-window-session',
+        total_duration_seconds: 1,
+        total_windows_evaluated: 1,
+      });
+    });
+    expect(screen.getByText(/Mic: idle/i)).toBeDefined();
   });
 
   it('computes relative WebSocket URL from window.location without hardcoding port 8000', () => {

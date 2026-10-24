@@ -2,6 +2,31 @@ import { test, expect, type Page } from '@playwright/test';
 
 const missingPreviewUrl = 'http://127.0.0.1:5182';
 
+async function installSyntheticMicrophone(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const context = new AudioContext();
+    const oscillator = context.createOscillator();
+    const destination = context.createMediaStreamDestination();
+    oscillator.frequency.value = 440;
+    oscillator.connect(destination);
+    oscillator.start();
+    const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async (constraints) => {
+      if (!constraints.audio) return originalGetUserMedia(constraints);
+      const stream = destination.stream;
+      for (const track of stream.getTracks()) {
+        const originalStop = track.stop.bind(track);
+        track.stop = () => {
+          originalStop();
+          oscillator.stop();
+          void context.close();
+        };
+      }
+      return stream;
+    };
+  });
+}
+
 function wavFixture(): Buffer {
   const sampleRate = 16000;
   const samples = sampleRate * 4;
@@ -25,29 +50,48 @@ function wavFixture(): Buffer {
   return Buffer.concat([header, data]);
 }
 
-test.describe('VoiceShield live browser/API contract', () => {
-  test('uses real proxied readiness and reports missing checkpoint without claiming ready', async ({
-    page,
-    request,
-  }) => {
-    const response = await request.get('/api/v1/ready');
-    expect(response.status()).toBe(200);
-    const ready = await response.json();
-    expect(ready.model_id).toBe('mock/aasist-l');
-    expect(ready.provenance_status).toBe('mock');
-    expect(ready.checkpoint_verified).toBe(false);
+function websocketFrameText(frame: unknown): string {
+  const wrapped = frame as { payload?: unknown };
+  const payload = wrapped.payload ?? frame;
+  if (typeof payload === 'string') return payload;
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    'type' in payload &&
+    payload.type === 'Buffer' &&
+    'data' in payload &&
+    Array.isArray(payload.data)
+  ) {
+    return Buffer.from(payload.data).toString('utf8');
+  }
+  return '';
+}
 
+test.describe('VoiceShield live browser/API contract', () => {
+  test('uses page readiness responses for mock and missing-checkpoint previews', async ({ page }) => {
+    const mockReadyResponse = page.waitForResponse(
+      (response) => response.url().endsWith('/api/v1/ready')
+    );
     await page.goto('/');
+    const mockResponse = await mockReadyResponse;
+    expect(mockResponse.status()).toBe(200);
+    const mockReady = await mockResponse.json();
+    expect(mockReady.model_id).toBe('mock/aasist-l');
+    expect(mockReady.provenance_status).toBe('mock');
+    expect(mockReady.checkpoint_verified).toBe(false);
+    expect(mockReady.config_hash).toMatch(/^[0-9a-f]{64}$/);
     await expect(page.locator('#mock-detector-badge')).toBeVisible();
     await expect(page.locator('#model-not-ready-banner')).toHaveCount(0);
-    await expect(page.locator('#connection-state-pill')).toContainText('disconnected');
+    await expect(page.locator('#recording-state-pill')).toContainText('idle');
 
-    const missing = await page.request.get(`${missingPreviewUrl}/api/v1/ready`);
-    expect(missing.status()).toBe(503);
-    const missingBody = await missing.json();
-    expect(missingBody.detail.reason).toContain('checkpoint');
-
+    const missingReadyResponse = page.waitForResponse(
+      (response) => response.url().endsWith('/api/v1/ready')
+    );
     await page.goto(missingPreviewUrl);
+    const missingResponse = await missingReadyResponse;
+    expect(missingResponse.status()).toBe(503);
+    const missingBody = await missingResponse.json();
+    expect(missingBody.detail.reason).toContain('checkpoint');
     await expect(page.locator('#model-not-ready-banner')).toBeVisible();
     await expect(page.locator('#model-not-ready-banner')).toContainText(
       missingBody.detail.reason
@@ -55,83 +99,144 @@ test.describe('VoiceShield live browser/API contract', () => {
     await expect(page.locator('#mock-detector-badge')).toHaveCount(0);
   });
 
-  test('uploads a real in-memory WAV through the proxied file contract', async ({ page }) => {
+  test('uploads a real WAV and renders the returned file contract', async ({ page }) => {
+    const readyResponse = page.waitForResponse(
+      (response) => response.url().endsWith('/api/v1/ready')
+    );
     await page.goto('/');
+    const ready = await (await readyResponse).json();
     await page.getByRole('button', { name: /File Audio Analysis/i }).click();
     await page.locator('#audio-file-input').setInputFiles({
       name: 'r9-fixture.wav',
       mimeType: 'audio/wav',
       buffer: wavFixture(),
     });
-    await page.getByRole('button', { name: /Analyze Audio File/i }).click();
-
-    await expect(page.locator('.file-results-card')).toBeVisible({ timeout: 30000 });
-    await expect(page.locator('[data-testid="mock-detector-badge"]')).toBeVisible();
+    await expect(page.locator('#selected-file-badge')).toBeVisible();
+    const analyzeButton = page.getByRole('button', { name: /Analyze Audio File/i });
+    await expect(analyzeButton).toBeEnabled();
+    const [response] = await Promise.all([
+      page.waitForResponse((candidate) => candidate.url().includes('/api/v1/analyze/file')),
+      analyzeButton.click(),
+    ]);
+    expect(response.status()).toBe(200);
+    const result = await response.json();
+    expect(result.is_mock_detector).toBe(true);
+    expect(result.score_is_calibrated).toBe(false);
+    expect(result.config_hash).toBe(ready.config_hash);
+    expect(result.metadata.is_mock_detector).toBe(true);
+    expect(result.metadata.provenance_status).toBe('mock');
+    expect(result.metadata.checkpoint_sha256).toBeNull();
+    expect(result.disclaimers.advisory_action).toMatch(/advisory/i);
+    expect(result.disclaimers.fraud_probability).toMatch(/not/i);
+    expect(result.disclaimers.identity_proof).toMatch(/not/i);
+    expect(result.disclaimers.capture_boundary).toMatch(/browser/i);
+    await expect(page.locator('.file-results-card')).toBeVisible();
     await expect(page.locator('.threshold-provenance-banner')).toContainText(
       'Uncalibrated model output'
     );
     await expect(page.locator('.file-results-card')).toContainText('Advisory Verdict');
   });
 
-  test('streams through the native proxied WebSocket and drains on one stop command', async ({
+  test('drives the real React microphone path through native proxied WebSocket traffic', async ({
     page,
   }) => {
+    await installSyntheticMicrophone(page);
+    const sockets: {
+      url: string;
+      sent: string[];
+      received: string[];
+      binary: number;
+      closed: boolean;
+      sequence: string[];
+    }[] = [];
+    page.on('websocket', (socket) => {
+      if (!socket.url().endsWith('/api/v1/stream')) return;
+      const observed = {
+        url: socket.url(),
+        sent: [],
+        received: [],
+        binary: 0,
+        closed: false,
+        sequence: [],
+      };
+      sockets.push(observed);
+      socket.on('framesent', (payload) => {
+        const text = websocketFrameText(payload);
+        try {
+          JSON.parse(text);
+          observed.sent.push(text);
+          observed.sequence.push(`sent:${JSON.parse(text).type}`);
+        } catch {
+          observed.binary += 1;
+          observed.sequence.push('sent:binary');
+        }
+      });
+      socket.on('framereceived', (payload) => {
+        const text = websocketFrameText(payload);
+        try {
+          JSON.parse(text);
+          observed.received.push(text);
+          observed.sequence.push(`received:${JSON.parse(text).type}`);
+        } catch {
+          // The live contract only needs structured server events.
+        }
+      });
+      socket.on('close', () => {
+        observed.closed = true;
+        observed.sequence.push('close');
+      });
+    });
+
+    const readyResponse = page.waitForResponse(
+      (response) => response.url().endsWith('/api/v1/ready')
+    );
     await page.goto('/');
-    await page.evaluate(() => {
-      const socket = new WebSocket(
-        `${window.location.origin.replace(/^http/, 'ws')}/api/v1/stream`
-      );
-      const received: string[] = [];
-      (window as unknown as { r9Socket: WebSocket; r9Received: string[] }).r9Socket = socket;
-      (window as unknown as { r9Socket: WebSocket; r9Received: string[] }).r9Received =
-        received;
-      socket.addEventListener('message', (event) => {
-        if (typeof event.data === 'string') received.push(event.data);
-      });
-      socket.addEventListener('open', () => {
-        socket.send(
-          JSON.stringify({
-            type: 'start',
-            protocol_version: '1.0',
-            sample_rate: 16000,
-            channels: 1,
-            pcm_encoding: 'int16',
-          })
-        );
-      });
-    });
-    await expect.poll(() => page.evaluate(() => {
-      const state = (window as unknown as { r9Received?: string[] }).r9Received ?? [];
-      return state.some((frame) => JSON.parse(frame).type === 'session_started');
-    }), { timeout: 15000 }).toBe(true);
-    await page.evaluate(() => {
-      const socket = (window as unknown as { r9Socket: WebSocket }).r9Socket;
-      const frame = new ArrayBuffer(32000);
-      const samples = new Int16Array(frame);
-      for (let index = 0; index < samples.length; index += 1) {
-        samples[index] = Math.round(Math.sin((2 * Math.PI * 440 * index) / 16000) * 12000);
-      }
-      for (let index = 0; index < 8; index += 1) {
-        socket.send(frame);
-      }
-    });
-    await expect.poll(() => page.evaluate(() => {
-      const state = (window as unknown as { r9Received?: string[] }).r9Received ?? [];
-      return state.some((frame) => JSON.parse(frame).type === 'window_result');
-    }), { timeout: 30000 }).toBe(true);
-    await page.evaluate(() => {
-      (window as unknown as { r9Socket: WebSocket }).r9Socket.send(
-        JSON.stringify({ type: 'stop' })
-      );
+    const ready = await (await readyResponse).json();
+    await page.getByRole('button', { name: /Start Microphone Stream/i }).click();
+
+    await expect.poll(() => sockets.length, { timeout: 15000 }).toBe(1);
+    const socket = sockets[0];
+    expect(socket.url).toMatch(/^ws:\/\/127\.0\.0\.1:5181\/api\/v1\/stream$/);
+    await expect.poll(
+      () => socket.sent.filter((frame) => JSON.parse(frame).type === 'start').length,
+      { timeout: 15000 }
+    ).toBe(1);
+    await expect(page.locator('#connection-state-pill')).toContainText('connected', {
+      timeout: 15000,
     });
     await expect.poll(
-      () => page.evaluate(() => {
-        const state = (window as unknown as { r9Received?: string[] }).r9Received ?? [];
-        return state.filter((frame) => JSON.parse(frame).type === 'session_stopped').length;
-      })
+      () => socket.received.some((frame) => JSON.parse(frame).type === 'session_started'),
+      { timeout: 15000 }
+    ).toBe(true);
+    const sessionStarted = JSON.parse(
+      socket.received.find((frame) => JSON.parse(frame).type === 'session_started') as string
+    );
+    expect(sessionStarted.is_mock_detector).toBe(true);
+    expect(sessionStarted.config_hash).toBe(ready.config_hash);
+    await expect.poll(() => socket.binary, { timeout: 30000 }).toBeGreaterThan(0);
+    await expect.poll(
+      () => socket.received.some((frame) => JSON.parse(frame).type === 'window_result'),
+      { timeout: 30000 }
+    ).toBe(true);
+    await expect(page.locator('.timeline-card')).toHaveCount(1);
+    await expect(page.locator('#status-heading')).not.toContainText('Calibrated');
+
+    await page.getByRole('button', { name: /Stop Stream/i }).click();
+    await expect.poll(
+      () => socket.sent.filter((frame) => JSON.parse(frame).type === 'stop').length,
+      { timeout: 5000 }
     ).toBe(1);
-    await expect.poll(() => page.evaluate(() => {
-      return (window as unknown as { r9Socket: WebSocket }).r9Socket.readyState;
-    })).toBe(WebSocket.CLOSED);
+    await expect.poll(
+      () => socket.received.some((frame) => JSON.parse(frame).type === 'session_stopped'),
+      { timeout: 15000 }
+    ).toBe(true);
+    await expect.poll(() => socket.closed, { timeout: 15000 }).toBe(true);
+    expect(socket.sequence.indexOf('received:session_stopped')).toBeLessThan(
+      socket.sequence.indexOf('close')
+    );
+    await expect(page.locator('#recording-state-pill')).toContainText('idle');
+    await expect(page.locator('#connection-state-pill')).toContainText('disconnected');
+    await expect(page.getByRole('button', { name: /Start Microphone Stream/i })).toBeVisible();
+    await expect(page.locator('#stream-error-alert')).toHaveCount(0);
   });
 });
