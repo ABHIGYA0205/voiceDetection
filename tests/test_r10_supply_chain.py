@@ -98,6 +98,39 @@ def test_root_metadata_declares_apache_and_required_files() -> None:
         assert dependencies.count("license-expression>=30.4.4,<31") == 1
 
 
+def test_linux_uses_explicit_cpu_pytorch_index_and_compatible_constraints() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    indexes = pyproject["tool"]["uv"]["index"]
+    cpu_indexes = [index for index in indexes if index["name"] == "pytorch-cpu"]
+    assert cpu_indexes == [
+        {
+            "name": "pytorch-cpu",
+            "url": "https://download.pytorch.org/whl/cpu",
+            "explicit": True,
+        }
+    ]
+    sources = pyproject["tool"]["uv"]["sources"]
+    for package in ("torch", "torchaudio"):
+        assert sources[package] == [{"index": "pytorch-cpu", "marker": "sys_platform == 'linux'"}]
+    dependencies = pyproject["project"]["dependencies"]
+    assert "torch>=2.14.1,<2.15.0" in dependencies
+    assert "torchaudio>=2.11.0,<2.12.0" in dependencies
+    assert 'constraint-dependencies = ["setuptools>=84.1"]' in (ROOT / "pyproject.toml").read_text()
+
+
+def test_lock_excludes_cuda_dependency_graph() -> None:
+    lock_text = (ROOT / "uv.lock").read_text()
+    lock = tomllib.loads(lock_text)
+    package_names = {package["name"] for package in lock["package"]}
+    assert "cuda-toolkit" not in package_names
+    assert not {
+        name
+        for name in package_names
+        if name.startswith("nvidia-") or name in {"triton", "cuda-bindings"}
+    }
+    assert "cuda-toolkit" not in (ROOT / "scripts/check_licenses.py").read_text()
+
+
 def test_dependabot_and_workflows_are_pinned_and_read_only() -> None:
     dependabot = (ROOT / ".github/dependabot.yml").read_text()
     for ecosystem in ("uv", "npm", "github-actions"):
@@ -132,6 +165,12 @@ def test_dependabot_and_workflows_are_pinned_and_read_only() -> None:
         "test:e2e:live",
     ):
         assert required in ci
+    assert "Verify Linux CPU-only PyTorch" in ci
+    assert "torch.version.cuda is None" in ci
+    assert "not torch.cuda.is_available()" in ci
+    assert "_get_sinc_resample_kernel" in ci
+    assert "assert torch_version == '2.14.1'" in ci
+    assert "assert audio_version == '2.11.0'" in ci
     assert 'cron: "47 3 * * 1"' in ci
     security = (ROOT / ".github/workflows/security.yml").read_text()
     assert 'cron: "17 3 * * 1"' in security

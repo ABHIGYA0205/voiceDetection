@@ -42,6 +42,40 @@ jobs:
           uv sync --frozen --all-groups
           cd apps/web
           npm ci
+      - name: Verify Linux CPU-only PyTorch
+        run: |
+          set -euo pipefail
+          uv run --frozen python -c "
+          import torch
+          import torchaudio
+
+          torch_version = torch.__version__.split('+', 1)[0]
+          audio_version = torchaudio.__version__.split('+', 1)[0]
+          import torchaudio.functional.functional as functional
+          kernel, width = functional._get_sinc_resample_kernel(
+              orig_freq=44100,
+              new_freq=16000,
+              gcd=100,
+              lowpass_filter_width=6,
+              rolloff=0.99,
+              resampling_method='sinc_interp_hann',
+              beta=None,
+              dtype=None,
+          )
+
+          print('torch:', torch.__version__)
+          print('torchaudio:', torchaudio.__version__)
+          print('torch.version.cuda:', torch.version.cuda)
+          print('cuda available:', torch.cuda.is_available())
+          print('resampler kernel:', tuple(kernel.shape), 'width:', width)
+
+          assert torch_version == '2.14.1'
+          assert audio_version == '2.11.0'
+          assert kernel.ndim == 3
+          assert width > 0
+          assert torch.version.cuda is None
+          assert not torch.cuda.is_available()
+          "
       - name: Python quality and tests
         run: |
           set -euo pipefail
