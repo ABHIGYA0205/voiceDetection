@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import re
+import tarfile
 import tomllib
+import zipfile
 from importlib import metadata
 from pathlib import Path
 
 import pytest
 
 from scripts.check_licenses import check_expression, python_license
+from scripts.check_package_metadata import forbidden_paths
 
 ROOT = Path(__file__).parents[1]
 
@@ -103,6 +107,10 @@ def test_dependabot_and_workflows_are_pinned_and_read_only() -> None:
         assert "pull_request_target" not in content
         assert "permissions:" in content
         assert re.search(r"permissions:\s+contents:\s+read", content)
+        for permission, access in re.findall(
+            r"^\s{2}([a-z-]+):\s+(read|write|none)\s*$", content, re.MULTILINE
+        ):
+            assert access != "write", f"{permission} permission must not allow writes"
         for line in content.splitlines():
             match = re.match(r"\s+uses:\s+([^@\s]+)@([0-9a-f]+)", line)
             if match:
@@ -125,7 +133,9 @@ def test_dependabot_and_workflows_are_pinned_and_read_only() -> None:
     ):
         assert required in ci
     assert 'cron: "47 3 * * 1"' in ci
-    assert 'cron: "17 3 * * 1"' in (ROOT / ".github/workflows/security.yml").read_text()
+    security = (ROOT / ".github/workflows/security.yml").read_text()
+    assert 'cron: "17 3 * * 1"' in security
+    assert "pull-requests: read" in security
 
 
 def test_checkpoint_boundary_contains_pinned_source_facts() -> None:
@@ -133,3 +143,66 @@ def test_checkpoint_boundary_contains_pinned_source_facts() -> None:
     assert "AASIST-L.pth" in notices
     assert "a04c9863f63d44471dde8a6abcb3b082b07cd1d1" in notices
     assert "814331d088032bb4c3fa61cc014789eadeed464209dd094ab3a2dd6ffbdce27a" in notices
+    assert "426,428 bytes" in notices
+
+
+@pytest.mark.parametrize(
+    ("paths", "expected"),
+    [
+        (
+            ["weights/AASIST-L.pth", "recordings/input.wav"],
+            ["recordings/input.wav", "weights/AASIST-L.pth"],
+        ),
+        (
+            [
+                "apps/web/node_modules/pkg/index.js",
+                "apps/web/dist/assets/app.js",
+                "coverage/index.html",
+            ],
+            [
+                "apps/web/dist/assets/app.js",
+                "apps/web/node_modules/pkg/index.js",
+                "coverage/index.html",
+            ],
+        ),
+    ],
+)
+def test_forbidden_artifact_paths_are_deterministic(paths: list[str], expected: list[str]) -> None:
+    assert forbidden_paths(paths) == expected
+
+
+def test_forbidden_artifact_scan_allows_normal_package_paths() -> None:
+    assert (
+        forbidden_paths(
+            [
+                "voiceshield/__init__.py",
+                "voiceshield-0.1.0.dist-info/METADATA",
+                "src/voiceshield/vendor/aasist/LICENSE",
+                "tests/fixtures/example.txt",
+            ]
+        )
+        == []
+    )
+
+
+def test_archive_member_paths_are_scanned(tmp_path: Path) -> None:
+    wheel = tmp_path / "sample.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("sample-1.0.dist-info/METADATA", "License-Expression: Apache-2.0")
+        archive.writestr("sample/model.pth", b"weights")
+    with zipfile.ZipFile(wheel) as archive:
+        assert forbidden_paths(archive.namelist()) == ["sample/model.pth"]
+
+    sdist = tmp_path / "sample.tar.gz"
+    with tarfile.open(sdist, "w:gz") as archive:
+        info = tarfile.TarInfo("sample-1.0/audio.wav")
+        info.size = 5
+        archive.addfile(info, io.BytesIO(b"audio"))
+    with tarfile.open(sdist, "r:gz") as archive:
+        assert forbidden_paths(archive.getnames()) == ["sample-1.0/audio.wav"]
+
+
+def test_ci_requires_tracked_tree_mutation_guard() -> None:
+    ci = (ROOT / ".github/workflows/ci.yml").read_text()
+    assert "git diff --exit-code" in ci
+    assert "git status --porcelain --untracked-files=no" in ci

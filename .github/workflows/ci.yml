@@ -68,3 +68,8 @@ jobs:
           uv run --frozen python scripts/check_licenses.py
           uv export --frozen --all-extras --all-groups --no-emit-project --output-file "$RUNNER_TEMP/voiceshield-requirements.txt"
           uv run --frozen pip-audit --disable-pip --require-hashes --requirement "$RUNNER_TEMP/voiceshield-requirements.txt"
+      - name: Verify tracked tree is unchanged
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test -z "$(git status --porcelain --untracked-files=no)"

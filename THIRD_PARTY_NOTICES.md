@@ -20,6 +20,7 @@ https://raw.githubusercontent.com/clovaai/aasist/a04c9863f63d44471dde8a6abcb3b08
 at upstream commit `a04c9863f63d44471dde8a6abcb3b082b07cd1d1`. Its verified
 SHA-256 is
 `814331d088032bb4c3fa61cc014789eadeed464209dd094ab3a2dd6ffbdce27a`.
+The verified checkpoint size is `426,428 bytes`.
 It is not committed to this repository. The Apache-2.0 license for VoiceShield
 source code does not grant permission to redistribute that checkpoint.
 
