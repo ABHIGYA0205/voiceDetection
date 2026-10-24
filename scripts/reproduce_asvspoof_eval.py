@@ -4,12 +4,13 @@ Enforces strict reproduction constraints:
 - Halts immediately if checkpoint or dataset files are missing.
 - Verifies directory structure and provides an actionable setup checklist.
 - When present:
-  1. Runs a small 50-sample smoke subset first.
+  1. Runs a deterministic stratified smoke subset first.
   2. Verifies label mapping and score direction against the official protocol.
   3. Verifies preprocessing (16 kHz, 64,600 samples cyclic pad) and score format.
   4. Runs the approved evaluation split.
-  5. Computes linear-interpolated EER and minDCF with official costs and priors.
-  6. Compares with official reported results (EER: 0.99%, minDCF: 0.0346).
+  5. Computes linear-interpolated EER plus a separate, non-comparable diagnostic minDCF.
+  6. Compares EER with the official eval reference only for the canonical eval protocol;
+     min t-DCF is not computed.
   7. Captures complete provenance, hashes, command, and generated report.
 """
 
@@ -17,10 +18,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import logging
 import platform
+import re
+import shlex
+import subprocess
 import sys
 import time
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,7 +49,8 @@ logger = logging.getLogger("voiceshield.reproduction")
 
 # Official Clova AI published benchmarks for AASIST-L on ASVspoof 2019 LA Eval
 OFFICIAL_AASIST_L_EER = 0.0099  # 0.99%
-OFFICIAL_AASIST_L_MIN_DCF = 0.0346
+OFFICIAL_AASIST_L_MIN_TDCF = 0.0309
+OFFICIAL_EVAL_COUNTS = {"total": 71237, "bonafide": 7355, "spoof": 63882}
 
 # Default expected paths
 DEFAULT_CHECKPOINT = Path("models/weights/AASIST-L.pth")
@@ -57,6 +64,188 @@ def compute_file_sha256(path: Path) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             hasher.update(chunk)
     return hasher.hexdigest().lower()
+
+
+def get_git_provenance() -> tuple[str, bool]:
+    """Capture the actual commit and complete working-tree dirty state."""
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown", True
+    return commit, dirty
+
+
+def classify_eer_comparison(
+    actual_eer: float | None,
+    *,
+    split: str,
+    official_cardinality: bool,
+) -> tuple[str, float | None]:
+    """Compare EER only for the canonical official evaluation protocol."""
+    if actual_eer is None:
+        return "NOT COMPUTED", None
+    if split != "eval" or not official_cardinality:
+        return "NOT COMPARABLE", None
+    difference = actual_eer - OFFICIAL_AASIST_L_EER
+    status = "MATCHED (within tolerance)" if abs(difference) < 0.002 else "DISCREPANCY"
+    return status, difference
+
+
+def format_invoked_command(executable: str, argv: list[str]) -> str:
+    """Render a shell-safe command that preserves arguments containing spaces."""
+    return shlex.join([executable, *argv])
+
+
+def format_optional_float(value: float | None, *, precision: int = 4) -> str:
+    """Render a finite metric value without treating zero as unavailable."""
+    return f"{value:.{precision}f}" if value is not None else "NOT COMPUTED"
+
+
+def render_report_template(template: str, replacements: dict[str, str]) -> str:
+    """Render a report and fail closed if any template placeholder remains."""
+    rendered = template
+    for placeholder, value in replacements.items():
+        rendered = rendered.replace(placeholder, value)
+    unresolved = sorted(set(re.findall(r"\{\{[^{}]+\}\}", rendered)))
+    if unresolved:
+        raise ValueError(f"Unresolved report template placeholders: {unresolved}")
+    return rendered
+
+
+def smoke_report_replacements(
+    smoke_diagnostics: dict[str, Any], *, skipped: bool
+) -> dict[str, str]:
+    """Build explicit report fields for completed or intentionally skipped smoke tests."""
+    if skipped:
+        return {
+            "{{ smoke_samples_count }}": "0",
+            "{{ smoke_bonafide_count }}": "0",
+            "{{ smoke_spoof_count }}": "0",
+            "{{ smoke_status }}": "SKIPPED",
+            "{{ smoke_mean_bonafide_score }}": "NOT COMPUTED",
+            "{{ smoke_mean_spoof_score }}": "NOT COMPUTED",
+            "{{ smoke_direction_aligned }}": "NOT COMPUTED",
+        }
+    return {
+        "{{ smoke_samples_count }}": str(smoke_diagnostics["samples_evaluated"]),
+        "{{ smoke_bonafide_count }}": str(smoke_diagnostics["bonafide_samples"]),
+        "{{ smoke_spoof_count }}": str(smoke_diagnostics["spoof_samples"]),
+        "{{ smoke_status }}": "PASSED",
+        "{{ smoke_mean_bonafide_score }}": str(smoke_diagnostics["mean_bonafide_score"]),
+        "{{ smoke_mean_spoof_score }}": str(smoke_diagnostics["mean_spoof_score"]),
+        "{{ smoke_direction_aligned }}": str(smoke_diagnostics["direction_aligned"]),
+    }
+
+
+def validate_protocol_cardinality(
+    trials: list[tuple[str, str, str, str]],
+    *,
+    strict_official: bool = False,
+) -> dict[str, int]:
+    """Validate class counts and reject duplicate protocol sample IDs in linear time."""
+    sample_id_counts = Counter(entry[1] for entry in trials)
+    duplicates = sorted(sample_id for sample_id, count in sample_id_counts.items() if count > 1)
+    if duplicates:
+        raise ValueError(f"Duplicate protocol sample IDs: {duplicates[:5]}")
+    counts = {
+        "total": len(trials),
+        "bonafide": sum(label == "bonafide" for *_, label in trials),
+        "spoof": sum(label == "spoof" for *_, label in trials),
+    }
+    if counts["bonafide"] + counts["spoof"] != counts["total"]:
+        raise ValueError(f"Unsupported protocol labels or count mismatch: {counts}")
+    if strict_official and counts != OFFICIAL_EVAL_COUNTS:
+        raise ValueError(
+            "Official ASVspoof 2019 LA eval cardinality mismatch: "
+            f"expected {OFFICIAL_EVAL_COUNTS}, got {counts}."
+        )
+    return counts
+
+
+def validate_protocol_audio_coverage(
+    trials: list[tuple[str, str, str, str]],
+    audio_dir: Path,
+    *,
+    strict_official: bool = False,
+) -> dict[str, Any]:
+    """Validate CM protocol IDs against FLAC stems without scoring extras."""
+    counts = validate_protocol_cardinality(trials, strict_official=strict_official)
+    protocol_ids = {entry[1] for entry in trials}
+    audio_paths = [
+        path for path in audio_dir.rglob("*") if path.is_file() and path.suffix.lower() == ".flac"
+    ]
+    stem_counts = Counter(path.stem for path in audio_paths)
+    duplicates = sorted(stem for stem, count in stem_counts.items() if count > 1)
+    if duplicates:
+        raise ValueError(f"Duplicate audio FLAC stems: {duplicates[:5]}")
+    audio_ids = set(stem_counts)
+    missing = sorted(protocol_ids - audio_ids)
+    extra = sorted(audio_ids - protocol_ids)
+    if missing:
+        raise FileNotFoundError(
+            f"{len(missing)} protocol audio files are missing; first IDs: {missing[:5]}"
+        )
+    return {
+        **counts,
+        "protocol_ids": len(protocol_ids),
+        "audio_files": len(audio_ids),
+        "missing_files": len(missing),
+        "extra_files": len(extra),
+    }
+
+
+def select_stratified_smoke_subset(
+    trials: list[tuple[str, str, str, str]], smoke_count: int
+) -> list[tuple[str, str, str, str]]:
+    """Select a deterministic smoke subset containing both protocol classes."""
+    if smoke_count < 2:
+        raise ValueError("Smoke count must be at least 2 for stratified selection.")
+    by_label = {
+        "bonafide": [trial for trial in trials if trial[3] == "bonafide"],
+        "spoof": [trial for trial in trials if trial[3] == "spoof"],
+    }
+    if not by_label["bonafide"] or not by_label["spoof"]:
+        raise ValueError("Stratified smoke selection requires both bonafide and spoof classes.")
+    if smoke_count > len(trials):
+        raise ValueError(
+            f"Requested stratified smoke subset of {smoke_count} exceeds {len(trials)} trials."
+        )
+    allocations = {
+        "bonafide": max(1, smoke_count // 2),
+        "spoof": max(1, smoke_count - smoke_count // 2),
+    }
+    if allocations["bonafide"] + allocations["spoof"] != smoke_count:
+        raise ValueError(
+            f"Invalid smoke allocation for requested count {smoke_count}: {allocations}"
+        )
+    for label, requested in allocations.items():
+        available = len(by_label[label])
+        if available < requested:
+            raise ValueError(
+                f"Insufficient {label} trials for stratified smoke selection: "
+                f"requested {requested}, available {available}."
+            )
+    selected = (
+        by_label["bonafide"][: allocations["bonafide"]] + by_label["spoof"][: allocations["spoof"]]
+    )
+    if len(selected) != smoke_count:
+        raise ValueError(
+            f"Stratified smoke selection returned {len(selected)} records; expected {smoke_count}."
+        )
+    return selected
 
 
 def verify_directory_structure(
@@ -171,8 +360,8 @@ def run_smoke_test(
     audio_dir: Path,
     smoke_count: int = 50,
 ) -> dict[str, Any]:
-    """Execute smoke test on leading samples to verify pipeline, hardware, and label direction."""
-    subset = trials[:smoke_count]
+    """Execute a stratified smoke test to verify pipeline and label direction."""
+    subset = select_stratified_smoke_subset(trials, smoke_count)
     bonafide_scores: list[float] = []
     spoof_scores: list[float] = []
 
@@ -193,14 +382,18 @@ def run_smoke_test(
             spoof_scores.append(out.bonafide_score)
 
     elapsed = time.perf_counter() - start_time
-    mean_bf = float(np.mean(bonafide_scores)) if bonafide_scores else 0.0
-    mean_sp = float(np.mean(spoof_scores)) if spoof_scores else 0.0
+    if not bonafide_scores or not spoof_scores:
+        raise ValueError("Smoke subset must produce scores for both protocol classes.")
+    mean_bf = float(np.mean(bonafide_scores))
+    mean_sp = float(np.mean(spoof_scores))
 
     # Direction check: bonafide score should be higher for authentic speech
     direction_aligned = bool(mean_bf > mean_sp)
 
     return {
         "samples_evaluated": len(subset),
+        "bonafide_samples": len(bonafide_scores),
+        "spoof_samples": len(spoof_scores),
         "elapsed_seconds": round(elapsed, 3),
         "mean_bonafide_score": round(mean_bf, 4),
         "mean_spoof_score": round(mean_sp, 4),
@@ -301,7 +494,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--smoke-count",
         type=int,
         default=50,
-        help="Number of initial samples for smoke diagnostics (default: 50).",
+        help="Number of deterministic stratified samples for smoke diagnostics (default: 50).",
     )
     parser.add_argument(
         "--skip-smoke",
@@ -311,7 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--check-only",
         action="store_true",
-        help="Verify expected directory layout and print checklist without running inference.",
+        help="Validate checkpoint, protocol cardinality, and protocol-to-FLAC coverage without inference.",
     )
     parser.add_argument(
         "--output-dir",
@@ -326,6 +519,10 @@ def main(argv: list[str] | None = None) -> int:
     """Main reproduction entrypoint."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.batch_size < 1:
+        parser.error("--batch-size must be at least 1")
+    if not args.skip_smoke and args.smoke_count < 2:
+        parser.error("--smoke-count must be at least 2 unless --skip-smoke is used")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -358,20 +555,31 @@ def main(argv: list[str] | None = None) -> int:
         split=args.split,
     )
 
-    if not all_present or args.check_only:
+    if not all_present:
         print_resource_checklist(checks)
-        if not all_present:
-            sys.stderr.write(
-                "HALTING: Cannot proceed with reproduction. Required dataset files are missing.\n"
-                "Please acquire the official dataset following the instructions above.\n\n"
-            )
-            return 1
-        return 0
+        sys.stderr.write(
+            "HALTING: Cannot proceed with reproduction. Required dataset files are missing.\n"
+            "Please acquire the official dataset following the instructions above.\n\n"
+        )
+        return 1
 
     protocol_file = checks["protocol_file"]["path"]
     audio_dir = checks["audio_flac_dir"]["path"]
 
     protocol_sha = compute_file_sha256(protocol_file)
+    trials = load_asvspoof_protocol(protocol_file)
+    strict_official = args.split == "eval"
+    try:
+        coverage = validate_protocol_audio_coverage(
+            trials, audio_dir, strict_official=strict_official
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"HALTING: Protocol/audio validation failed: {exc}\n")
+        return 1
+    logger.info("Protocol/audio coverage: %s", coverage)
+    if args.check_only:
+        print(f"Protocol/audio validation passed: {coverage}")
+        return 0
 
     logger.info("AASIST-L Checkpoint: %s (SHA-256: %s)", args.checkpoint, checkpoint_sha[:16])
     logger.info("Protocol File: %s (SHA-256: %s)", protocol_file, protocol_sha[:16])
@@ -384,20 +592,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     logger.info("AASIST-L initialized on device: %s", detector.device)
 
-    # 4. Load protocol trials
-    trials = load_asvspoof_protocol(protocol_file)
     logger.info("Loaded %d trials from protocol %s", len(trials), protocol_file.name)
 
     # 5. Smoke test subset
     smoke_diagnostics: dict[str, Any] = {}
     if not args.skip_smoke:
         logger.info("Running initial %d-sample smoke subset...", args.smoke_count)
-        smoke_diagnostics = run_smoke_test(
-            detector=detector,
-            trials=trials,
-            audio_dir=audio_dir,
-            smoke_count=args.smoke_count,
-        )
+        try:
+            smoke_diagnostics = run_smoke_test(
+                detector=detector,
+                trials=trials,
+                audio_dir=audio_dir,
+                smoke_count=args.smoke_count,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            sys.stderr.write(f"HALTING: Smoke validation failed: {exc}\n")
+            return 1
         logger.info(
             "Smoke complete. Mean Bonafide: %.4f | Mean Spoof: %.4f | Direction Aligned: %s",
             smoke_diagnostics["mean_bonafide_score"],
@@ -407,6 +617,8 @@ def main(argv: list[str] | None = None) -> int:
         if not smoke_diagnostics["direction_aligned"]:
             sys.stderr.write("ERROR: Label direction test failed in smoke subset! Halting.\n")
             return 1
+    else:
+        logger.warning("Smoke verification explicitly skipped; smoke metrics will be NOT COMPUTED.")
 
     # 6. Full split evaluation
     logger.info(
@@ -419,39 +631,64 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size,
     )
 
-    # Note: ASVspoof standard scores are bona fide scores (higher = bona fide).
-    # To compute standard EER and minDCF with higher = spoof:
+    # ASVspoof raw scores are bona fide logits (higher = bona fide).
+    # Negation supplies the higher-is-spoof convention required by the local EER
+    # and separate diagnostic normalized-minDCF helpers.
     scores_spoof = -scores_bonafide
 
     eer_val, eer_thresh = compute_eer_interpolated(y_true, scores_spoof)
-    min_dcf_val, min_dcf_thresh = compute_min_dcf(
+    diagnostic_min_dcf, diagnostic_min_dcf_thresh = compute_min_dcf(
         y_true, scores_spoof, c_miss=1.0, c_fa=10.0, p_target=0.05
     )
 
-    actual_eer = float(eer_val) if eer_val is not None else 0.0
-    actual_min_dcf = float(min_dcf_val) if min_dcf_val is not None else 0.0
+    actual_eer = float(eer_val) if eer_val is not None else None
+    actual_diagnostic_min_dcf = (
+        float(diagnostic_min_dcf) if diagnostic_min_dcf is not None else None
+    )
 
-    diff_eer = actual_eer - OFFICIAL_AASIST_L_EER
-    diff_mindcf = actual_min_dcf - OFFICIAL_AASIST_L_MIN_DCF
-
-    status_eer = "MATCHED (within tolerance)" if abs(diff_eer) < 0.002 else "DISCREPANCY"
-    status_mindcf = "MATCHED (within tolerance)" if abs(diff_mindcf) < 0.005 else "DISCREPANCY"
+    official_cardinality = args.split == "eval" and all(
+        coverage[key] == expected for key, expected in OFFICIAL_EVAL_COUNTS.items()
+    )
+    status_eer, diff_eer = classify_eer_comparison(
+        actual_eer,
+        split=args.split,
+        official_cardinality=official_cardinality,
+    )
+    git_commit, git_dirty = get_git_provenance()
+    reproduction_parameters = {
+        "batch_size": args.batch_size,
+        "checkpoint_registry_id": reg.model_id,
+        "checkpoint_sha256": checkpoint_sha,
+        "evaluation_framing": "pad_for_aasist: 64600 samples, cyclic pad/truncate",
+        "model_config": detector.config,
+        "protocol_sha256": protocol_sha,
+        "resolved_device": str(detector.device),
+        "score_direction": "raw_bonafide_score=logit[1]; metric_spoof_score=-logit[1]",
+        "selected_split": args.split,
+        "skip_smoke": bool(args.skip_smoke),
+        "smoke_count": args.smoke_count,
+        "upstream_commit": reg.upstream_commit,
+    }
+    reproduction_hash = hashlib.sha256(
+        json.dumps(reproduction_parameters, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
     # 7. Render report from template
     template_path = Path("reports/templates/asvspoof_reproduction_report_template.md")
     template_content = template_path.read_text(encoding="utf-8")
 
     timestamp_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    repro_cmd = f"uv run python scripts/reproduce_asvspoof_eval.py --checkpoint {args.checkpoint} --dataset-root {args.dataset_root} --split {args.split}"
+    repro_cmd = format_invoked_command(sys.executable, sys.argv)
 
-    rendered_report = template_content
     replacements = {
-        "{{ actual_eer_pct }}": f"{actual_eer:.2%}",
+        "{{ actual_eer_pct }}": f"{actual_eer:.2%}" if actual_eer is not None else "NOT COMPUTED",
         "{{ status_eer }}": status_eer,
-        "{{ diff_eer }}": f"{diff_eer:+.4f}",
-        "{{ actual_mindcf }}": f"{actual_min_dcf:.4f}",
-        "{{ status_mindcf }}": status_mindcf,
-        "{{ diff_mindcf }}": f"{diff_mindcf:+.4f}",
+        "{{ diff_eer }}": f"{diff_eer:+.4f}" if diff_eer is not None else "N/A",
+        "{{ actual_mindcf }}": f"{actual_diagnostic_min_dcf:.4f}"
+        if actual_diagnostic_min_dcf is not None
+        else "NOT COMPUTED",
+        "{{ status_mindcf }}": "NOT COMPUTED",
+        "{{ diff_mindcf }}": "N/A",
         "{{ evaluated_protocol }}": f"ASVspoof 2019 LA ({args.split})",
         "{{ execution_timestamp }}": timestamp_str,
         "{{ compute_device }}": str(detector.device),
@@ -459,27 +696,33 @@ def main(argv: list[str] | None = None) -> int:
         "{{ os_version }}": platform.platform(),
         "{{ python_version }}": platform.python_version(),
         "{{ torch_version }}": torch.__version__,
-        "{{ git_commit }}": "uncommitted_local",
-        "{{ git_dirty }}": "True",
+        "{{ git_commit }}": git_commit,
+        "{{ git_dirty }}": str(git_dirty),
         "{{ model_id }}": detector.provenance.model_id,
         "{{ provenance_status }}": detector.provenance.provenance_status,
         "{{ expected_checkpoint_sha256 }}": reg.checkpoint_sha256,
+        "{{ checkpoint_registry_url }}": reg.checkpoint_url,
         "{{ checkpoint_sha256 }}": checkpoint_sha,
         "{{ upstream_commit }}": reg.upstream_commit,
         "{{ parameter_count }}": str(reg.parameter_count),
         "{{ protocol_sha256 }}": protocol_sha,
-        "{{ config_sha256 }}": "N/A",
-        "{{ smoke_samples_count }}": str(smoke_diagnostics.get("samples_evaluated", 0)),
-        "{{ smoke_status }}": "PASSED",
-        "{{ smoke_mean_bonafide_score }}": str(smoke_diagnostics.get("mean_bonafide_score", 0.0)),
-        "{{ smoke_mean_spoof_score }}": str(smoke_diagnostics.get("mean_spoof_score", 0.0)),
-        "{{ smoke_direction_aligned }}": str(smoke_diagnostics.get("direction_aligned", True)),
-        "{{ smoke_memory_mb }}": "N/A",
+        "{{ config_sha256 }}": f"reproduction_parameters:{reproduction_hash}",
+        "{{ batch_size }}": str(args.batch_size),
+        "{{ selected_split }}": args.split,
+        "{{ smoke_memory_mb }}": "NOT COMPUTED",
         "{{ total_eval_trials }}": str(len(trials)),
         "{{ bonafide_eval_trials }}": str(int(np.sum(y_true == 0))),
         "{{ spoof_eval_trials }}": str(int(np.sum(y_true == 1))),
-        "{{ eer_threshold }}": f"{eer_thresh:.4f}" if eer_thresh else "N/A",
-        "{{ mindcf_threshold }}": f"{min_dcf_thresh:.4f}" if min_dcf_thresh else "N/A",
+        "{{ protocol_id_count }}": str(coverage["protocol_ids"]),
+        "{{ audio_file_count }}": str(coverage["audio_files"]),
+        "{{ missing_audio_count }}": str(coverage["missing_files"]),
+        "{{ extra_audio_count }}": str(coverage["extra_files"]),
+        "{{ eer_threshold }}": format_optional_float(
+            float(eer_thresh) if eer_thresh is not None else None
+        ),
+        "{{ mindcf_threshold }}": format_optional_float(
+            float(diagnostic_min_dcf_thresh) if diagnostic_min_dcf_thresh is not None else None
+        ),
         "{{ roc_auc }}": "N/A",
         "{{ pr_auc }}": "N/A",
         "{{ tp }}": "N/A",
@@ -494,8 +737,12 @@ def main(argv: list[str] | None = None) -> int:
         "{{ report_path }}": str(args.output_dir / "report.md"),
     }
 
-    for placeholder, val in replacements.items():
-        rendered_report = rendered_report.replace(placeholder, val)
+    replacements.update(smoke_report_replacements(smoke_diagnostics, skipped=bool(args.skip_smoke)))
+    try:
+        rendered_report = render_report_template(template_content, replacements)
+    except ValueError as exc:
+        sys.stderr.write(f"HALTING: Report rendering failed: {exc}\n")
+        return 1
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     report_file = args.output_dir / "report.md"
@@ -509,11 +756,23 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info("Saved reproduction report to: %s", report_file)
     logger.info("Saved raw scores to: %s", raw_scores_file)
+    if status_eer in {"MATCHED (within tolerance)", "DISCREPANCY"}:
+        logger.info(
+            "Benchmark EER: %s (Official eval reference: %.2f%%; status: %s)",
+            f"{actual_eer * 100:.2f}%" if actual_eer is not None else "NOT COMPUTED",
+            OFFICIAL_AASIST_L_EER * 100,
+            status_eer,
+        )
+    else:
+        logger.info(
+            "Benchmark EER: %s (official eval comparison: %s)",
+            f"{actual_eer * 100:.2f}%" if actual_eer is not None else "NOT COMPUTED",
+            status_eer,
+        )
     logger.info(
-        "Benchmark EER: %.2f%% (Official: %.2f%%)", actual_eer * 100, OFFICIAL_AASIST_L_EER * 100
-    )
-    logger.info(
-        "Benchmark minDCF: %.4f (Official: %.4f)", actual_min_dcf, OFFICIAL_AASIST_L_MIN_DCF
+        "VoiceShield diagnostic normalized minDCF: %s (not comparable with upstream min t-DCF %.4f)",
+        actual_diagnostic_min_dcf if actual_diagnostic_min_dcf is not None else "NOT COMPUTED",
+        OFFICIAL_AASIST_L_MIN_TDCF,
     )
 
     return 0
