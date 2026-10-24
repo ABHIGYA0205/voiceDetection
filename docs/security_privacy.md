@@ -1,7 +1,7 @@
 # VoiceShield Security, Privacy, and Threat Model Specification
 
 **Classification**: Advisory Architecture Specification  
-**Version**: `0.1.0`  
+**Version**: `0.1.1`<br>
 **Scope**: VoiceShield Core DSP Engine, Streaming Session Core, FastAPI Services, and Web Microphone Dashboard  
 **Date**: October 2026  
 
@@ -224,7 +224,7 @@ If a deployed update or checkpoint exhibits behavioral instability or regression
 
 1. **Revert to Previous Git Release**:
    ```bash
-   git checkout tags/v0.1.0-stable
+   git checkout tags/v0.1.0
    ```
 2. **Re-run Security Parity Suite**:
    ```bash

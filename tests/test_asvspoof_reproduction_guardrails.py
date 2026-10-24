@@ -184,3 +184,35 @@ def test_report_template_and_script_are_fail_closed() -> None:
     assert "Checkpoint rights" in template
     assert "checkpoint bytes are not redistributed" in template
     assert "--allow-miniature-fixture" not in script
+
+
+def test_active_reproduction_docs_match_fail_closed_runner() -> None:
+    evaluation_card = Path("model_cards/aasist_l_evaluation_card.md").read_text(
+        encoding="utf-8"
+    )
+    reproduction_doc = Path("docs/aasist_reproduction.md").read_text(encoding="utf-8")
+    implementation_plan = Path("docs/implementation_plan.md").read_text(encoding="utf-8")
+
+    for stale in (
+        "71,189",
+        "63,834",
+        "0.0346",
+        "~98.8%",
+        "~0.999",
+        "--smoke --max-samples",
+        "dataset setup",
+    ):
+        assert stale not in evaluation_card
+
+    assert "71,237" in evaluation_card
+    assert "63,882" in evaluation_card
+    assert "0.0309" in evaluation_card
+    assert "Official min t-DCF" in evaluation_card
+    assert "NOT COMPUTED" in evaluation_card
+    assert "--check-only" in evaluation_card
+    assert "uncalibrated score, not a probability" in reproduction_doc
+    assert "does not compute official min t-DCF" in reproduction_doc
+    assert "Checkpoint rights" in reproduction_doc
+    assert "Calibrated continuous probability" not in implementation_plan
+    assert "No probability calibrator loaded" in implementation_plan
+    assert "not the v0.1.1 as-built contract" in implementation_plan

@@ -6,8 +6,9 @@
 - **Pinned Commit**: `a04c9863f63d44471dde8a6abcb3b082b07cd1d1` (Merge PR #4 from clovaai/main)
 - **Upstream Authors**: Jee-weon Jung, Hee-Soo Heo, Hye-jin Shim, Ha-Jin Yu (NAVER Clova AI / University of Seoul)
 - **Publication**: *"AASIST: Audio Anti-Spoofing using Integrated Spectro-Temporal Graph Attention Networks"*, ICASSP 2022.
-- **Licence**: **MIT License** (Copyright (c) 2021-present NAVER Corp.).
-  - Vendored under `src/voiceshield/vendor/aasist/` with full original copyright and licence retained.
+- **Source-code licence**: **MIT License** (Copyright (c) 2021-present NAVER Corp.).
+  - Vendored source under `src/voiceshield/vendor/aasist/` retains the upstream copyright and licence.
+- **Checkpoint rights**: Separate from the source-code licence and not independently established by VoiceShield. Checkpoint bytes are obtained from the pinned upstream source and are not redistributed in VoiceShield release artifacts.
 
 ---
 
@@ -37,9 +38,11 @@
 ### Scoring Formulas:
 - **Upstream ASVspoof Benchmark Score**:
   $$s_{\text{ASVspoof}} = \text{logit}_1 \quad (\text{higher indicates authentic / bona fide})$$
-- **VoiceShield Synthetic Likelihood**:
-  $$P(\text{spoof}) = \frac{e^{\text{logit}_0}}{e^{\text{logit}_0} + e^{\text{logit}_1}} = \sigma(\text{logit}_0 - \text{logit}_1) \in [0.0, 1.0]$$
-  A sample is flagged as suspected synthetic if $P(\text{spoof}) \ge \text{threshold}$ (default: $0.65$).
+- **VoiceShield uncalibrated synthetic score**:
+  $$s_{\text{spoof}} = \frac{e^{\text{logit}_0}}{e^{\text{logit}_0} + e^{\text{logit}_1}} = \sigma(\text{logit}_0 - \text{logit}_1) \in [0.0, 1.0]$$
+  This bounded softmax component is an uncalibrated score, not a probability.
+  A sample crosses the raw operating threshold when $s_{\text{spoof}} \ge 0.65$;
+  aggregate HIGH still requires the configured sustained temporal policy.
 
 ---
 
@@ -89,4 +92,4 @@ The adapter initializes on Apple Silicon `mps` when available:
 
 ## 7. Benchmark Integrity Notice
 
-VoiceShield does not claim any official benchmark EER (Equal Error Rate) or min-tDCF until the complete ASVspoof 2019/2021 evaluation partition is processed with frozen weights under seeded deterministic conditions.
+VoiceShield does not claim a reproduced EER until the complete official ASVspoof 2019 LA evaluation protocol is scored with frozen weights. The runner reports a separate diagnostic normalized minDCF, but it does not compute official min t-DCF; that metric requires the official ASV scores, keys, priors, costs, and t-DCF implementation.

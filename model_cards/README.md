@@ -13,9 +13,9 @@ In strict compliance with scientific integrity standards:
 
 | Document | Scope | Status |
 | :--- | :--- | :---: |
-| [**`aasist_l_model_card.md`**](./aasist_l_model_card.md) | AASIST-L architecture, provenance, preprocessing contract, threat model, calibration, and known technical limitations. | **Active (card v1.0.0; product v0.1.0)** |
-| [**`aasist_l_evaluation_card.md`**](./aasist_l_evaluation_card.md) | Evaluation splits, leakage controls, subgroup breakdowns (generators, languages, codecs), and M3 hardware latency profiling. | **Active (card v1.0.0; product v0.1.0)** |
-| [**`claims_verification_checklist.md`**](./claims_verification_checklist.md) | Pre-pitch and README verification gate to prevent overclaiming, deceptive accuracy metrics, or false identity claims. | **Active (card v1.0.0; product v0.1.0)** |
+| [**`aasist_l_model_card.md`**](./aasist_l_model_card.md) | AASIST-L architecture, provenance, preprocessing contract, threat model, calibration, and known technical limitations. | **Active (card v1.0.0; product v0.1.1)** |
+| [**`aasist_l_evaluation_card.md`**](./aasist_l_evaluation_card.md) | Evaluation splits, leakage controls, subgroup breakdowns (generators, languages, codecs), and M3 hardware latency profiling. | **Active (card v1.0.0; product v0.1.1)** |
+| [**`claims_verification_checklist.md`**](./claims_verification_checklist.md) | Pre-pitch and README verification gate to prevent overclaiming, deceptive accuracy metrics, or false identity claims. | **Active (card v1.0.0; product v0.1.1)** |
 
 ---
 

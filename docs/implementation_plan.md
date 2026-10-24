@@ -1,4 +1,9 @@
-# VoiceShield — Implementation & Architecture Plan
+# VoiceShield — Historical Implementation & Architecture Plan
+
+> **Status:** This document records the target architecture and unfinished
+> milestones; it is not the v0.1.1 as-built contract. Current outputs are
+> uncalibrated acoustic anomaly scores. Use the README, model card, evaluation
+> card, and release notes for supported behavior and evidence.
 
 ## 1. MVP Scope and Explicit Non-Goals
 
@@ -11,7 +16,7 @@ VoiceShield is an audio machine learning system designed to analyze voice stream
   - Streaming hop interval: 1.0 second (16,000 samples at 16 kHz).
   - Pre-inference gating: Configurable minimum accumulated active speech (energy/VAD threshold) required within the 4.0s window before inference is executed.
 - **Inference Output Contract**:
-  - `synthetic_likelihood`: Calibrated continuous probability score in $[0.0, 1.0]$.
+  - `synthetic_likelihood`: Bounded, uncalibrated softmax score in $[0.0, 1.0]$; not a probability.
   - `quality_status`: Input health metrics (sample rate validation, peak amplitude, clipping detection, signal-to-noise ratio estimate).
   - `uncertainty_status`: Uncertainty flag reflecting out-of-distribution characteristics, insufficient speech energy, or marginal window coverage.
   - `timestamps`: Sample indices and relative/wall-clock time offsets for the analyzed window.
@@ -55,9 +60,9 @@ flowchart TD
         DETECTOR --> RAW_SCORE["Logits / Raw Score"]
     end
 
-    subgraph TemporalLogic["4. Calibration & Temporal Aggregation"]
-        RAW_SCORE --> CALIBRATOR["Probability Calibrator<br/>(Temperature / Platt on dev set)"]
-        CALIBRATOR --> TEMP_AGG["Temporal Aggregator<br/>• Multi-hop smoothing<br/>• Rule-based explanation generator"]
+    subgraph TemporalLogic["4. Score Semantics & Temporal Aggregation"]
+        RAW_SCORE --> SCORE_MAP["Uncalibrated Softmax Score<br/>(No probability calibrator loaded)"]
+        SCORE_MAP --> TEMP_AGG["Temporal Aggregator<br/>• Multi-hop smoothing<br/>• Rule-based explanation generator"]
         TEMP_AGG --> QUALITY_CHECK["Quality & Uncertainty Assessor"]
     end
 
@@ -196,7 +201,7 @@ voiceshield/
 - **Deliverables**: FastAPI REST/WebSocket server, lightweight Web Audio browser UI.
 - **Acceptance Criteria**:
   - Live microphone audio streams into WebSocket at 16 kHz and receives continuous window analysis.
-  - UI displays advisory warning banners, calibrated likelihood, and explicit disclaimers (not identity proof, not fraud probability).
+  - UI displays advisory warning banners, an uncalibrated anomaly score, and explicit disclaimers (not identity proof, not fraud probability).
 
 ### Milestone 6: Robustness Benchmarking & Calibration
 - **Deliverables**: Evaluation pipeline with codec augmentation (Opus, G.711) and temperature calibration on dev set.

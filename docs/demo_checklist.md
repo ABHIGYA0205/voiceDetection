@@ -65,7 +65,7 @@ To evaluate real acoustic deepfake detection performance using the official Clov
    {
      "status": "ready",
      "service": "VoiceShield",
-     "version": "0.1.0",
+     "version": "0.1.1",
      "model_loaded": true,
      "is_mock_detector": false,
      "device": "mps",
@@ -95,7 +95,7 @@ If the checkpoint is not present on disk, or if you are running tests or UI demo
    {
      "status": "ready",
      "service": "VoiceShield",
-     "version": "0.1.0",
+     "version": "0.1.1",
      "model_loaded": true,
      "is_mock_detector": true,
      "device": "cpu",

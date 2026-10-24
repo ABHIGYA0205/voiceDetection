@@ -1,10 +1,10 @@
 # VoiceShield Evaluation Card: AASIST-L Baseline Detector
 
-**Card Identifier**: `VoiceShield-EvalCard-AASIST-L-v0.1.0`  
+**Card Identifier**: `VoiceShield-EvalCard-AASIST-L-v0.1.1`<br>
 **Associated Model Card**: [`aasist_l_model_card.md`](./aasist_l_model_card.md)
 **Evaluation Standard**: ASVspoof 2019 Logical Access (LA) Protocol & VoiceShield M3 Benchmark Suite  
 **Status**: **PARTIAL — ENGINEERING VALIDATED; SCIENTIFIC BENCHMARK PENDING**
-**Card Version**: `1.0.0` (Truthful Baseline)  
+**Card Version**: `1.0.1` (Truthful Baseline)<br>
 **Date**: October 2026  
 
 ---
@@ -17,7 +17,7 @@
 > - **Upstream Clova AI Reference**: Published ICASSP 2022 metrics are recorded for architectural baseline reference.  
 > - **Official checkpoint**: Acquisition and integrity verification of the official AASIST-L checkpoint are complete.
 > - **Engineering validation**: The real-checkpoint API, transport, CPU/MPS benchmark, browser, and stress-soak validation are complete.
-> - **Scientific evaluation data**: The ASVspoof 2019 LA evaluation data is absent and has not been evaluated locally. Local EER, min-tDCF, ROC-AUC, balanced accuracy, calibration, FPR/FNR, confidence intervals, and external/telephony performance remain not evaluated.
+> - **Scientific evaluation status**: Official eval prerequisites were validated locally without inference: 71,237 protocol trials (7,355 bona fide and 63,882 spoof), 71,933 FLAC stems, zero missing files, and 696 permitted extras. A full scoring attempt was interrupted because of host memory pressure and is not evidence. Local EER, official min t-DCF, ROC-AUC, balanced accuracy, calibration, FPR/FNR, confidence intervals, and external/telephony performance remain not computed.
 > - **Hardware profiling**: Real-checkpoint latency measurements are linked to the generated report artifact.
 
 ---
@@ -30,25 +30,20 @@
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Train** | 25,380 | 2,580 | 22,800 | 20 (8 M, 12 F) | Known In-Set: A01–A06 |
 | **Development** | 24,844 | 2,548 | 22,296 | 20 (8 M, 12 F) | Known In-Set: A01–A06 |
-| **Evaluation (Target)** | **71,189** | **7,355** | **63,834** | **48 (21 M, 27 F)** | **Unseen Zero-Shot: A07–A19** |
+| **Evaluation (Target)** | **71,237** | **7,355** | **63,882** | **48 (21 M, 27 F)** | **Unseen attacks: A07–A19** |
 
-### 2.2 Leakage Controls Enforced
+### 2.2 Runtime integrity controls and boundaries
 
-```mermaid
-flowchart TD
-    Dataset[Audio Data Corpus] --> Splitter[Speaker-Disjoint Splitter]
-    Splitter --> Train[Train Split: 20 Speakers]
-    Splitter --> Dev[Dev Split: 20 Speakers]
-    Splitter --> Eval[Eval Split: 48 Speakers]
+The v0.1.1 runner enforces the selected official protocol file rather than
+creating new dataset splits. In canonical eval mode it requires exact class
+cardinality, unique protocol IDs, complete protocol-to-FLAC coverage, unique
+FLAC stems, supported labels, and scoring of protocol IDs only. Extra FLACs in
+the official archive are counted but are not scored.
 
-    Eval -.->|Strict Isolation: 0 Overlapping Speakers| Train
-    Eval -.->|Strict Isolation: 0 Overlapping Speakers| Dev
-    Eval -.->|Unseen Holdout: A07-A19 Excluded from Train| Train
-```
-
-1. **Speaker Disjointness**: Zero speaker overlap across Train, Dev, and Eval partitions ($S_{\text{train}} \cap S_{\text{dev}} \cap S_{\text{eval}} = \emptyset$).
-2. **Generator Holdout**: Evaluation partition contains 13 unseen synthetic speech algorithms (A07–A19), spanning waveform concatenation, neural vocoding, transfer learning, and modern neural acoustic models.
-3. **Source Utterance Deduplication**: Source text prompts are partitioned to prevent phonetic leakage across partitions.
+Train/dev/eval speaker separation and attack holdout are properties of the
+official ASVspoof protocol. This runner does not independently reconstruct
+source utterances, verify source-text disjointness, or perform acoustic
+near-duplicate detection; no stronger leakage claim is made.
 
 ---
 
@@ -58,12 +53,13 @@ flowchart TD
 
 | Metric | Upstream Published (Clova AI / ICASSP 2022) | VoiceShield Local Evaluation | Status | Report Artefact & Evidence |
 | :--- | :---: | :---: | :---: | :--- |
-| **Equal Error Rate (EER)** | **0.99%** (0.0099) | **Not yet evaluated** | Unverified locally | Requires local ASVspoof 2019 LA partition. |
-| **min-tDCF** ($C_{\text{miss}}=1, C_{\text{fa}}=10, P=0.05$) | **0.0346** | **Not yet evaluated** | Unverified locally | Requires local ASVspoof 2019 LA partition. |
-| **Balanced Accuracy** | Upstream: ~98.8% | **Not yet evaluated** | Unverified locally | Local run pending dataset acquisition. |
-| **ROC-AUC** | Upstream: ~0.999 | **Not yet evaluated** | Unverified locally | Local run pending dataset acquisition. |
-| **Brier Score** | Not reported upstream | **Not yet evaluated** | Uncalibrated | Pending dev-set probability calibration. |
-| **Expected Calibration Error (ECE)** | Not reported upstream | **Not yet evaluated** | Uncalibrated | Pending dev-set probability calibration. |
+| **Equal Error Rate (EER)** | **0.99%** (0.0099) | **NOT COMPUTED** | Pending full scoring | Upstream value only; no local comparison is claimed. |
+| **Official min t-DCF** | **0.0309** | **NOT COMPUTED** | Not implemented by this runner | Requires official ASV scores, keys, priors, costs, and t-DCF implementation. |
+| **VoiceShield diagnostic normalized minDCF** | Not comparable | **NOT COMPUTED** | Pending full scoring | Not official min t-DCF and never compared with 0.0309. |
+| **Balanced Accuracy** | Not reported in pinned AASIST-L README | **NOT COMPUTED** | Pending full scoring | No upstream estimate is imputed. |
+| **ROC-AUC** | Not reported in pinned AASIST-L README | **NOT COMPUTED** | Pending full scoring | No upstream estimate is imputed. |
+| **Brier Score** | Not reported upstream | **NOT COMPUTED** | Uncalibrated | Requires an identified fitted calibrator. |
+| **Expected Calibration Error (ECE)** | Not reported upstream | **NOT COMPUTED** | Uncalibrated | Requires an identified fitted calibrator. |
 
 ---
 
@@ -73,14 +69,8 @@ flowchart TD
 
 | Generator ID | Generator Family / Synthesis Type | Upstream Baseline EER | VoiceShield Local Status |
 | :--- | :--- | :---: | :--- |
-| **A01** | Neural TTS (WaveNet vocoder) | ~0.00% | **Not yet evaluated** |
-| **A02** | Neural TTS (World vocoder) | ~0.00% | **Not yet evaluated** |
-| **A03** | Neural TTS (Linear vocoder) | ~0.00% | **Not yet evaluated** |
-| **A04** | Waveform Concatenation | ~0.02% | **Not yet evaluated** |
-| **A05** | Voice Conversion (VCC2018) | ~0.01% | **Not yet evaluated** |
-| **A06** | Voice Conversion (VCC2020) | ~0.01% | **Not yet evaluated** |
-| **A07–A19 (Unseen)** | Unknown Zero-Shot Generative Models | 0.99% (Aggregate) | **Not yet evaluated** |
-| **Modern Diffusion (F5-TTS, CosyVoice)** | Flow-Matching / Diffusion Transformers | Not in ASVspoof 2019 | **Not yet evaluated** |
+| **A07–A19 (ASVspoof 2019 LA eval)** | Historical logical-access attacks | Only aggregate AASIST-L EER is referenced | **NOT COMPUTED** |
+| **Modern neural TTS / voice cloning** | Outside ASVspoof 2019 coverage | Not reported | **NOT COMPUTED**; one observed file cannot establish reliability |
 
 ### 4.2 By Language & Accent
 
@@ -152,7 +142,7 @@ Measurements conducted on the target host hardware and linked to verified benchm
 
 To complete scientific detection-performance evaluation:
 
-1. **Acquire Official Checkpoint**:
+1. **Acquire and verify the official checkpoint** from the pinned upstream source:
    ```bash
    mkdir -p models/weights
    curl -L -o models/weights/AASIST-L.pth \
@@ -162,15 +152,26 @@ To complete scientific detection-performance evaluation:
    # Expected Size:    426428 bytes
    # Parameter Count:  85306
    ```
-2. **Download ASVspoof 2019 LA Evaluation Dataset**:
-   Download the official dataset archive from [Edinburgh DataShare](https://datashare.ed.ac.uk/handle/10283/3336) and extract to `data/ASVspoof2019/LA/`.
-3. **Execute Smoke Verification**:
+2. **Keep the official ASVspoof 2019 LA dataset outside Git.** Download it from
+   [Edinburgh DataShare](https://datashare.ed.ac.uk/handle/10283/3336) and pass
+   its extracted LA directory explicitly.
+3. **Run the fail-closed prerequisite check before inference**:
    ```bash
-   .venv/bin/python scripts/reproduce_asvspoof_eval.py --smoke --max-samples 100
+   .venv/bin/python scripts/reproduce_asvspoof_eval.py \
+     --dataset-root /path/to/ASVspoof2019/LA \
+     --split eval \
+     --check-only
    ```
-4. **Run Full 71,189-Trial Evaluation**:
+4. **Run all 71,237 eval trials only on a suitably provisioned host**. The
+   interrupted 8 GB M3 batch-24 attempt is invalid and must not be resumed or
+   reported as evidence:
    ```bash
-   .venv/bin/python scripts/reproduce_asvspoof_eval.py --split eval --output-dir reports/runs/asvspoof_eval_official
+   .venv/bin/python scripts/reproduce_asvspoof_eval.py \
+     --dataset-root /path/to/ASVspoof2019/LA \
+     --split eval \
+     --batch-size 24 \
+     --output-dir /path/outside-git/asvspoof2019-la
    ```
-5. **Publish Scientific Evaluation Results**:
-   Update Section 3 with the exact generated SHA-256 hashes, EER, and min-tDCF from `reports/runs/asvspoof_eval_official/asvspoof_reproduction_report.md`.
+5. **Publish only complete generated artifacts.** Record the exact hashes and
+   reproduced EER after a successful full run. Official min t-DCF remains NOT
+   COMPUTED because this runner does not integrate its required ASV inputs.

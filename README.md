@@ -5,17 +5,24 @@ VoiceShield is an acoustic machine learning system designed to detect synthetic,
 > **Important Advisory Disclaimer**
 > VoiceShield provides acoustic anomaly metrics and advisory warnings. Its outputs do **not** constitute identity proof and do **not** represent a fraud probability. VoiceShield warns and prompts independent verification; it does not automatically block calls. Browser clients access permitted local microphones only and cannot intercept arbitrary remote cellular calls.
 
-## Release status: v0.1.0
+## Release status: v0.1.1
 
-VoiceShield v0.1.0 is an advisory local microphone/file-analysis engineering
-release. The real official AASIST-L checkpoint was validated on Apple M3 CPU
-and MPS, but the checkpoint is not distributed with VoiceShield; obtain it
-from the [pinned upstream source](https://raw.githubusercontent.com/clovaai/aasist/a04c9863f63d44471dde8a6abcb3b082b07cd1d1/models/weights/AASIST-L.pth).
+VoiceShield v0.1.1 is an advisory local microphone/file-analysis engineering
+patch release. Offline file results now preserve meaningful raw threshold
+crossings and uncertain windows as mixed evidence instead of allowing a final
+LOW window to imply uniformly low history. HIGH still requires sustained policy
+evidence. The ASVspoof 2019 LA reproduction runner now fails closed on protocol
+cardinality, protocol/audio coverage, invalid smoke sampling, non-canonical EER
+comparisons, and incomplete report provenance.
+
+The real official AASIST-L checkpoint was validated on Apple M3 CPU and MPS,
+but the checkpoint is not distributed with VoiceShield; obtain it from the
+[pinned upstream source](https://raw.githubusercontent.com/clovaai/aasist/a04c9863f63d44471dde8a6abcb3b082b07cd1d1/models/weights/AASIST-L.pth).
 Scores are uncalibrated acoustic anomaly scores and thresholds are unvalidated
 operating heuristics. Outputs do not authenticate speech, prove identity, or
 establish fraud. Browser capture is limited to permitted local microphone input
-and cannot intercept cellular calls. Scientific ASVspoof reproduction remains
-pending.
+and cannot intercept cellular calls. Full ASVspoof scoring, reproduced EER, and
+official min t-DCF computation remain pending.
 
 ### Real-checkpoint engineering benchmark
 
