@@ -66,7 +66,12 @@
 - **PyTorch Version**: `{{ torch_version }}`
 - **Git Commit**: `{{ git_commit }}`
 - **Git Working Tree Dirty**: `{{ git_dirty }}`
+- **Model Identifier**: `{{ model_id }}`
+- **Provenance Status**: `{{ provenance_status }}`
+- **Expected Registry Checkpoint SHA-256**: `{{ expected_checkpoint_sha256 }}`
 - **AASIST-L Checkpoint SHA-256**: `{{ checkpoint_sha256 }}`
+- **Pinned Upstream Commit**: `{{ upstream_commit }}`
+- **Parameter Count**: `{{ parameter_count }}`
 - **Protocol File SHA-256**: `{{ protocol_sha256 }}`
 - **VoiceShield Config SHA-256**: `{{ config_sha256 }}`
 

@@ -90,7 +90,10 @@ VoiceShield enforces strict canonical configuration wiring and complete algorith
 
 ### 6.1 Canonical Algorithmic Configuration
 `configs/default.yaml` is the canonical algorithmic configuration governing model detector construction, real-time streaming sessions, and offline file evaluation:
-- **Architecture**: Strictly `aasist_l` (`clovaai/aasist` baseline). Other architectures are rejected.
+- **Model Identity**: Strictly `clovaai/aasist-l` (canonical default) or `custom/aasist-l`. Mock runtime identity is `mock/aasist-l`.
+- **Architecture**: Strictly `aasist_l` (`clovaai/aasist` baseline, 85,306 parameters). Other architectures are rejected.
+- **Official Checkpoint Integrity**: Official mode (`clovaai/aasist-l`) unconditionally verifies SHA-256 (`814331d088032bb4c3fa61cc014789eadeed464209dd094ab3a2dd6ffbdce27a`), file size (426,428 bytes), and parameter count (85,306) against the immutable model registry prior to `torch.load` and fails closed on mismatch.
+- **Custom Mode**: Custom checkpoints require explicit `model_id: "custom/aasist-l"` and report provenance status `custom_unverified`.
 - **Audio contract**: Strictly 16,000 Hz, mono (1 channel), float32 normalized to $[-1.0, 1.0]$.
 - **Windowing**: 4.0-second window (64,000 samples) with 1.0-second streaming hop (16,000 samples).
 - **Speech gating**: $\ge 0.8\text{s}$ active speech duration required per window before inference.
@@ -108,6 +111,7 @@ from voiceshield.config import VoiceShieldConfig, load_config
 # Load canonical configuration (fails fast on missing or invalid schema)
 config = load_config("configs/default.yaml")
 
+print(f"Model ID: {config.model.model_id}")
 print(f"Architecture: {config.model.architecture}")
 print(f"Config Hash: {config.compute_hash()}")
 
@@ -124,8 +128,8 @@ VoiceShield establishes one validated effective configuration for each API proce
    - API: `VOICESHIELD_CONFIG_PATH=/path/to/custom.yaml`
    - CLI: `--config /path/to/custom.yaml`
 3. **Explicit Operational Overrides**:
-   - Environment variables: `VOICESHIELD_CHECKPOINT_PATH`, `VOICESHIELD_DEVICE`.
-   - CLI flags: `--checkpoint`, `--device`, `--hop-seconds`, `--threshold`.
+   - Environment variables: `VOICESHIELD_MODEL_ID`, `VOICESHIELD_CHECKPOINT_PATH`, `VOICESHIELD_DEVICE`.
+   - CLI flags: `--model-id`, `--checkpoint`, `--device`, `--hop-seconds`, `--threshold`.
    - REST API query parameters: `hop_seconds`, `threshold` (omission preserves server configuration).
 
 **Deterministic Hash Computation**:

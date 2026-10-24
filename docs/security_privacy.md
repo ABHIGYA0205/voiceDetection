@@ -62,7 +62,14 @@ flowchart TD
 
 - **Control**: `torch.load(self.checkpoint_path, map_location="cpu", weights_only=True)`
 - **Mechanism**: VoiceShield enforces `weights_only=True` on all PyTorch weight loading operations in `src/voiceshield/models/aasist_adapter.py`. This restricts the unpickler to tensors and primitive collections, completely neutralizing arbitrary Python code execution payloads embedded in malicious checkpoints.
-- **Integrity Pinning**: VoiceShield supports `expected_sha256` parameter and the `VOICESHIELD_EXPECTED_SHA256` environment variable. When present, the weights file is hashed via streaming SHA-256 (`_verify_checkpoint_sha256`) and verified *before* loading. Any mismatch triggers an immediate hard failure (`ValueError`).
+- **Immutable Official Registry Verification**: Official model mode (`clovaai/aasist-l`) unconditionally computes the checkpoint SHA-256 before deserialization and matches it against the immutable registry entry:
+  - **Expected SHA-256**: `814331d088032bb4c3fa61cc014789eadeed464209dd094ab3a2dd6ffbdce27a`
+  - **Expected Size**: `426428` bytes
+  - **Architecture Parameters**: `85306` parameters
+  - **Pinned Upstream Commit**: `a04c9863f63d44471dde8a6abcb3b082b07cd1d1`
+  - **Fail-Closed**: Any hash, size, or parameter divergence triggers immediate rejection (`CheckpointIntegrityError`) without invoking `torch.load`.
+  - **Custom Model Identity**: Non-official checkpoints require setting `model_id: "custom/aasist-l"` and remain reported as `custom_unverified` with `checkpoint_verified = false`.
+  - **Mock Mode**: Testing and UI demo mock mode (`mock/aasist-l`) is never official.
 
 ### 3.2 Audio Decompression & Memory Bomb Prevention (CWE-400)
 
@@ -225,7 +232,7 @@ If a deployed update or checkpoint exhibits behavioral instability or regression
    ```
 3. **Restart Service in Safe Mode**:
    ```bash
-   VOICESHIELD_DEVICE=cpu VOICESHIELD_EXPECTED_SHA256=<KNOWN_HASH> make api
+   VOICESHIELD_DEVICE=cpu make api
    ```
 
 ---

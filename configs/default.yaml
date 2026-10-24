@@ -16,6 +16,7 @@ windowing:
   energy_threshold: 0.015
 
 model:
+  model_id: "clovaai/aasist-l"
   architecture: "aasist_l"
   checkpoint_path: "models/weights/AASIST-L.pth"
   device_preferred: "mps"

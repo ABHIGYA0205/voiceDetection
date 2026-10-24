@@ -27,7 +27,7 @@ AASIST-L is an end-to-end deep neural network designed to discriminate authentic
 | **Graph Dimensions (`gat_dims`)** | `[24, 32]` | Lightweight latent node projection. |
 | **Node Pooling (`pool_ratios`)** | `[0.4, 0.5, 0.7, 0.5]` | Top-$k$ hierarchical graph pooling. |
 | **Output Layer** | 2 linear projection logits (`spoof: 0`, `bonafide: 1`) | Binary hypothesis decision space. |
-| **Total Parameters** | **85,386 parameters (~341 KB FP32)** | Ultra-compact footprint optimized for local M3 edge execution. |
+| **Total Parameters** | **85,306 parameters** | Ultra-compact footprint optimized for local M3 edge execution. |
 
 ---
 
@@ -179,5 +179,5 @@ Empirically measured using the VoiceShield Benchmark Suite on the host hardware:
 ## 10. Versioning & Rollback
 
 - **Model Checkpoint Pinning**: Fixed path `models/weights/AASIST-L.pth`.
-- **Integrity Gate**: In production deployments, `VOICESHIELD_EXPECTED_SHA256` must be set. Checkpoint loading fails immediately if the hash diverges.
+- **Integrity Gate**: In official mode (`clovaai/aasist-l`), VoiceShield enforces automatic SHA-256 verification against the central immutable registry (`814331d088032bb4c3fa61cc014789eadeed464209dd094ab3a2dd6ffbdce27a`, size 426428 bytes, 85306 parameters) before `torch.load` and fails closed on any mismatch. Custom weights require explicit `custom/aasist-l` identity. Mock mode (`mock/aasist-l`) is never official.
 - **Rollback Procedure**: In the event of model regression or unhandled PyTorch MPS operator incompatibility, execution automatically falls back to CPU (`metadata["fallback_used"] = True`).

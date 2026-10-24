@@ -28,10 +28,10 @@ from voiceshield.config.overrides import apply_config_overrides
 from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.core.device import resolve_device_status
 from voiceshield.core.schema import Disclaimers
-from voiceshield.models.aasist_adapter import (
+from voiceshield.models import (
     AASIST_L_DEFAULT_CONFIG,
     AASISTLDetector,
-    CheckpointNotFoundError,
+    CheckpointError,
 )
 from voiceshield.vendor.aasist import AASISTModel
 
@@ -73,11 +73,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     base_config = load_config(config_path_target)
 
+    env_model_id = os.getenv("VOICESHIELD_MODEL_ID")
     env_checkpoint = os.getenv("VOICESHIELD_CHECKPOINT_PATH")
     env_device = os.getenv("VOICESHIELD_DEVICE")
 
     effective_config = apply_config_overrides(
         base_config=base_config,
+        model_id=env_model_id,
         checkpoint_path=env_checkpoint,
         device_preferred=env_device,
     )
@@ -108,6 +110,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # 3. Detector initialization using effective configuration
     checkpoint_path = Path(effective_config.model.checkpoint_path)
+    model_id = effective_config.model.model_id
     preferred_device = effective_config.model.device_preferred
     fallback_to_cpu = effective_config.model.fallback_to_cpu
     operating_threshold = effective_config.temporal_policy.threshold_high
@@ -126,48 +129,37 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         mock_raw = AASISTModel(AASIST_L_DEFAULT_CONFIG)
         app.state.detector = AASISTLDetector(
             _instantiated_model=mock_raw,
+            model_id="mock/aasist-l",
             preferred_device=preferred_device,
             fallback_to_cpu=fallback_to_cpu,
             threshold=operating_threshold,
         )
         app.state.is_mock_detector = True
     else:
-        if not checkpoint_path.is_file():
-            instructions = (
-                f"AASIST-L checkpoint not found at: {checkpoint_path}.\n"
-                "Real mode refuses to mark model as ready without valid checkpoint weights.\n"
-                "Setup Instructions:\n"
-                "  1. Download official AASIST-L checkpoint:\n"
-                "     mkdir -p models/weights\n"
-                f"     curl -L -o {checkpoint_path} "
-                "https://huggingface.co/SpeechAntiSpoofingBenchmarks/AASIST-L/resolve/main/AASIST-L.pth\n"
-                "  2. Or start in mock-detector mode for testing/UI demos:\n"
-                "     export VOICESHIELD_MOCK_MODEL=true"
+        logger.info(
+            "Initializing AASIST-L detector (model_id=%s) from: %s",
+            model_id,
+            checkpoint_path,
+        )
+        try:
+            app.state.detector = AASISTLDetector(
+                checkpoint_path=checkpoint_path,
+                model_id=model_id,
+                preferred_device=preferred_device,
+                fallback_to_cpu=fallback_to_cpu,
+                threshold=operating_threshold,
             )
-            logger.warning(instructions)
-            app.state.model_load_error = instructions
+            app.state.is_mock_detector = False
+        except CheckpointError as exc:
+            logger.error("Checkpoint error initializing detector: %s", exc)
+            app.state.model_load_error = str(exc)
             app.state.detector = None
             app.state.is_mock_detector = False
-        else:
-            logger.info("Loading AASIST-L checkpoint from: %s", checkpoint_path)
-            try:
-                app.state.detector = AASISTLDetector(
-                    checkpoint_path=checkpoint_path,
-                    preferred_device=preferred_device,
-                    fallback_to_cpu=fallback_to_cpu,
-                    threshold=operating_threshold,
-                )
-                app.state.is_mock_detector = False
-            except CheckpointNotFoundError as exc:
-                logger.error("Checkpoint error: %s", exc)
-                app.state.model_load_error = str(exc)
-                app.state.detector = None
-                app.state.is_mock_detector = False
-            except Exception as exc:
-                logger.error("Unexpected error loading checkpoint: %s", exc)
-                app.state.model_load_error = f"Error loading checkpoint {checkpoint_path}: {exc}"
-                app.state.detector = None
-                app.state.is_mock_detector = False
+        except Exception as exc:
+            logger.error("Unexpected error loading detector: %s", exc)
+            app.state.model_load_error = f"Error loading checkpoint {checkpoint_path}: {exc}"
+            app.state.detector = None
+            app.state.is_mock_detector = False
 
     try:
         yield
@@ -292,6 +284,12 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
             actual_device if actual_device is not None else device_status.device_name
         )
 
+        model_provenance = (
+            detector.provenance.model_dump()
+            if detector is not None and hasattr(detector, "provenance")
+            else None
+        )
+
         return {
             "status": "ok",
             "service": "VoiceShield",
@@ -299,6 +297,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
             "model_loaded": detector is not None,
             "is_mock_detector": getattr(application.state, "is_mock_detector", False),
             "config_hash": getattr(application.state, "effective_config_hash", None),
+            "model_provenance": model_provenance,
             "device": {
                 "name": active_device_name,
                 "is_mps": active_device_name == "mps",
@@ -363,6 +362,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
             )
 
         actual_device = detector.device.type if hasattr(detector, "device") else "cpu"
+        prov = getattr(detector, "provenance", None)
         return {
             "status": "ready",
             "service": "VoiceShield",
@@ -371,6 +371,18 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
             "is_mock_detector": getattr(request.app.state, "is_mock_detector", False),
             "device": actual_device,
             "config_hash": stored_hash,
+            "model_id": prov.model_id if prov is not None else "clovaai/aasist-l",
+            "provenance_status": prov.provenance_status
+            if prov is not None
+            else "official_verified",
+            "checkpoint_verified": prov.checkpoint_verified if prov is not None else False,
+            "checkpoint_sha256": prov.checkpoint_sha256 if prov is not None else None,
+            "expected_checkpoint_sha256": prov.expected_checkpoint_sha256
+            if prov is not None
+            else None,
+            "upstream_commit": prov.upstream_commit if prov is not None else None,
+            "parameter_count": prov.parameter_count if prov is not None else 85306,
+            "model_provenance": prov.model_dump() if prov is not None else None,
         }
 
     return application

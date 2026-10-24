@@ -13,6 +13,7 @@ from voiceshield.config.schema import VoiceShieldConfig
 
 def apply_config_overrides(
     base_config: VoiceShieldConfig,
+    model_id: str | None = None,
     checkpoint_path: str | Path | None = None,
     device_preferred: str | None = None,
     hop_seconds: float | None = None,
@@ -32,6 +33,7 @@ def apply_config_overrides(
 
     Args:
         base_config: Source immutable VoiceShieldConfig.
+        model_id: Optional override for model.model_id ('clovaai/aasist-l' or 'custom/aasist-l').
         checkpoint_path: Optional override for model.checkpoint_path.
         device_preferred: Optional override for model.device_preferred ('mps' or 'cpu').
         hop_seconds: Optional override for windowing.hop_seconds.
@@ -46,6 +48,12 @@ def apply_config_overrides(
         ConfigError: If any override value violates field or cross-field validation rules.
     """
     model_updates: dict[str, Any] = {}
+    if model_id is not None:
+        mid_str = model_id.strip()
+        if not mid_str:
+            raise ConfigError("Invalid configuration override: model_id cannot be empty.")
+        model_updates["model_id"] = mid_str
+
     if checkpoint_path is not None:
         chk_str = str(checkpoint_path).strip()
         if not chk_str:
@@ -87,6 +95,8 @@ def apply_config_overrides(
         return VoiceShieldConfig.model_validate(root_dict)
     except (ValidationError, ValueError) as exc:
         context_parts: list[str] = []
+        if model_id is not None:
+            context_parts.append(f"model_id={model_id!r}")
         if checkpoint_path is not None:
             context_parts.append(f"checkpoint_path={checkpoint_path!r}")
         if device_preferred is not None:

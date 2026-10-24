@@ -313,6 +313,17 @@ def evaluate_audio(
         "config_hash": effective_config_hash,
         "effective_threshold": effective_threshold,
     }
+    if hasattr(detector, "provenance") and detector.provenance is not None:
+        prov = detector.provenance
+        error_metadata.update(
+            {
+                "model_id": prov.model_id,
+                "provenance_status": prov.provenance_status,
+                "checkpoint_verified": prov.checkpoint_verified,
+                "checkpoint_sha256": prov.checkpoint_sha256,
+                "model_provenance": prov.model_dump(),
+            }
+        )
 
     # 3. Load audio via canonical preprocessor with strict amplitude validation (no silent normalization)
     try:
@@ -402,6 +413,18 @@ def evaluate_audio(
         "subtype": metadata.subtype,
         "is_mock_detector": is_mock,
     }
+    if hasattr(detector, "provenance") and detector.provenance is not None:
+        prov = detector.provenance
+        res_metadata.update(
+            {
+                "model_id": prov.model_id,
+                "provenance_status": prov.provenance_status,
+                "checkpoint_verified": prov.checkpoint_verified,
+                "checkpoint_sha256": prov.checkpoint_sha256,
+                "expected_checkpoint_sha256": prov.expected_checkpoint_sha256,
+                "model_provenance": prov.model_dump(),
+            }
+        )
 
     # 5. Deterministic full-window and end-of-stream policy:
     # If audio contains fewer than window_samples (< window_seconds), report insufficient evidence

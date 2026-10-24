@@ -65,8 +65,11 @@ data/audio/
 
 # Model checkpoints and weights (enforce Git LFS or external bucket storage)
 checkpoints/
+models/weights/
 models/*.pt
 models/*.pth
+models/**/*.pt
+models/**/*.pth
 models/*.bin
 models/*.safetensors
 models/*.onnx

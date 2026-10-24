@@ -124,6 +124,22 @@ class BenchmarkProvenance(BaseModel):
     is_mock_weights: bool = Field(
         description="Whether benchmark executed using mock architecture weights."
     )
+    provenance_status: str | None = Field(
+        default=None,
+        description="Model provenance status ('official_verified', 'custom_unverified', 'mock').",
+    )
+    checkpoint_verified: bool = Field(
+        default=False,
+        description="Whether checkpoint bytes were verified against official registry.",
+    )
+    expected_checkpoint_sha256: str | None = Field(
+        default=None, description="Expected registry SHA-256 for official models."
+    )
+    upstream_commit: str | None = Field(default=None, description="Pinned upstream git commit.")
+    parameter_count: int | None = Field(default=None, description="Total verified parameter count.")
+    model_provenance: dict[str, Any] | None = Field(
+        default=None, description="Full structured model provenance record."
+    )
 
 
 class BenchmarkSuiteReport(BaseModel):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import torch
 
 from voiceshield.benchmark.runner import BenchmarkRunner, detect_hardware_environment
@@ -129,10 +130,26 @@ def test_streaming_soak_test_execution() -> None:
     assert len(report.samples) >= 1
 
 
+def test_benchmark_missing_checkpoint_fails_without_mock(tmp_path: Path) -> None:
+    """Verify that absent checkpoint fails cleanly without mock_model=True (no silent downgrade)."""
+    from voiceshield.models import CheckpointNotFoundError
+
+    runner = BenchmarkRunner(
+        checkpoint_path=tmp_path / "absent_weights.pth",
+        mock_model=False,
+        iterations=1,
+        warmup=0,
+        devices=["cpu"],
+    )
+    with pytest.raises(CheckpointNotFoundError):
+        runner.run_suite()
+
+
 def test_benchmark_runner_full_suite_and_reporting(tmp_path: Path) -> None:
     """Verify BenchmarkRunner executes all stages, generates markdown and JSON, and labels mock mode."""
     runner = BenchmarkRunner(
         checkpoint_path=tmp_path / "absent_weights.pth",
+        mock_model=True,
         iterations=5,
         warmup=2,
         devices=["cpu"],
@@ -142,6 +159,9 @@ def test_benchmark_runner_full_suite_and_reporting(tmp_path: Path) -> None:
     report = runner.run_suite()
     assert isinstance(report, BenchmarkSuiteReport)
     assert report.provenance.is_mock_weights is True
+    assert report.provenance.model_id == "mock/aasist-l"
+    assert report.provenance.provenance_status == "mock"
+    assert report.provenance.checkpoint_verified is False
     assert report.warning_mock is not None
     assert "[MOCK DETECTOR BENCHMARK" in report.warning_mock
 

@@ -99,6 +99,11 @@ class ServerStartAck(BaseModel):
     idle_timeout_seconds: float = DEFAULT_IDLE_TIMEOUT_SECONDS
     is_mock_detector: bool = False
     config_hash: str | None = None
+    model_id: str | None = None
+    provenance_status: str | None = None
+    checkpoint_verified: bool = False
+    checkpoint_sha256: str | None = None
+    model_provenance: dict[str, Any] | None = None
     disclaimers: Disclaimers = Field(default_factory=Disclaimers)
 
 
@@ -488,6 +493,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
         )
 
         is_mock = getattr(app.state, "is_mock_detector", False)
+        prov = getattr(detector, "provenance", None)
 
         # 6. Send start acknowledgement
         start_ack = ServerStartAck(
@@ -503,6 +509,11 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
             idle_timeout_seconds=idle_timeout,
             is_mock_detector=is_mock,
             config_hash=effective_config_hash,
+            model_id=prov.model_id if prov is not None else None,
+            provenance_status=prov.provenance_status if prov is not None else None,
+            checkpoint_verified=prov.checkpoint_verified if prov is not None else False,
+            checkpoint_sha256=prov.checkpoint_sha256 if prov is not None else None,
+            model_provenance=prov.model_dump() if prov is not None else None,
         )
         await websocket.send_json(start_ack.model_dump())
 

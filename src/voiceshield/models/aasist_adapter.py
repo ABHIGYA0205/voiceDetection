@@ -19,6 +19,14 @@ import torch.nn.functional as F
 
 from voiceshield.core.device import get_device
 from voiceshield.models.base import BaseDetector, DetectorOutput
+from voiceshield.models.provenance import ModelProvenance
+from voiceshield.models.registry import (
+    CheckpointIntegrityError,
+    CheckpointLoadError,
+    CheckpointNotFoundError,
+    UnsupportedModelIdentityError,
+    get_official_registry_entry,
+)
 from voiceshield.vendor.aasist.AASIST import Model as UpstreamAASISTModel
 
 logger = logging.getLogger(__name__)
@@ -35,10 +43,6 @@ AASIST_L_DEFAULT_CONFIG: dict[str, Any] = {
 
 DEFAULT_CHECKPOINT_PATH = Path("models/weights/AASIST-L.pth")
 DEFAULT_THRESHOLD = 0.65
-
-
-class CheckpointNotFoundError(FileNotFoundError):
-    """Raised when an expected model weights checkpoint is missing from the system."""
 
 
 def pad_for_aasist(
@@ -82,7 +86,7 @@ def _verify_checkpoint_sha256(path: Path, expected_sha256: str) -> None:
             hasher.update(chunk)
     actual_sha = hasher.hexdigest().lower()
     if actual_sha != expected_sha256.lower():
-        raise ValueError(
+        raise CheckpointIntegrityError(
             f"Checkpoint SHA-256 mismatch for {path}!\n"
             f"  Expected: {expected_sha256.lower()}\n"
             f"  Actual:   {actual_sha}"
@@ -95,6 +99,7 @@ class AASISTLDetector(BaseDetector):
     def __init__(
         self,
         checkpoint_path: str | Path | None = None,
+        model_id: str = "clovaai/aasist-l",
         expected_sha256: str | None = None,
         model_config: dict[str, Any] | None = None,
         preferred_device: str | None = None,
@@ -106,6 +111,7 @@ class AASISTLDetector(BaseDetector):
 
         Args:
             checkpoint_path: Path to weights file (defaults to models/weights/AASIST-L.pth).
+            model_id: Model identity ('clovaai/aasist-l', 'custom/aasist-l', or 'mock/aasist-l').
             expected_sha256: Optional expected SHA-256 checksum to verify.
             model_config: Architecture hyperparameters dictionary (defaults to official AASIST-L).
             preferred_device: 'mps', 'cpu', or None to read environment.
@@ -120,39 +126,193 @@ class AASISTLDetector(BaseDetector):
         self.device = get_device(preferred=preferred_device, fallback_to_cpu=self.fallback_to_cpu)
         self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else DEFAULT_CHECKPOINT_PATH
 
-        self.is_mock = _instantiated_model is not None
+        self.is_mock = _instantiated_model is not None or model_id == "mock/aasist-l"
+
         if _instantiated_model is not None:
-            # Used for shape & control-flow tests
             self.model = _instantiated_model
-        else:
+            param_count = sum(p.numel() for p in self.model.parameters())
+            self.provenance = ModelProvenance(
+                model_id="mock/aasist-l",
+                architecture="aasist_l",
+                provenance_status="mock",
+                checkpoint_sha256=None,
+                checkpoint_verified=False,
+                expected_checkpoint_sha256=None,
+                upstream_repository=None,
+                upstream_commit=None,
+                parameter_count=param_count,
+                is_mock=True,
+                checkpoint_size_bytes=None,
+                source_license_spdx=None,
+                checkpoint_rights_note=None,
+            )
+        elif model_id == "mock/aasist-l":
+            self.model = UpstreamAASISTModel(self.config)
+            param_count = sum(p.numel() for p in self.model.parameters())
+            self.provenance = ModelProvenance(
+                model_id="mock/aasist-l",
+                architecture="aasist_l",
+                provenance_status="mock",
+                checkpoint_sha256=None,
+                checkpoint_verified=False,
+                expected_checkpoint_sha256=None,
+                upstream_repository=None,
+                upstream_commit=None,
+                parameter_count=param_count,
+                is_mock=True,
+                checkpoint_size_bytes=None,
+                source_license_spdx=None,
+                checkpoint_rights_note=None,
+            )
+        elif model_id == "clovaai/aasist-l":
+            reg = get_official_registry_entry(model_id)
+
             if not self.checkpoint_path.is_file():
                 setup_instructions = (
                     f"AASIST-L checkpoint not found at: {self.checkpoint_path}\n"
                     "VoiceShield forbids fabricating or inventing model weights.\n"
-                    "Please download the official checkpoint using:\n\n"
+                    "Setup Instructions: Please download the official checkpoint from the pinned upstream release:\n\n"
                     "  mkdir -p models/weights\n"
-                    f"  curl -L -o {self.checkpoint_path} "
-                    "https://huggingface.co/SpeechAntiSpoofingBenchmarks/AASIST-L/resolve/main/AASIST-L.pth\n\n"
-                    "Alternatively, install huggingface-hub and run:\n"
-                    "  hf download SpeechAntiSpoofingBenchmarks/AASIST-L AASIST-L.pth --local-dir models/weights\n"
+                    f"  curl -L -o {self.checkpoint_path} \\\n"
+                    f"    {reg.checkpoint_url}\n\n"
+                    f"Expected SHA-256: {reg.checkpoint_sha256} ({reg.checkpoint_size_bytes} bytes)\n"
+                    f"Pinned Upstream Commit: {reg.upstream_commit}"
                 )
                 raise CheckpointNotFoundError(setup_instructions)
 
-            target_sha = expected_sha256 or os.getenv("VOICESHIELD_EXPECTED_SHA256")
-            if target_sha is not None and target_sha.strip():
-                _verify_checkpoint_sha256(self.checkpoint_path, target_sha.strip())
+            actual_size = self.checkpoint_path.stat().st_size
+            hasher = hashlib.sha256()
+            with open(self.checkpoint_path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    hasher.update(chunk)
+            actual_sha = hasher.hexdigest().lower()
+
+            if actual_sha != reg.checkpoint_sha256:
+                raise CheckpointIntegrityError(
+                    f"Official AASIST-L checkpoint SHA-256 mismatch for {self.checkpoint_path}!\n"
+                    f"  Expected (registry): {reg.checkpoint_sha256}\n"
+                    f"  Actual:              {actual_sha}\n"
+                    "Official model identity 'clovaai/aasist-l' strictly requires byte verification against the immutable registry."
+                )
+
+            if expected_sha256 is not None:
+                exp_norm = expected_sha256.strip().lower()
+                if exp_norm != reg.checkpoint_sha256:
+                    raise CheckpointIntegrityError(
+                        f"Supplied expected_sha256 conflicts with official registry SHA-256 for {model_id}!\n"
+                        f"  Registry: {reg.checkpoint_sha256}\n"
+                        f"  Supplied: {exp_norm}"
+                    )
+
+            env_expected = os.getenv("VOICESHIELD_EXPECTED_SHA256")
+            if env_expected and env_expected.strip().lower() != reg.checkpoint_sha256:
+                logger.warning(
+                    "VOICESHIELD_EXPECTED_SHA256 is ignored in official mode; official registry SHA-256 takes precedence."
+                )
 
             self.model = UpstreamAASISTModel(self.config)
             logger.info(
-                "Loading AASIST-L weights from %s (weights_only=True)", self.checkpoint_path
+                "Loading official AASIST-L weights from %s (weights_only=True)",
+                self.checkpoint_path,
             )
             try:
                 state_dict = torch.load(self.checkpoint_path, map_location="cpu", weights_only=True)
             except Exception as exc:
-                raise ValueError(
+                raise CheckpointLoadError(
                     f"Failed to load checkpoint safely via weights_only=True from {self.checkpoint_path}: {exc}"
                 ) from exc
-            self.model.load_state_dict(state_dict)
+
+            try:
+                self.model.load_state_dict(state_dict, strict=True)
+            except Exception as exc:
+                raise CheckpointIntegrityError(
+                    f"AASIST-L state dictionary in {self.checkpoint_path} is incompatible with architecture: {exc}"
+                ) from exc
+
+            param_count = sum(p.numel() for p in self.model.parameters())
+            if param_count != reg.parameter_count:
+                raise CheckpointIntegrityError(
+                    f"AASIST-L parameter count mismatch for {self.checkpoint_path}!\n"
+                    f"  Expected: {reg.parameter_count}\n"
+                    f"  Actual:   {param_count}"
+                )
+
+            self.provenance = ModelProvenance(
+                model_id=reg.model_id,
+                architecture=reg.architecture,
+                provenance_status="official_verified",
+                checkpoint_sha256=actual_sha,
+                checkpoint_verified=True,
+                expected_checkpoint_sha256=reg.checkpoint_sha256,
+                upstream_repository=reg.upstream_repository,
+                upstream_commit=reg.upstream_commit,
+                parameter_count=param_count,
+                is_mock=False,
+                checkpoint_size_bytes=actual_size,
+                source_license_spdx=reg.source_license_spdx,
+                checkpoint_rights_note=reg.checkpoint_rights_note,
+            )
+        elif model_id == "custom/aasist-l":
+            if not self.checkpoint_path.is_file():
+                raise CheckpointNotFoundError(
+                    f"Custom AASIST-L checkpoint not found at: {self.checkpoint_path}"
+                )
+
+            actual_size = self.checkpoint_path.stat().st_size
+            hasher = hashlib.sha256()
+            with open(self.checkpoint_path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    hasher.update(chunk)
+            actual_sha = hasher.hexdigest().lower()
+
+            if expected_sha256 is not None:
+                exp_norm = expected_sha256.strip().lower()
+                if exp_norm != actual_sha:
+                    raise CheckpointIntegrityError(
+                        f"Custom checkpoint SHA-256 mismatch for {self.checkpoint_path}!\n"
+                        f"  Expected: {exp_norm}\n"
+                        f"  Actual:   {actual_sha}"
+                    )
+
+            self.model = UpstreamAASISTModel(self.config)
+            logger.info(
+                "Loading custom AASIST-L weights from %s (weights_only=True)", self.checkpoint_path
+            )
+            try:
+                state_dict = torch.load(self.checkpoint_path, map_location="cpu", weights_only=True)
+            except Exception as exc:
+                raise CheckpointLoadError(
+                    f"Failed to load custom checkpoint safely via weights_only=True from {self.checkpoint_path}: {exc}"
+                ) from exc
+
+            try:
+                self.model.load_state_dict(state_dict, strict=True)
+            except Exception as exc:
+                raise CheckpointIntegrityError(
+                    f"Custom state dictionary in {self.checkpoint_path} is incompatible with architecture: {exc}"
+                ) from exc
+
+            param_count = sum(p.numel() for p in self.model.parameters())
+            self.provenance = ModelProvenance(
+                model_id="custom/aasist-l",
+                architecture="aasist_l",
+                provenance_status="custom_unverified",
+                checkpoint_sha256=actual_sha,
+                checkpoint_verified=False,
+                expected_checkpoint_sha256=None,
+                upstream_repository=None,
+                upstream_commit=None,
+                parameter_count=param_count,
+                is_mock=False,
+                checkpoint_size_bytes=actual_size,
+                source_license_spdx=None,
+                checkpoint_rights_note=None,
+            )
+        else:
+            raise UnsupportedModelIdentityError(
+                f"Unsupported model identity: {model_id!r}. "
+                "Supported identities: 'clovaai/aasist-l', 'custom/aasist-l', 'mock/aasist-l'"
+            )
 
         self.model.eval()
         try:
@@ -165,6 +325,11 @@ class AASISTLDetector(BaseDetector):
             )
             self.device = torch.device("cpu")
             self.model.to(self.device)
+
+    @property
+    def model_id(self) -> str:
+        """Return canonical model identifier from central provenance."""
+        return self.provenance.model_id
 
     def predict(
         self,
@@ -252,15 +417,21 @@ class AASISTLDetector(BaseDetector):
                     is_synthetic_suspected=bool(prob_spoof >= self.threshold),
                     input_samples=self.target_length,
                     device_used=self.device.type,
-                    model_id="clovaai/aasist-l",
+                    model_id=self.provenance.model_id,
                     operating_threshold=self.threshold,
                     operating_threshold_source="unvalidated_heuristic",
                     score_is_calibrated=False,
                     metadata={
-                        "upstream_repo": "https://github.com/clovaai/aasist",
-                        "upstream_commit": "a04c9863f63d44471dde8a6abcb3b082b07cd1d1",
+                        "model_id": self.provenance.model_id,
+                        "provenance_status": self.provenance.provenance_status,
+                        "checkpoint_verified": self.provenance.checkpoint_verified,
+                        "checkpoint_sha256": self.provenance.checkpoint_sha256,
+                        "parameter_count": self.provenance.parameter_count,
+                        "upstream_repo": self.provenance.upstream_repository,
+                        "upstream_commit": self.provenance.upstream_commit,
                         "label_mapping": {"0": "spoof", "1": "bonafide"},
                         "fallback_used": fallback_used,
+                        "model_provenance": self.provenance.model_dump(),
                     },
                 )
             )

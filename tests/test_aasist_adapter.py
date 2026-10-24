@@ -62,7 +62,7 @@ def test_aasist_shape_and_forward_pass_mock_weights() -> None:
     assert len(output.raw_logits) == 2
     assert 0.0 <= output.synthetic_likelihood <= 1.0
     assert output.input_samples == 64600
-    assert output.model_id == "clovaai/aasist-l"
+    assert output.model_id == "mock/aasist-l"
     assert output.metadata["label_mapping"] == {"0": "spoof", "1": "bonafide"}
 
 
@@ -105,7 +105,7 @@ def test_missing_checkpoint_raises_with_instructions(tmp_path: Path) -> None:
     err_msg = str(exc_info.value)
     assert "AASIST-L checkpoint not found at:" in err_msg
     assert "curl -L -o" in err_msg
-    assert "SpeechAntiSpoofingBenchmarks/AASIST-L" in err_msg
+    assert "raw.githubusercontent.com/clovaai/aasist" in err_msg
     assert "VoiceShield forbids fabricating or inventing model weights." in err_msg
 
 

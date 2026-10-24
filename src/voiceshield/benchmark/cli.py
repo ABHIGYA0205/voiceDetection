@@ -54,6 +54,19 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path to AASIST-L checkpoint weights override.",
     )
+    parser.add_argument(
+        "--model-id",
+        type=str,
+        default=None,
+        choices=["clovaai/aasist-l", "custom/aasist-l"],
+        help="Optional model identity override ('clovaai/aasist-l' or 'custom/aasist-l').",
+    )
+    parser.add_argument(
+        "--mock-model",
+        action="store_true",
+        default=False,
+        help="Explicitly run benchmark using mock architecture weights (identity mock/aasist-l).",
+    )
     return parser.parse_args()
 
 
@@ -70,6 +83,8 @@ def main() -> None:
     runner = BenchmarkRunner(
         config_path=args.config,
         checkpoint_path=args.checkpoint,
+        model_id=args.model_id,
+        mock_model=args.mock_model,
         iterations=args.iterations,
         warmup=args.warmup,
         devices=device_list,

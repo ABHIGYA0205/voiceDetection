@@ -41,16 +41,19 @@ VoiceShield enforces strict operational integrity: **real mode refuses to report
 ### Option A: Real Mode Setup (Official AASIST-L Checkpoint)
 To evaluate real acoustic deepfake detection performance using the official Clova AI AASIST-L baseline:
 
-1. Download the official checkpoint weights into `models/weights/`:
+1. Download the official checkpoint weights into `models/weights/` from the pinned upstream commit:
    ```bash
    mkdir -p models/weights
    curl -L -o models/weights/AASIST-L.pth \
-     https://huggingface.co/SpeechAntiSpoofingBenchmarks/AASIST-L/resolve/main/AASIST-L.pth
+     https://raw.githubusercontent.com/clovaai/aasist/a04c9863f63d44471dde8a6abcb3b082b07cd1d1/models/weights/AASIST-L.pth
    ```
 
-2. Verify the checkpoint SHA-256 integrity:
+2. Verify the checkpoint SHA-256 integrity (enforced automatically before deserialization):
    ```bash
    shasum -a 256 models/weights/AASIST-L.pth
+   # Expected SHA-256: 814331d088032bb4c3fa61cc014789eadeed464209dd094ab3a2dd6ffbdce27a
+   # Expected Size:    426428 bytes
+   # Parameter Count:  85306
    ```
 
 3. Launch the API in real mode:
@@ -65,12 +68,21 @@ To evaluate real acoustic deepfake detection performance using the official Clov
      "version": "0.1.0",
      "model_loaded": true,
      "is_mock_detector": false,
-     "device": "mps"
+     "device": "mps",
+     "model_id": "clovaai/aasist-l",
+     "provenance_status": "official_verified",
+     "checkpoint_verified": true,
+     "checkpoint_sha256": "814331d088032bb4c3fa61cc014789eadeed464209dd094ab3a2dd6ffbdce27a",
+     "upstream_commit": "a04c9863f63d44471dde8a6abcb3b082b07cd1d1",
+     "parameter_count": 85306
    }
    ```
 
+- **Automatic Fail-Closed Verification**: Official mode verifies the checkpoint unconditionally against the immutable registry.
+- **Custom Mode**: Non-official weights require explicit `model_id: "custom/aasist-l"` and remain reported as `custom_unverified` (`checkpoint_verified: false`).
+
 ### Option B: Mock Mode Setup (UI and Transport Testing)
-If the 85MB checkpoint is not present on disk, or if you are running tests or UI demos:
+If the checkpoint is not present on disk, or if you are running tests or UI demos:
 
 1. Start the API in mock detector mode:
    ```bash
@@ -85,9 +97,14 @@ If the 85MB checkpoint is not present on disk, or if you are running tests or UI
      "service": "VoiceShield",
      "version": "0.1.0",
      "model_loaded": true,
-     "is_mock_detector": true
+     "is_mock_detector": true,
+     "device": "cpu",
+     "model_id": "mock/aasist-l",
+     "provenance_status": "mock",
+     "checkpoint_verified": false
    }
    ```
+   *(Mock mode is strictly for testing and is never official).*
    The UI will visibly display a prominent yellow badge: **`[MOCK DETECTOR - TEST MODE]`**.
 
 ---

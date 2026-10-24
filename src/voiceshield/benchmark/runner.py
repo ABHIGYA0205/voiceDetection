@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import platform
@@ -91,64 +90,69 @@ class BenchmarkRunner:
         config: VoiceShieldConfig | None = None,
         config_path: str | Path | None = None,
         checkpoint_path: str | Path | None = None,
+        model_id: str | None = None,
+        mock_model: bool = False,
         iterations: int = 50,
         warmup: int = 5,
         devices: list[str] | None = None,
         soak_duration_seconds: float = 0.0,
     ) -> None:
         base = config or load_config(config_path)
-        if checkpoint_path is not None:
-            self.config = apply_config_overrides(base, checkpoint_path=str(checkpoint_path))
+        if checkpoint_path is not None or model_id is not None:
+            self.config = apply_config_overrides(
+                base,
+                model_id=model_id,
+                checkpoint_path=str(checkpoint_path) if checkpoint_path is not None else None,
+            )
         else:
             self.config = base
+        self.mock_model = mock_model
         self.checkpoint_path = Path(self.config.model.checkpoint_path)
         self.iterations = iterations
         self.warmup = warmup
         self.devices = devices or ["cpu", "mps"]
         self.soak_duration = soak_duration_seconds
 
-    def _resolve_detector(self) -> tuple[AASISTLDetector, bool, str | None]:
-        """Instantiate detector with real checkpoint if present, otherwise mock model."""
-        if self.checkpoint_path.is_file():
-            hasher = hashlib.sha256()
-            with open(self.checkpoint_path, "rb") as f:
-                for chunk in iter(lambda: f.read(65536), b""):
-                    hasher.update(chunk)
-            sha = hasher.hexdigest()
-            logger.info(
-                "Loaded official AASIST-L checkpoint: %s (SHA-256: %s)", self.checkpoint_path, sha
+    def _resolve_detector(self) -> AASISTLDetector:
+        """Instantiate detector with real checkpoint or explicit mock model."""
+        if self.mock_model:
+            logger.warning(
+                "Running in explicit MOCK weights mode for interface benchmarking (model_id=mock/aasist-l)."
             )
-            detector = AASISTLDetector(
-                checkpoint_path=self.checkpoint_path,
+            mock_raw = AASISTModel(AASIST_L_DEFAULT_CONFIG)  # type: ignore[no-untyped-call]
+            return AASISTLDetector(
+                _instantiated_model=mock_raw,
+                model_id="mock/aasist-l",
                 threshold=self.config.temporal_policy.threshold_high,
                 preferred_device=self.config.model.device_preferred,
                 fallback_to_cpu=self.config.model.fallback_to_cpu,
             )
-            return detector, False, sha
 
-        logger.warning(
-            "AASIST-L checkpoint not found at: %s. Running in MOCK weights mode for interface benchmarking.",
+        logger.info(
+            "Initializing AASIST-L detector (model_id=%s) from: %s",
+            self.config.model.model_id,
             self.checkpoint_path,
         )
-        mock_raw = AASISTModel(AASIST_L_DEFAULT_CONFIG)  # type: ignore[no-untyped-call]
-        detector = AASISTLDetector(
-            _instantiated_model=mock_raw,
+        return AASISTLDetector(
+            checkpoint_path=self.checkpoint_path,
+            model_id=self.config.model.model_id,
             threshold=self.config.temporal_policy.threshold_high,
             preferred_device=self.config.model.device_preferred,
             fallback_to_cpu=self.config.model.fallback_to_cpu,
         )
-        return detector, True, None
 
     def run_suite(self) -> BenchmarkSuiteReport:
         """Execute full benchmark suite across all stages, devices, and soak test."""
         env = detect_hardware_environment()
-        detector, is_mock, ckpt_sha = self._resolve_detector()
+        detector = self._resolve_detector()
+        prov = detector.provenance
+        is_mock = prov.is_mock
 
         mock_warning: str | None = None
         if is_mock:
             mock_warning = (
                 "[MOCK DETECTOR BENCHMARK - NOT FOR PITCH OR PRODUCTION CLAIMS] "
-                "Official AASIST-L.pth checkpoint was not present. Latencies reflect architectural "
+                "Explicit mock model weights were evaluated (mock/aasist-l). Latencies reflect architectural "
                 "forward pass computation of the AASIST network, but must NOT be cited as verified detection claims."
             )
 
@@ -158,9 +162,15 @@ class BenchmarkRunner:
             git_dirty=_is_git_dirty(),
             config_hash=self.config.compute_hash(),
             checkpoint_path=str(self.checkpoint_path) if not is_mock else None,
-            checkpoint_sha256=ckpt_sha,
-            model_id="AASIST-L",
+            checkpoint_sha256=prov.checkpoint_sha256,
+            model_id=prov.model_id,
             is_mock_weights=is_mock,
+            provenance_status=prov.provenance_status,
+            checkpoint_verified=prov.checkpoint_verified,
+            expected_checkpoint_sha256=prov.expected_checkpoint_sha256,
+            upstream_commit=prov.upstream_commit,
+            parameter_count=prov.parameter_count,
+            model_provenance=prov.model_dump(),
         )
 
         sample_rate = self.config.audio.sample_rate
@@ -348,14 +358,26 @@ class BenchmarkRunner:
         lines.append("")
         lines.append("| Provenance Field | Value |")
         lines.append("| :--- | :--- |")
-        lines.append(f"| **Model Architecture** | `{report.provenance.model_id}` |")
+        lines.append(f"| **Model Identifier** | `{report.provenance.model_id}` |")
+        lines.append(
+            f"| **Provenance Status** | `{report.provenance.provenance_status or 'N/A'}` |"
+        )
+        lines.append(f"| **Checkpoint Verified** | `{report.provenance.checkpoint_verified}` |")
         lines.append(f"| **Effective Canonical Config Hash** | `{report.provenance.config_hash}` |")
         lines.append(
-            f"| **Checkpoint Path** | `{report.provenance.checkpoint_path or 'MOCK_WEIGHTS (NONE)'}` |"
+            f"| **Checkpoint Path** | `{report.provenance.checkpoint_path or 'N/A (mock)'}` |"
         )
         lines.append(
-            f"| **Checkpoint SHA-256** | `{report.provenance.checkpoint_sha256 or 'MOCK_WEIGHTS (NONE)'}` |"
+            f"| **Checkpoint SHA-256** | `{report.provenance.checkpoint_sha256 or 'N/A (mock)'}` |"
         )
+        if report.provenance.expected_checkpoint_sha256:
+            lines.append(
+                f"| **Expected Registry SHA-256** | `{report.provenance.expected_checkpoint_sha256}` |"
+            )
+        if report.provenance.upstream_commit:
+            lines.append(f"| **Upstream Commit** | `{report.provenance.upstream_commit}` |")
+        if report.provenance.parameter_count:
+            lines.append(f"| **Parameter Count** | `{report.provenance.parameter_count}` |")
         lines.append(
             f"| **Git Commit** | `{report.provenance.git_commit or 'Uncommitted repo'}` (Dirty: `{report.provenance.git_dirty}`) |"
         )

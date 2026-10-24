@@ -101,7 +101,7 @@ def test_checkpoint_sha256_mismatch_rejected(tmp_path: Path) -> None:
 
 
 def test_checkpoint_sha256_env_var_enforcement(tmp_path: Path) -> None:
-    """Verify VOICESHIELD_EXPECTED_SHA256 environment variable is automatically enforced."""
+    """Verify VOICESHIELD_EXPECTED_SHA256 cannot bypass or override the immutable official registry."""
     clean_pth = tmp_path / "clean_weights.pth"
     clean_pth.write_bytes(b"valid weight bytes")
 
@@ -110,7 +110,7 @@ def test_checkpoint_sha256_env_var_enforcement(tmp_path: Path) -> None:
     with patch.dict(os.environ, {"VOICESHIELD_EXPECTED_SHA256": wrong_sha}):
         with pytest.raises(ValueError) as exc_info:
             AASISTLDetector(checkpoint_path=clean_pth)
-        assert "Checkpoint SHA-256 mismatch" in str(exc_info.value)
+        assert "checkpoint sha-256 mismatch" in str(exc_info.value).lower()
 
 
 # ==============================================================================

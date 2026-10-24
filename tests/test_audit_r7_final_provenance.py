@@ -395,7 +395,7 @@ def test_correction_d_packaged_resource_absent_allows_repository_fallback() -> N
     with patch("importlib.resources.files", return_value=fake_module):
         cfg = load_config(None)
         assert (
-            cfg.compute_hash() == "43a9ce74cadab3c63fc0336eeef417e4014833c6c67e33e481b6b4fe81a822ef"
+            cfg.compute_hash() == "774483ef6871c5a0c83f81098cf50cc2e691d39305c9e7c262d478bfb5088596"
         )
 
 

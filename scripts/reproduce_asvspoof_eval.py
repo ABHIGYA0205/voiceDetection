@@ -33,8 +33,9 @@ from voiceshield.evaluation.metrics import (
     compute_eer_interpolated,
     compute_min_dcf,
 )
-from voiceshield.models.aasist_adapter import (
+from voiceshield.models import (
     AASISTLDetector,
+    get_official_registry_entry,
     pad_for_aasist,
 )
 
@@ -111,12 +112,12 @@ def print_resource_checklist(checks: dict[str, Any]) -> None:
     sys.stderr.write(" ACTION REQUIRED TO RUN OFFICIAL REPRODUCTION:\n")
     sys.stderr.write("-" * 90 + "\n\n")
 
+    reg = get_official_registry_entry("clovaai/aasist-l")
     if not checks["checkpoint"]["exists"]:
         sys.stderr.write(" 1. Download official AASIST-L checkpoint:\n")
         sys.stderr.write("    mkdir -p models/weights\n")
         sys.stderr.write(
-            "    curl -L -o models/weights/AASIST-L.pth \\\n"
-            "      https://huggingface.co/SpeechAntiSpoofingBenchmarks/AASIST-L/resolve/main/AASIST-L.pth\n\n"
+            f"    curl -L -o {checks['checkpoint']['path']} \\\n      {reg.checkpoint_url}\n\n"
         )
 
     if not checks["protocol_file"]["exists"] or not checks["audio_flac_dir"]["exists"]:
@@ -328,7 +329,29 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    # 1. Verify directory structure & prerequisites
+    # 1. Enforce official model registry integrity on checkpoint BEFORE dataset access
+    reg = get_official_registry_entry("clovaai/aasist-l")
+
+    if not args.checkpoint.is_file():
+        sys.stderr.write(
+            f"HALTING: Official AASIST-L checkpoint not found at: {args.checkpoint}\n"
+            "Please acquire the official checkpoint following the instructions below.\n"
+        )
+        _, checks = verify_directory_structure(args.checkpoint, args.dataset_root, args.split)
+        print_resource_checklist(checks)
+        return 1
+
+    checkpoint_sha = compute_file_sha256(args.checkpoint)
+    if checkpoint_sha != reg.checkpoint_sha256:
+        sys.stderr.write(
+            f"HALTING: Checkpoint SHA-256 integrity verification failed for {args.checkpoint}!\n"
+            f"  Expected (registry): {reg.checkpoint_sha256}\n"
+            f"  Actual:              {checkpoint_sha}\n"
+            "Official reproduction requires byte verification against the immutable registry.\n"
+        )
+        return 1
+
+    # 2. Verify directory structure & prerequisites
     all_present, checks = verify_directory_structure(
         checkpoint_path=args.checkpoint,
         dataset_root=args.dataset_root,
@@ -339,8 +362,8 @@ def main(argv: list[str] | None = None) -> int:
         print_resource_checklist(checks)
         if not all_present:
             sys.stderr.write(
-                "HALTING: Cannot proceed with reproduction. Required files are missing.\n"
-                "Please acquire the official checkpoint and dataset following the instructions above.\n\n"
+                "HALTING: Cannot proceed with reproduction. Required dataset files are missing.\n"
+                "Please acquire the official dataset following the instructions above.\n\n"
             )
             return 1
         return 0
@@ -348,16 +371,15 @@ def main(argv: list[str] | None = None) -> int:
     protocol_file = checks["protocol_file"]["path"]
     audio_dir = checks["audio_flac_dir"]["path"]
 
-    # 2. Checkpoint and protocol checksums
-    checkpoint_sha = compute_file_sha256(args.checkpoint)
     protocol_sha = compute_file_sha256(protocol_file)
 
     logger.info("AASIST-L Checkpoint: %s (SHA-256: %s)", args.checkpoint, checkpoint_sha[:16])
     logger.info("Protocol File: %s (SHA-256: %s)", protocol_file, protocol_sha[:16])
 
-    # 3. Load detector
+    # 3. Load detector with explicit official identity
     detector = AASISTLDetector(
         checkpoint_path=args.checkpoint,
+        model_id="clovaai/aasist-l",
         preferred_device=args.device,
     )
     logger.info("AASIST-L initialized on device: %s", detector.device)
@@ -439,7 +461,12 @@ def main(argv: list[str] | None = None) -> int:
         "{{ torch_version }}": torch.__version__,
         "{{ git_commit }}": "uncommitted_local",
         "{{ git_dirty }}": "True",
+        "{{ model_id }}": detector.provenance.model_id,
+        "{{ provenance_status }}": detector.provenance.provenance_status,
+        "{{ expected_checkpoint_sha256 }}": reg.checkpoint_sha256,
         "{{ checkpoint_sha256 }}": checkpoint_sha,
+        "{{ upstream_commit }}": reg.upstream_commit,
+        "{{ parameter_count }}": str(reg.parameter_count),
         "{{ protocol_sha256 }}": protocol_sha,
         "{{ config_sha256 }}": "N/A",
         "{{ smoke_samples_count }}": str(smoke_diagnostics.get("samples_evaluated", 0)),

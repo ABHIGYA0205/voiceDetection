@@ -150,7 +150,11 @@ To transition this evaluation card from "Not yet evaluated" to a fully validated
    ```bash
    mkdir -p models/weights
    curl -L -o models/weights/AASIST-L.pth \
-     https://huggingface.co/SpeechAntiSpoofingBenchmarks/AASIST-L/resolve/main/AASIST-L.pth
+     https://raw.githubusercontent.com/clovaai/aasist/a04c9863f63d44471dde8a6abcb3b082b07cd1d1/models/weights/AASIST-L.pth
+   shasum -a 256 models/weights/AASIST-L.pth
+   # Expected SHA-256: 814331d088032bb4c3fa61cc014789eadeed464209dd094ab3a2dd6ffbdce27a
+   # Expected Size:    426428 bytes
+   # Parameter Count:  85306
    ```
 2. **Download ASVspoof 2019 LA Evaluation Dataset**:
    Download the official dataset archive from [Edinburgh DataShare](https://datashare.ed.ac.uk/handle/10283/3336) and extract to `data/ASVspoof2019/LA/`.

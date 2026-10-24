@@ -138,6 +138,7 @@ module = [
     "tests.test_benchmark_suite",
     "tests.test_canonical_config_runtime",
     "tests.test_audit_r7_final_provenance",
+    "tests.test_audit_r8_checkpoint_integrity",
 ]
 disallow_untyped_calls = false
 

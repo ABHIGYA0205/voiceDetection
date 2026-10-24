@@ -6,13 +6,14 @@ import argparse
 import csv
 import sys
 from pathlib import Path
+from typing import Any
 
 from voiceshield.config.loader import ConfigError, load_config
 from voiceshield.config.overrides import apply_config_overrides
-from voiceshield.models.aasist_adapter import (
+from voiceshield.models import (
     AASIST_L_DEFAULT_CONFIG,
     AASISTLDetector,
-    CheckpointNotFoundError,
+    CheckpointError,
 )
 from voiceshield.models.base import BaseDetector
 from voiceshield.pipeline.file_evaluator import FileInferenceResult, evaluate_audio
@@ -69,6 +70,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         choices=["mps", "cpu"],
         help="Preferred computation device ('mps' or 'cpu') (uses config if omitted).",
+    )
+    parser.add_argument(
+        "--model-id",
+        type=str,
+        default=None,
+        choices=["clovaai/aasist-l", "custom/aasist-l"],
+        help="Model identity override ('clovaai/aasist-l' or 'custom/aasist-l').",
     )
     parser.add_argument(
         "--mock-model",
@@ -136,6 +144,10 @@ def save_cli_results(results: list[FileInferenceResult], output_path: Path) -> N
             "file_path",
             "status",
             "config_hash",
+            "model_id",
+            "provenance_status",
+            "checkpoint_verified",
+            "checkpoint_sha256",
             "duration_seconds",
             "total_windows",
             "mean_synthetic_score",
@@ -155,6 +167,10 @@ def save_cli_results(results: list[FileInferenceResult], output_path: Path) -> N
                         "file_path": r.file_path,
                         "status": r.status,
                         "config_hash": r.config_hash or "",
+                        "model_id": r.metadata.get("model_id") or "",
+                        "provenance_status": r.metadata.get("provenance_status") or "",
+                        "checkpoint_verified": r.metadata.get("checkpoint_verified", False),
+                        "checkpoint_sha256": r.metadata.get("checkpoint_sha256") or "",
                         "duration_seconds": r.duration_seconds,
                         "total_windows": r.total_windows,
                         "mean_synthetic_score": r.mean_synthetic_score
@@ -185,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         base_config = load_config(args.config)
         effective_config = apply_config_overrides(
             base_config=base_config,
+            model_id=args.model_id,
             checkpoint_path=str(args.checkpoint) if args.checkpoint is not None else None,
             device_preferred=args.device,
             hop_seconds=args.hop_seconds,
@@ -202,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
         mock_raw = AASISTModel(AASIST_L_DEFAULT_CONFIG)
         detector = AASISTLDetector(
             _instantiated_model=mock_raw,
+            model_id="mock/aasist-l",
             preferred_device=effective_config.model.device_preferred,
             fallback_to_cpu=effective_config.model.fallback_to_cpu,
             threshold=effective_config.temporal_policy.threshold_high,
@@ -210,11 +228,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             detector = AASISTLDetector(
                 checkpoint_path=effective_config.model.checkpoint_path,
+                model_id=effective_config.model.model_id,
                 preferred_device=effective_config.model.device_preferred,
                 fallback_to_cpu=effective_config.model.fallback_to_cpu,
                 threshold=effective_config.temporal_policy.threshold_high,
             )
-        except CheckpointNotFoundError as exc:
+        except CheckpointError as exc:
             sys.stderr.write(f"\nERROR: {exc}\n")
             return 1
 
@@ -243,6 +262,18 @@ def main(argv: list[str] | None = None) -> int:
     results: list[FileInferenceResult] = []
 
     # Record unsupported files cleanly
+    unsupported_meta: dict[str, Any] = {"config_hash": effective_config_hash}
+    if hasattr(detector, "provenance"):
+        prov = detector.provenance
+        unsupported_meta.update(
+            {
+                "model_id": prov.model_id,
+                "provenance_status": prov.provenance_status,
+                "checkpoint_verified": prov.checkpoint_verified,
+                "checkpoint_sha256": prov.checkpoint_sha256,
+            }
+        )
+
     for u in unsupported_files:
         results.append(
             FileInferenceResult(
@@ -250,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
                 status="unsupported",
                 error_message=f"Unsupported format '{u.suffix}'. Only WAV and FLAC are supported.",
                 config_hash=effective_config_hash,
-                metadata={"config_hash": effective_config_hash},
+                metadata=unsupported_meta,
             )
         )
 

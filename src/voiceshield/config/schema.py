@@ -125,6 +125,10 @@ class WindowingConfig(StrictFrozenConfigModel):
 class ModelConfig(StrictFrozenConfigModel):
     """Acoustic detector model architecture and hardware execution parameters."""
 
+    model_id: Literal["clovaai/aasist-l", "custom/aasist-l"] = Field(
+        default="clovaai/aasist-l",
+        description="Configured model identity: 'clovaai/aasist-l' (official) or 'custom/aasist-l' (unverified custom).",
+    )
     architecture: Literal["aasist_l"] = Field(
         default="aasist_l",
         description="Supported model architecture identifier (strictly 'aasist_l').",
@@ -139,6 +143,16 @@ class ModelConfig(StrictFrozenConfigModel):
     fallback_to_cpu: bool = Field(
         default=True, description="Gracefully fall back to CPU if preferred device unavailable."
     )
+
+    @field_validator("model_id")
+    @classmethod
+    def validate_model_id(cls, v: str) -> str:
+        if v not in ("clovaai/aasist-l", "custom/aasist-l"):
+            raise ValueError(
+                f"Configured model_id must be 'clovaai/aasist-l' or 'custom/aasist-l', got {v!r}. "
+                "('mock/aasist-l' is an explicit runtime/testing switch and cannot be configured in YAML)."
+            )
+        return v
 
     @field_validator("checkpoint_path")
     @classmethod

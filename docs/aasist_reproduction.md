@@ -52,23 +52,30 @@ Upstream `clovaai/aasist` data processing operates on raw waveforms with determi
 
 ---
 
-## 5. Checkpoint Acquisition Checklist
+## 5. Checkpoint Acquisition & Immutable Verification
 
-VoiceShield policy forbids fabricating weights or checking large binary models into Git. If the official checkpoint is absent, inference will fail with an actionable error.
+VoiceShield policy strictly forbids fabricating weights or checking binary models into Git. Official mode (`clovaai/aasist-l`) unconditionally verifies checkpoint bytes against the central immutable registry before deserialization.
 
-To acquire the official pre-trained checkpoint:
+To acquire the official pre-trained checkpoint from the pinned upstream release:
 
 ```bash
 # 1. Create target weights directory
 mkdir -p models/weights
 
-# 2. Download official weights via curl
+# 2. Download official weights from pinned upstream commit
 curl -L -o models/weights/AASIST-L.pth \
-  https://huggingface.co/SpeechAntiSpoofingBenchmarks/AASIST-L/resolve/main/AASIST-L.pth
+  https://raw.githubusercontent.com/clovaai/aasist/a04c9863f63d44471dde8a6abcb3b082b07cd1d1/models/weights/AASIST-L.pth
 
-# 3. Alternatively using huggingface-cli
-hf download SpeechAntiSpoofingBenchmarks/AASIST-L AASIST-L.pth --local-dir models/weights
+# 3. Verify SHA-256 checksum (enforced automatically at runtime)
+shasum -a 256 models/weights/AASIST-L.pth
+# Expected SHA-256: 814331d088032bb4c3fa61cc014789eadeed464209dd094ab3a2dd6ffbdce27a
+# Expected Size:    426428 bytes
+# Parameters:       85306
 ```
+
+- **Official Verification**: Official mode (`clovaai/aasist-l`) verifies the SHA-256 hash automatically before `torch.load` and fails closed on any mismatch.
+- **Custom Checkpoints**: Non-official weights require setting model identity to `custom/aasist-l` and remain reported as `custom_unverified` with `checkpoint_verified = false`.
+- **Mock Mode**: Testing and UI demo mock mode (`mock/aasist-l`) is never official.
 
 ---
 
