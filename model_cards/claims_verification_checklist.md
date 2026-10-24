@@ -3,9 +3,9 @@
 **Purpose**: Enforce scientific integrity and prevent exaggerated, misleading, or unverified claims across project documentation, `README.md`, pitch decks, and hackathon presentations (e.g. Smart India Hackathon / SIH).
 
 **Governing Standards**:
-- Model Card: [`model_cards/aasist_l_model_card.md`](file:///Users/Abhi/Downloads/projects/deepfake%20voice/model_cards/aasist_l_model_card.md)
-- Evaluation Card: [`model_cards/aasist_l_evaluation_card.md`](file:///Users/Abhi/Downloads/projects/deepfake%20voice/model_cards/aasist_l_evaluation_card.md)
-- Security Specification: [`docs/security_privacy.md`](file:///Users/Abhi/Downloads/projects/deepfake%20voice/docs/security_privacy.md)
+- Model Card: [`aasist_l_model_card.md`](./aasist_l_model_card.md)
+- Evaluation Card: [`aasist_l_evaluation_card.md`](./aasist_l_evaluation_card.md)
+- Security Specification: [`docs/security_privacy.md`](../docs/security_privacy.md)
 
 ---
 
@@ -19,7 +19,7 @@ Any README, slide deck, or demonstration containing any of the following stateme
 | ❌ *"Proves identity of caller"* or *"Authenticates human speaker"* | VoiceShield evaluates synthetic speech acoustic artifacts, **not** biometric speaker identity. A scammer can use their real human voice. | *"Detects artificial voice synthesis artifacts; does NOT verify caller identity."* |
 | ❌ *"Proven 99.01% accuracy / 0.99% EER on our platform"* (before running local ASVspoof) | Local evaluation split has not yet been executed on-disk; citing upstream papers as local achievements is fraudulent. | *"AASIST-L upstream paper reports 0.99% EER on ASVspoof 2019 LA; local evaluation split is pending dataset setup."* |
 | ❌ *"Prevents financial fraud / bank account takeover"* | An audio score alone cannot stop banking fraud. Fraudsters use human coercion, social engineering, and SIM swaps. | *"Provides defense-in-depth advisory signals prompting independent human verification."* |
-| ❌ *"Real-time 30ms latency on real models"* (when mock weights were measured) | Benchmark suite ran using mock weights because official weights were absent. | *"Empirical architecture forward pass on Apple Silicon M3 measures 30.4 ms (RTF 0.0076) using mock weights."* |
+| ❌ *"Real-time 30ms latency on real models"* without qualification | A latency measurement is not detection-performance evidence and does not establish real-time accuracy. | *"On Apple M3 using the verified official AASIST-L checkpoint, MPS end-to-end p95 was 34.546 ms over 100 steady-state iterations."* |
 | ❌ *"Compliant with EU AI Act / GDPR / BIPA"* | Software cannot grant legal compliance; deployer policies and legal review govern statutory compliance. | *"Engineered with volatile-only audio memory and zero disk retention to facilitate compliance reviews."* |
 
 ---
@@ -31,14 +31,13 @@ The following claims are **verified by code, unit tests, and saved report artefa
 1. **Lightweight Edge Architecture**:
    - AASIST-L has **85,306 parameters (~341 KB FP32)**, making it small enough to run locally on consumer hardware without cloud GPU clusters.
 2. **Apple Silicon M3 Hardware Acceleration**:
-   - Hardware: Apple MacBook Pro M3 (`Mac15,3`, 8 cores), PyTorch 2.14.1 with MPS.
-   - Steady-state model inference latency: **p50 = 30.4 ms, p95 = 31.3 ms** (RTF = 0.0076, Throughput = 32.8 windows/sec).
-   - End-to-end 4.0-second window processing: **p50 = 34.7 ms, p95 = 39.4 ms** (RTF = 0.0087).
-   - Target Achievement: **Achieved project target of under 200 ms inference per 4-second window**.
-   - Speedup: Metal Performance Shaders (MPS) is **4.29x faster** than CPU execution.
-   - *Provenance Artefact*: [`reports/benchmarks/m3_benchmark_report.md`](file:///Users/Abhi/Downloads/projects/deepfake%20voice/reports/benchmarks/m3_benchmark_report.md).
+   - On Apple M3 using the verified official AASIST-L checkpoint, MPS model inference p50 was **30.187 ms** and p95 was **30.761 ms** (RTF = 0.00755).
+   - On the same run, MPS end-to-end p50 was **33.754 ms** and p95 was **34.546 ms** (RTF = 0.00844).
+   - MPS end-to-end speedup was **3.32x** versus CPU.
+   - These are engineering latency measurements, not detection-accuracy evidence.
+   - *Provenance Artefact*: [`reports/benchmarks/m3_benchmark_report.md`](../reports/benchmarks/m3_benchmark_report.md).
 3. **Streaming Soak & Memory Stability**:
-   - 10-minute continuous streaming soak test (600.0s, 333,480 frames, 16,671 evaluated windows) resulted in **+0.00 MB memory growth** (`0.00 MB/hr`) and a **maximum queue backlog of 1 window**.
+   - A 600-second accelerated streaming stress soak completed with bounded reported memory and backlog (`+0.00 MB`, maximum queue backlog of 1 window).
 4. **Zero Audio Persistence**:
    - Audio is buffered exclusively in volatile RAM (`io.BytesIO`, `AudioRingBuffer`). **Zero audio frames or spoken transcripts are written to disk or recorded in logs.**
 5. **Deterministic Preprocessing**:
@@ -61,7 +60,7 @@ Before publishing documentation, creating release tags, or presenting the Smart 
 ### Performance & Metric Truthfulness
 - [ ] If ASVspoof 2019 LA evaluation has **not** been run locally, accuracy/EER is clearly labeled as **"Upstream reference (Jung et al. 2022); local evaluation not yet evaluated"**.
 - [ ] Latency numbers specify **Apple MacBook Pro M3 hardware**, **batch size 1**, and cite `reports/benchmarks/m3_benchmark_report.md`.
-- [ ] If benchmark was run with mock weights, it is visibly marked: `[Mock weights benchmark; architectural FLOPs verified]`.
+- [x] The release benchmark identifies the verified official checkpoint and distinguishes engineering latency from detection-performance evidence.
 - [ ] Unseen generator, language, and telephony codec limitations are explicitly listed as areas for future adaptation.
 
 ### Privacy & Architecture Integrity

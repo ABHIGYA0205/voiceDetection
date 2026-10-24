@@ -147,23 +147,29 @@ VoiceShield operates in an adversarial environment where generative models conti
 
 ## 8. Latency & Hardware Profile (Apple MacBook Pro M3)
 
-Empirically measured using the VoiceShield Benchmark Suite on the host hardware:
+The official checkpoint was measured using the VoiceShield Benchmark Suite on
+an Apple MacBook Pro M3. These are engineering latency and throughput
+measurements, not detection-performance evidence.
 
-- **Host Device**: Apple MacBook Pro M3 (`Mac15,3`, 8 CPU cores, macOS 27.0.1, PyTorch 2.14.1).
-- **Execution Target**: Under $200\text{ ms}$ inference per 4.0-second window ($\text{RTF} < 0.050$).
-- **Benchmark Report Artefact**: [`reports/benchmarks/m3_benchmark_report.md`](file:///Users/Abhi/Downloads/projects/deepfake%20voice/reports/benchmarks/m3_benchmark_report.md) (Config SHA-256: `67427d513bead1064a39eddd4ab2a729e4eb41b13c763a84c9fec55ff59d2da9`).
+- **Host Device**: Apple MacBook Pro M3.
+- **Benchmark commit**: `392ca34eaf76eecf4afd8d23ca5049f39eec08f5`.
+- **Checkpoint SHA-256**:
+  `814331d088032bb4c3fa61cc014789eadeed464209dd094ab3a2dd6ffbdce27a`.
+- **Benchmark Report Artefact**: [`reports/benchmarks/m3_benchmark_report.md`](../reports/benchmarks/m3_benchmark_report.md).
 
-| Stage | Device | Steady p50 (Median) | Steady p95 | Real-Time Factor (RTF) | Throughput | Target (<200ms) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Stage 1: Decoding/Resampling** | CPU | 5.7 ms | 8.6 ms | 0.0014 | 140.6 win/s | N/A |
-| **Stage 2: VAD & Padding** | CPU | 0.05 ms | 0.05 ms | 0.0000 | 20,547 win/s | N/A |
-| **Stage 3: Model Inference** | CPU | 130.1 ms | 132.0 ms | 0.0325 | 7.6 win/s | ✅ MET |
-| **Stage 3: Model Inference** | **MPS (Metal)** | **30.4 ms** | **31.3 ms** | **0.0076** | **32.8 win/s** | **✅ MET** |
-| **Stage 4: Temporal Policy** | CPU | 0.00 ms | 0.01 ms | 0.0000 | 257,295 win/s | N/A |
-| **Stage 5: End-to-End Window** | **MPS (Metal)** | **34.7 ms** | **39.4 ms** | **0.0087** | **28.1 win/s** | **✅ MET** |
+| Stage | Device | Warm-up mean | Steady p50 | Steady p95 | Steady p99 | Throughput | RTF | Target (<200ms) |
+| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
+| **Stage 1: Decoding/Resampling** | CPU | 18.117 ms | 6.257 ms | 8.716 ms | 14.713 ms | 139.94 win/s | 0.00156 | N/A |
+| **Stage 2: Feature Extraction/Padding** | CPU | 0.097 ms | 0.052 ms | 0.054 ms | 0.057 ms | 19,972.38 win/s | 0.00001 | N/A |
+| **Stage 3: Model Inference** | CPU | 164.333 ms | **112.999 ms** | **129.814 ms** | 181.354 ms | 8.45 win/s | **0.02825** | ✅ MET |
+| **Stage 3: Model Inference** | **MPS (Metal)** | 70.577 ms | **30.187 ms** | **30.761 ms** | 34.043 ms | **32.91 win/s** | **0.00755** | **✅ MET** |
+| **Stage 4: Score Smoothing & Temporal Policy** | CPU | 0.019 ms | 0.004 ms | 0.004 ms | 0.005 ms | 263,941.37 win/s | 0.0 | N/A |
+| **Stage 5: End-to-End Window** | CPU | 112.668 ms | **111.981 ms** | **117.614 ms** | 125.402 ms | 8.83 win/s | **0.02800** | ✅ MET |
+| **Stage 5: End-to-End Window** | **MPS (Metal)** | 34.418 ms | **33.754 ms** | **34.546 ms** | 37.079 ms | **29.44 win/s** | **0.00844** | **✅ MET** |
 
-> [!WARNING]
-> **Measurement Notice**: In accordance with project integrity standards, the above latency benchmarks were measured using architectural mock weights because the official weights file was not present locally. Latencies reflect exact mathematical FLOPs and tensor graph execution of AASIST-L, but real detection accuracy claims remain unverified until official weights are loaded.
+The MPS end-to-end measurement was 3.32x faster than CPU. The benchmark used
+10 warmups and 100 steady-state iterations. It does not establish local EER,
+accuracy, min-tDCF, calibration, or generalization.
 
 ---
 

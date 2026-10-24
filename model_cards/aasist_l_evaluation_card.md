@@ -1,9 +1,9 @@
 # VoiceShield Evaluation Card: AASIST-L Baseline Detector
 
 **Card Identifier**: `VoiceShield-EvalCard-AASIST-L-v0.1.0`  
-**Associated Model Card**: [`model_cards/aasist_l_model_card.md`](file:///Users/Abhi/Downloads/projects/deepfake%20voice/model_cards/aasist_l_model_card.md)  
+**Associated Model Card**: [`aasist_l_model_card.md`](./aasist_l_model_card.md)
 **Evaluation Standard**: ASVspoof 2019 Logical Access (LA) Protocol & VoiceShield M3 Benchmark Suite  
-**Status**: **PARTIAL / NOT YET EVALUATED LOCALLY** (Pending local dataset and checkpoint acquisition)  
+**Status**: **PARTIAL — ENGINEERING VALIDATED; SCIENTIFIC BENCHMARK PENDING**
 **Card Version**: `1.0.0` (Truthful Baseline)  
 **Date**: October 2026  
 
@@ -15,8 +15,10 @@
 > **Truthful Evaluation Policy**  
 > In strict compliance with scientific integrity standards, VoiceShield forbids inventing evaluation metrics, claiming unverified benchmark numbers, or reporting results on cherry-picked audio files.  
 > - **Upstream Clova AI Reference**: Published ICASSP 2022 metrics are recorded for architectural baseline reference.  
-> - **Local Data Partition**: Because the official ASVspoof 2019 LA evaluation dataset and official pre-trained checkpoint weights are not present on this local machine, all local evaluation metrics are truthfully marked **"Not yet evaluated"**.  
-> - **Hardware Profiling**: Real-time latencies were measured on the local Apple MacBook Pro M3 using the architectural forward pass and are linked to the generated report artefact.
+> - **Official checkpoint**: Acquisition and integrity verification of the official AASIST-L checkpoint are complete.
+> - **Engineering validation**: The real-checkpoint API, transport, CPU/MPS benchmark, browser, and stress-soak validation are complete.
+> - **Scientific evaluation data**: The ASVspoof 2019 LA evaluation data is absent and has not been evaluated locally. Local EER, min-tDCF, ROC-AUC, balanced accuracy, calibration, FPR/FNR, confidence intervals, and external/telephony performance remain not evaluated.
+> - **Hardware profiling**: Real-checkpoint latency measurements are linked to the generated report artifact.
 
 ---
 
@@ -115,36 +117,40 @@ Measurements conducted on the target host hardware and linked to verified benchm
 - **Primary Execution Mode**: Apple MPS Metal Acceleration
 - **Batch Size**: 1 (Primary real-time conversational streaming case)
 - **Report Artefacts**:
-  - Markdown Report: [`reports/benchmarks/m3_benchmark_report.md`](file:///Users/Abhi/Downloads/projects/deepfake%20voice/reports/benchmarks/m3_benchmark_report.md)
-  - Raw JSON Telemetry: [`reports/benchmarks/m3_benchmark_report.json`](file:///Users/Abhi/Downloads/projects/deepfake%20voice/reports/benchmarks/m3_benchmark_report.json)
-  - Config SHA-256: `67427d513bead1064a39eddd4ab2a729e4eb41b13c763a84c9fec55ff59d2da9`
+  - Markdown Report: [`../reports/benchmarks/m3_benchmark_report.md`](../reports/benchmarks/m3_benchmark_report.md)
+  - Raw JSON Telemetry: [`../reports/benchmarks/m3_benchmark_report.json`](../reports/benchmarks/m3_benchmark_report.json)
+  - Config SHA-256: `774483ef6871c5a0c83f81098cf50cc2e691d39305c9e7c262d478bfb5088596`
 
 ### 5.1 Pipeline Stage Latencies (Batch Size 1, 4.0-second Window)
 
 | Pipeline Stage | Device | Warm-up Mean | Steady p50 (Median) | Steady p95 | Steady p99 | Throughput | RTF | Target (<200ms) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Stage 1: Decoding/Resampling** | CPU | 6.0 ms | **5.7 ms** | 8.6 ms | 38.4 ms | 140.6 win/s | 0.0014 | N/A |
-| **Stage 2: VAD & Padding** | CPU | 0.1 ms | **0.05 ms** | 0.05 ms | 0.1 ms | 20,547.9 win/s | 0.0000 | N/A |
-| **Stage 3: Model Inference** | CPU | 139.3 ms | **130.1 ms** | 132.0 ms | 147.3 ms | 7.6 win/s | 0.0325 | ✅ MET |
-| **Stage 3: Model Inference** | **MPS** | 893.6 ms | **30.4 ms** | 31.3 ms | 31.8 ms | 32.8 win/s | 0.0076 | **✅ MET** |
-| **Stage 4: Temporal Policy** | CPU | 0.00 ms | **0.00 ms** | 0.01 ms | 0.01 ms | 257,295.6 win/s | 0.0000 | N/A |
-| **Stage 5: End-to-End Processing** | **MPS** | 34.0 ms | **34.7 ms** | 39.4 ms | 39.9 ms | 28.1 win/s | 0.0087 | **✅ MET** |
+| **Stage 1: Decoding/Resampling** | CPU | 18.117 ms | **6.257 ms** | 8.716 ms | 14.713 ms | 139.94 win/s | 0.00156 | N/A |
+| **Stage 2: Feature Extraction/Padding** | CPU | 0.097 ms | **0.052 ms** | 0.054 ms | 0.057 ms | 19,972.38 win/s | 0.00001 | N/A |
+| **Stage 3: Model Inference** | CPU | 164.333 ms | **112.999 ms** | 129.814 ms | 181.354 ms | 8.45 win/s | 0.02825 | ✅ MET |
+| **Stage 3: Model Inference** | **MPS** | 70.577 ms | **30.187 ms** | **30.761 ms** | 34.043 ms | 32.91 win/s | 0.00755 | **✅ MET** |
+| **Stage 4: Score Smoothing & Temporal Policy** | CPU | 0.019 ms | **0.004 ms** | 0.004 ms | 0.005 ms | 263,941.37 win/s | 0.0 | N/A |
+| **Stage 5: End-to-End Processing** | CPU | 112.668 ms | **111.981 ms** | 117.614 ms | 125.402 ms | 8.83 win/s | 0.02800 | ✅ MET |
+| **Stage 5: End-to-End Processing** | **MPS** | 34.418 ms | **33.754 ms** | **34.546 ms** | 37.079 ms | 29.44 win/s | 0.00844 | **✅ MET** |
 
-### 5.2 10-Minute Streaming Soak Test Results
+### 5.2 Accelerated 600-Second Streaming Stress Soak
 
 - **Duration**: `600.0s` (10.0 minutes)
-- **Total Ingested Frames**: `333,480`
-- **Total Windows Evaluated**: `16,671`
-- **Initial RSS**: `1212.67 MB` | **Peak RSS**: `1212.67 MB` | **Final RSS**: `1212.67 MB`
+- **Frame Duration**: `50.0 ms`
+- **Total Ingested Frames**: `367,780`
+- **Total Windows Evaluated**: `18,386`
+- **Windows Dropped**: `0`
+- **Initial RSS**: `986.81 MB` | **Peak RSS**: `986.81 MB` | **Final RSS**: `986.81 MB`
 - **Net Memory Growth**: **`+0.00 MB`** (`0.00 MB/hr`)
 - **Maximum Queue Backlog**: `1` (Queue bound: 1)
+- **Ingestion**: Accelerated, not real-time-paced.
 - **Verdict**: `PASSED: Bounded memory and backlog maintained across 600.0s soak.`
 
 ---
 
 ## 6. Actionable Checklist to Complete Local Evaluation
 
-To transition this evaluation card from "Not yet evaluated" to a fully validated local evaluation report:
+To complete scientific detection-performance evaluation:
 
 1. **Acquire Official Checkpoint**:
    ```bash
@@ -166,5 +172,5 @@ To transition this evaluation card from "Not yet evaluated" to a fully validated
    ```bash
    .venv/bin/python scripts/reproduce_asvspoof_eval.py --split eval --output-dir reports/runs/asvspoof_eval_official
    ```
-5. **Update This Evaluation Card**:
+5. **Publish Scientific Evaluation Results**:
    Update Section 3 with the exact generated SHA-256 hashes, EER, and min-tDCF from `reports/runs/asvspoof_eval_official/asvspoof_reproduction_report.md`.

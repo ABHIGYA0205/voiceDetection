@@ -5,6 +5,30 @@ VoiceShield is an acoustic machine learning system designed to detect synthetic,
 > **Important Advisory Disclaimer**
 > VoiceShield provides acoustic anomaly metrics and advisory warnings. Its outputs do **not** constitute identity proof and do **not** represent a fraud probability. VoiceShield warns and prompts independent verification; it does not automatically block calls. Browser clients access permitted local microphones only and cannot intercept arbitrary remote cellular calls.
 
+## Release status: v0.1.0
+
+VoiceShield v0.1.0 is an advisory local microphone/file-analysis engineering
+release. The real official AASIST-L checkpoint was validated on Apple M3 CPU
+and MPS, but the checkpoint is not distributed with VoiceShield; obtain it
+from the [pinned upstream source](https://raw.githubusercontent.com/clovaai/aasist/a04c9863f63d44471dde8a6abcb3b082b07cd1d1/models/weights/AASIST-L.pth).
+Scores are uncalibrated acoustic anomaly scores and thresholds are unvalidated
+operating heuristics. Outputs do not authenticate speech, prove identity, or
+establish fraud. Browser capture is limited to permitted local microphone input
+and cannot intercept cellular calls. Scientific ASVspoof reproduction remains
+pending.
+
+### Real-checkpoint engineering benchmark
+
+| Device | Model inference p50 | Model inference p95 | End-to-end p50 | End-to-end p95 | End-to-end RTF |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| CPU | 112.999 ms | 129.814 ms | 111.981 ms | 117.614 ms | 0.02800 |
+| MPS | 30.187 ms | 30.761 ms | 33.754 ms | 34.546 ms | 0.00844 |
+
+MPS end-to-end speedup was **3.32x**. These are engineering latency
+measurements, not detection-accuracy evidence. See the
+[benchmark Markdown report](reports/benchmarks/m3_benchmark_report.md) and
+[benchmark JSON report](reports/benchmarks/m3_benchmark_report.json).
+
 ---
 
 ## 1. System Requirements & Apple Silicon Prerequisites
@@ -22,7 +46,8 @@ VoiceShield is an acoustic machine learning system designed to detect synthetic,
 ### 2.1 Setup Virtual Environment and Dependencies
 ```bash
 # Clone and enter directory
-cd "deepfake voice"
+git clone https://github.com/ABHIGYA0205/voiceDetection.git
+cd voiceDetection
 
 # Run setup (creates .venv with Python 3.11 and installs all dependency groups)
 make setup
@@ -254,5 +279,4 @@ Key capabilities and scientific guardrails:
 - **Cross-Condition Evaluation**: Matched, unseen-generator, unseen-channel, and external-test generalization tables.
 - **Latency Profiling**: Median (p50), 95th percentile (p95), mean latency, and Real-Time Factor (RTF).
 - **Publication-Quality Artifacts**: Auto-generates Markdown summary tables, machine-readable `metrics.csv`, and figures (`roc_curve.png`, `score_distributions.png`).
-
 
