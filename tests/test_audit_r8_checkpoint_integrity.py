@@ -339,6 +339,8 @@ def test_section_c_explicit_custom_mode_loading(tmp_path: Path) -> None:
     assert prov.expected_checkpoint_sha256 is None
     assert prov.is_mock is False
     assert prov.parameter_count == 85306
+    assert isinstance(prov.checkpoint_size_bytes, int)
+    assert prov.checkpoint_size_bytes > 0
 
     # 3. Output model_id and metadata reflect custom identity
     audio = np.zeros(64600, dtype=np.float32)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -113,13 +114,17 @@ def test_streaming_soak_test_execution() -> None:
     dev = torch.device("cpu")
 
     # Short soak test for unit testing (1.5 seconds)
-    report = run_streaming_soak_test(
-        detector=detector,
-        device=dev,
-        duration_seconds=1.5,
-        sample_interval_seconds=0.5,
-        accelerated=True,
-    )
+    with (
+        patch("voiceshield.benchmark.soak._get_current_rss_mb", return_value=100.0),
+        patch("voiceshield.benchmark.soak._get_mps_allocated_mb", return_value=0.0),
+    ):
+        report = run_streaming_soak_test(
+            detector=detector,
+            device=dev,
+            duration_seconds=1.5,
+            sample_interval_seconds=0.5,
+            accelerated=True,
+        )
     assert report.duration_seconds >= 1.0
     assert report.total_frames_ingested > 0
     assert report.initial_rss_mb > 0.0

@@ -106,9 +106,9 @@ class ModelProvenance(BaseModel):
                 raise ValueError(
                     f"official_verified checkpoint_sha256 must equal official registry SHA ({OFFICIAL_AASIST_L.checkpoint_sha256}), got {self.checkpoint_sha256}"
                 )
-            if not self.upstream_repository:
+            if self.upstream_repository != OFFICIAL_AASIST_L.upstream_repository:
                 raise ValueError(
-                    "official_verified provenance requires non-empty upstream_repository"
+                    "official_verified upstream_repository must equal the official registry repository"
                 )
             if self.upstream_commit != OFFICIAL_AASIST_L.upstream_commit:
                 raise ValueError(
@@ -161,6 +161,14 @@ class ModelProvenance(BaseModel):
             if self.checkpoint_rights_note is not None:
                 raise ValueError(
                     "custom_unverified provenance must have checkpoint_rights_note=None"
+                )
+            if (
+                isinstance(self.checkpoint_size_bytes, bool)
+                or not isinstance(self.checkpoint_size_bytes, int)
+                or self.checkpoint_size_bytes <= 0
+            ):
+                raise ValueError(
+                    "custom_unverified checkpoint_size_bytes must be a positive integer"
                 )
             if self.parameter_count <= 0:
                 raise ValueError(

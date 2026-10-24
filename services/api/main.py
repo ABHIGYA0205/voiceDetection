@@ -30,6 +30,7 @@ from services.api.routes.stream import router as stream_router
 from voiceshield import __version__
 from voiceshield.config.loader import load_config
 from voiceshield.config.overrides import apply_config_overrides
+from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.core.device import resolve_device_status
 from voiceshield.core.schema import Disclaimers
 from voiceshield.models import (
@@ -279,7 +280,9 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
             detector.device.type if detector is not None and hasattr(detector, "device") else None
         )
         configured_device = (
-            effective_cfg.model.device_preferred if effective_cfg is not None else None
+            effective_cfg.model.device_preferred
+            if isinstance(effective_cfg, VoiceShieldConfig)
+            else None
         )
         device_status = resolve_device_status()
         disclaimers = Disclaimers()

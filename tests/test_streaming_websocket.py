@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import queue
 import threading
 import time
 from typing import Any
@@ -383,6 +384,47 @@ def test_websocket_model_exception_resilience() -> None:
                 assert "neural engine hardware fault" in err["message"]
         finally:
             app.state.detector = orig_detector
+
+
+def test_websocket_unexpected_exception_sends_terminal_error_and_releases_state() -> None:
+    """Bounded regression for an ordinary exception after WebSocket acceptance."""
+    result_queue: queue.Queue[tuple[str, int | None]] = queue.Queue()
+
+    def run_client() -> None:
+        try:
+            with TestClient(app) as client:
+                with patch(
+                    "services.api.routes.stream.StreamingSession",
+                    side_effect=RuntimeError("forced post-accept failure"),
+                ):
+                    with client.websocket_connect("/api/v1/stream") as ws:
+                        ws.send_json(
+                            {
+                                "type": "start",
+                                "protocol_version": "1.0",
+                                "sample_rate": 16000,
+                                "channels": 1,
+                                "pcm_encoding": "int16",
+                            }
+                        )
+                        error = ws.receive_json()
+                        assert error["type"] == "error"
+                        assert error["error_code"] == "INTERNAL_STREAM_ERROR"
+                        with pytest.raises(WebSocketDisconnect) as disconnect:
+                            ws.receive_text()
+                        result_queue.put((error["type"], disconnect.value.code))
+        except BaseException as exc:
+            result_queue.put((f"failure:{exc!r}", None))
+
+    client_thread = threading.Thread(target=run_client, daemon=True)
+    client_thread.start()
+    observed_type, close_code = result_queue.get(timeout=2.0)
+    client_thread.join(timeout=2.0)
+
+    assert observed_type == "error"
+    assert close_code == 1011
+    assert app.state.streaming_admission.reserved_count == 0
+    assert app.state.active_streaming_sessions == {}
 
 
 # ==============================================================================
