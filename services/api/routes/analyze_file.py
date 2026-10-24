@@ -23,7 +23,6 @@ from services.api.resource_admission import (
 )
 from voiceshield.config.loader import ConfigError
 from voiceshield.config.overrides import apply_config_overrides
-from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.pipeline.file_evaluator import FileInferenceResult, evaluate_audio
 
 router = APIRouter(prefix="/api/v1", tags=["Analysis"])
@@ -98,22 +97,18 @@ async def analyze_audio_file(
     - Concurrency-protected via process-wide single-worker inference executor suitable for Apple Silicon M3 unified memory.
     - Advisory output only: does NOT determine caller identity or fraud likelihood.
     """
-    # 0. Effective configuration readiness and integrity check
-    effective_cfg = getattr(request.app.state, "effective_config", None)
-    stored_hash = getattr(request.app.state, "effective_config_hash", None)
-    if (
-        effective_cfg is None
-        or not isinstance(effective_cfg, VoiceShieldConfig)
-        or not stored_hash
-        or effective_cfg.compute_hash() != stored_hash
-    ):
+    # 0. Validate the complete runtime integrity contract before any request work.
+    try:
+        validate_runtime_model_provenance(request.app.state)
+    except ModelIntegrityError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=ApiErrorDetail(
-                error_code="CONFIG_UNAVAILABLE",
-                message="VoiceShield effective configuration is unavailable or not initialized.",
+                error_code=exc.error_code,
+                message=exc.message,
             ).model_dump(),
-        )
+        ) from exc
+    effective_cfg = request.app.state.effective_config
 
     # Validate and apply request overrides using centralized helper
     try:
@@ -173,17 +168,7 @@ async def analyze_audio_file(
             ).model_dump(),
         )
 
-    # 3. Model availability and runtime provenance integrity check
-    try:
-        validate_runtime_model_provenance(request.app.state)
-    except ModelIntegrityError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=ApiErrorDetail(
-                error_code="DETECTOR_NOT_LOADED",
-                message=exc.message,
-            ).model_dump(),
-        ) from exc
+    # 3. Use the detector validated by the shared runtime integrity contract.
     detector = request.app.state.detector
 
     # 4. Concurrency-guarded execution via process-wide single-worker executor

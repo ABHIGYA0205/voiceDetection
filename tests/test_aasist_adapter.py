@@ -71,6 +71,7 @@ def test_label_direction_locked() -> None:
     dummy_model = MagicMock(spec=nn.Module)
     dummy_model.eval.return_value = dummy_model
     dummy_model.to.return_value = dummy_model
+    dummy_model.parameters.return_value = [torch.nn.Parameter(torch.zeros(1))]
 
     detector = AASISTLDetector(_instantiated_model=dummy_model)
 

@@ -235,7 +235,11 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
         await websocket.send_json(
             ServerErrorEvent(
-                error_code="DETECTOR_NOT_READY",
+                error_code=(
+                    "CONFIG_UNAVAILABLE"
+                    if exc.error_code == "CONFIG_UNAVAILABLE"
+                    else "DETECTOR_NOT_READY"
+                ),
                 message=exc.message,
             ).model_dump()
         )
@@ -303,9 +307,11 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
     idle_timeout = DEFAULT_IDLE_TIMEOUT_SECONDS
     max_frame_bytes = MAX_FRAME_BYTES_DEFAULT
     max_stream_duration = MAX_STREAM_DURATION_SECONDS_DEFAULT
+    accepted = False
 
     try:
         await websocket.accept()
+        accepted = True
         # 3. Protocol Handshake: Expect JSON start message
         try:
             handshake_raw = await asyncio.wait_for(
@@ -894,6 +900,31 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
         raise
     except Exception as exc:
         logger.exception("Unexpected error in streaming session %s: %s", session_id, exc)
+        if accepted:
+            try:
+                await websocket.send_json(
+                    ServerErrorEvent(
+                        error_code="INTERNAL_STREAM_ERROR",
+                        message="An unexpected internal streaming error occurred.",
+                    ).model_dump()
+                )
+            except Exception as send_exc:
+                logger.warning(
+                    "Unable to send terminal error for session %s: %s",
+                    session_id,
+                    send_exc,
+                )
+            try:
+                await websocket.close(
+                    code=status.WS_1011_INTERNAL_ERROR,
+                    reason="Unexpected streaming error.",
+                )
+            except Exception as close_exc:
+                logger.warning(
+                    "Unable to close errored session %s: %s",
+                    session_id,
+                    close_exc,
+                )
     finally:
         is_closing = True
         try:

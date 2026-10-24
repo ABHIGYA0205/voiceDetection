@@ -570,6 +570,7 @@ def test_streaming_websocket_abstained_window_nested_decision_score_is_null() ->
 def test_aasist_label_direction_invariant() -> None:
     """Requirement 10: Preserves AASIST label invariant: index 0 = spoof, index 1 = bona fide."""
     dummy_model = MagicMock()
+    dummy_model.parameters.return_value = [torch.nn.Parameter(torch.zeros(1))]
     detector = AASISTLDetector(_instantiated_model=dummy_model, preferred_device="cpu")
 
     # Case A: High spoof logit (index 0 = 5.0, index 1 = -2.0)

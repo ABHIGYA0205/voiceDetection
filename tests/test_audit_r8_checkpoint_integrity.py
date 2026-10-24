@@ -38,6 +38,7 @@ from voiceshield.models import (
     AASISTLDetector,
     CheckpointIntegrityError,
     CheckpointNotFoundError,
+    ModelProvenance,
     ModelRegistryEntry,
     UnsupportedModelIdentityError,
     get_official_registry_entry,
@@ -372,6 +373,86 @@ def test_section_d_mock_mode_provenance() -> None:
     assert out.model_id == "mock/aasist-l"
     assert out.metadata["model_provenance"]["is_mock"] is True
     assert out.metadata["model_provenance"]["provenance_status"] == "mock"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("parameter_count", "85306"),
+        ("checkpoint_verified", 0),
+        ("checkpoint_verified", 1),
+        ("is_mock", 0),
+        ("is_mock", 1),
+        ("checkpoint_size_bytes", "426428"),
+        ("checkpoint_sha256", 123),
+        ("upstream_repository", 123),
+    ],
+)
+def test_section_d_mock_provenance_rejects_coercible_field_types(field: str, value: Any) -> None:
+    """D: Strict provenance fields reject string counts, integer booleans, and wrong types."""
+    kwargs: dict[str, Any] = {
+        "model_id": "mock/aasist-l",
+        "architecture": "aasist_l",
+        "provenance_status": "mock",
+        "checkpoint_verified": False,
+        "is_mock": True,
+        "parameter_count": 1,
+    }
+    kwargs[field] = value
+    with pytest.raises(ValueError):
+        ModelProvenance(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("model_id", "status", "is_mock", "checkpoint_verified"),
+    [
+        ("mock/aasist-l", "mock", True, False),
+        ("clovaai/aasist-l", "mock", True, False),
+        ("mock/aasist-l", "custom_unverified", False, False),
+        ("mock/aasist-l", "mock", False, False),
+        ("mock/aasist-l", "mock", True, True),
+    ],
+)
+def test_section_d_mock_provenance_truth_table(
+    model_id: str, status: str, is_mock: bool, checkpoint_verified: bool
+) -> None:
+    """D: Mock identity, status, and strict boolean fields form an exact truth table."""
+    kwargs: dict[str, Any] = {
+        "model_id": model_id,
+        "architecture": "aasist_l",
+        "provenance_status": status,
+        "checkpoint_verified": checkpoint_verified,
+        "is_mock": is_mock,
+        "parameter_count": 1,
+    }
+    if (model_id, status, is_mock, checkpoint_verified) == (
+        "mock/aasist-l",
+        "mock",
+        True,
+        False,
+    ):
+        provenance = ModelProvenance(**kwargs)
+        assert provenance.model_id == "mock/aasist-l"
+        assert provenance.provenance_status == "mock"
+        assert provenance.checkpoint_verified is False
+        assert provenance.is_mock is True
+        assert provenance.checkpoint_sha256 is None
+        assert provenance.expected_checkpoint_sha256 is None
+        assert provenance.checkpoint_size_bytes is None
+        assert provenance.upstream_repository is None
+        assert provenance.upstream_commit is None
+        assert provenance.source_license_spdx is None
+        assert provenance.checkpoint_rights_note is None
+    else:
+        with pytest.raises(ValueError):
+            ModelProvenance(**kwargs)
+
+
+def test_section_d_injected_zero_parameter_model_is_rejected_not_85306() -> None:
+    """D: An arbitrary zero-parameter injected model cannot receive the canonical count."""
+    zero_parameter_model = torch.nn.Module()
+    with pytest.raises(ValueError, match="parameter count must be positive"):
+        AASISTLDetector(_instantiated_model=zero_parameter_model)
 
 
 # ==============================================================================

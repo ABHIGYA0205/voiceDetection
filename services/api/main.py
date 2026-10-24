@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from services.api.inference_worker import InferenceWorker
@@ -30,7 +30,6 @@ from services.api.routes.stream import router as stream_router
 from voiceshield import __version__
 from voiceshield.config.loader import load_config
 from voiceshield.config.overrides import apply_config_overrides
-from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.core.device import resolve_device_status
 from voiceshield.core.schema import Disclaimers
 from voiceshield.models import (
@@ -290,18 +289,22 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
         )
 
         model_provenance = None
-        if detector is not None:
-            try:
-                validated_prov = validate_runtime_model_provenance(application.state)
-                model_provenance = validated_prov.model_dump()
-            except ModelIntegrityError:
-                model_provenance = None
+        model_loaded = False
+        try:
+            validated_prov = validate_runtime_model_provenance(application.state)
+            model_provenance = validated_prov.model_dump()
+            model_loaded = True
+        except ModelIntegrityError:
+            model_provenance = None
+            model_loaded = False
 
         return {
             "status": "ok",
             "service": "VoiceShield",
             "version": __version__,
-            "model_loaded": detector is not None,
+            "model_loaded": model_loaded,
+            "model_ready": model_loaded,
+            "model_integrity_valid": model_loaded,
             "is_mock_detector": getattr(application.state, "is_mock_detector", False),
             "config_hash": getattr(application.state, "effective_config_hash", None),
             "model_provenance": model_provenance,
@@ -319,41 +322,10 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     @application.get("/ready", tags=["System"])
     async def readiness_check(request: Request) -> dict[str, Any]:
         """Return model readiness status distinguishing API liveness from detector readiness."""
-        stored_hash = getattr(request.app.state, "effective_config_hash", None)
-        effective_cfg = getattr(request.app.state, "effective_config", None)
-
-        config_ok = False
-        if (
-            effective_cfg is not None
-            and isinstance(effective_cfg, VoiceShieldConfig)
-            and isinstance(stored_hash, str)
-            and len(stored_hash) > 0
-        ):
-            try:
-                recomputed_hash = effective_cfg.compute_hash()
-                if recomputed_hash == stored_hash:
-                    config_ok = True
-            except Exception:
-                config_ok = False
-
-        if not config_ok:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "status": "not_ready",
-                    "service": "VoiceShield",
-                    "reason": "Effective configuration unavailable or integrity check failed.",
-                    "is_mock_detector": getattr(request.app.state, "is_mock_detector", False),
-                    "config_hash": stored_hash
-                    if isinstance(stored_hash, str) and stored_hash
-                    else None,
-                },
-            )
-
-        # Validate detector and provenance fail-closed
         prov = ensure_model_ready_for_http(request.app.state)
         detector = request.app.state.detector
         actual_device = detector.device.type if hasattr(detector, "device") else "cpu"
+        stored_hash = getattr(request.app.state, "effective_config_hash", None)
 
         return {
             "status": "ready",
@@ -367,7 +339,6 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
             "provenance_status": prov.provenance_status,
             "checkpoint_verified": prov.checkpoint_verified,
             "checkpoint_sha256": prov.checkpoint_sha256,
-            "expected_checkpoint_sha256": prov.expected_checkpoint_sha256,
             "upstream_commit": prov.upstream_commit,
             "parameter_count": prov.parameter_count,
             "model_provenance": prov.model_dump(),

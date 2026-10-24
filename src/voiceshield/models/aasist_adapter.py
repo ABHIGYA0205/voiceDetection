@@ -128,7 +128,7 @@ class AASISTLDetector(BaseDetector):
         preferred_device: str | None = None,
         fallback_to_cpu: bool = True,
         threshold: float = DEFAULT_THRESHOLD,
-        _instantiated_model: UpstreamAASISTModel | None = None,
+        _instantiated_model: torch.nn.Module | None = None,
     ) -> None:
         """Initialize AASIST-L detector.
 
@@ -168,9 +168,16 @@ class AASISTLDetector(BaseDetector):
             self.model = _instantiated_model
             try:
                 raw_count = sum(p.numel() for p in self.model.parameters())
-            except Exception:
-                raw_count = 0
-            param_count = int(raw_count) if raw_count > 0 else 85306
+            except Exception as exc:
+                raise ValueError(
+                    f"Failed to enumerate parameters on injected model: {exc}"
+                ) from exc
+            if raw_count <= 0:
+                raise ValueError(
+                    f"Injected model parameter count must be positive, got {raw_count}. "
+                    "Cannot instantiate mock provenance with zero parameters."
+                )
+            param_count = int(raw_count)
             self.provenance = ModelProvenance(
                 model_id="mock/aasist-l",
                 architecture="aasist_l",

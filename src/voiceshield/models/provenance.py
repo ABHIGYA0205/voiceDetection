@@ -30,7 +30,7 @@ def _is_valid_sha256(val: str | None) -> bool:
 class ModelProvenance(BaseModel):
     """Immutable runtime model identity and integrity provenance specification."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     model_id: ModelId = Field(
         description="Model identifier ('clovaai/aasist-l', 'custom/aasist-l', or 'mock/aasist-l')."
@@ -122,6 +122,14 @@ class ModelProvenance(BaseModel):
                 raise ValueError(
                     f"official_verified checkpoint_size_bytes must equal {OFFICIAL_AASIST_L.checkpoint_size_bytes}, got {self.checkpoint_size_bytes}"
                 )
+            if self.source_license_spdx != OFFICIAL_AASIST_L.source_license_spdx:
+                raise ValueError(
+                    f"official_verified source_license_spdx must equal {OFFICIAL_AASIST_L.source_license_spdx!r}, got {self.source_license_spdx!r}"
+                )
+            if self.checkpoint_rights_note != OFFICIAL_AASIST_L.checkpoint_rights_note:
+                raise ValueError(
+                    "official_verified checkpoint_rights_note must equal official registry note"
+                )
 
         elif self.provenance_status == "custom_unverified":
             if self.model_id != "custom/aasist-l":
@@ -147,6 +155,12 @@ class ModelProvenance(BaseModel):
             if self.upstream_repository is not None or self.upstream_commit is not None:
                 raise ValueError(
                     "custom_unverified provenance must not attach official upstream repository or commit"
+                )
+            if self.source_license_spdx is not None:
+                raise ValueError("custom_unverified provenance must have source_license_spdx=None")
+            if self.checkpoint_rights_note is not None:
+                raise ValueError(
+                    "custom_unverified provenance must have checkpoint_rights_note=None"
                 )
             if self.parameter_count <= 0:
                 raise ValueError(
@@ -176,6 +190,10 @@ class ModelProvenance(BaseModel):
                 raise ValueError(
                     "mock provenance must not attach upstream repository or commit fields"
                 )
+            if self.source_license_spdx is not None:
+                raise ValueError("mock provenance must have source_license_spdx=None")
+            if self.checkpoint_rights_note is not None:
+                raise ValueError("mock provenance must have checkpoint_rights_note=None")
             if self.parameter_count <= 0:
                 raise ValueError(
                     f"mock parameter_count must be positive, got {self.parameter_count}"

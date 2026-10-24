@@ -29,7 +29,7 @@ Any README, slide deck, or demonstration containing any of the following stateme
 The following claims are **verified by code, unit tests, and saved report artefacts** and may be cited:
 
 1. **Lightweight Edge Architecture**:
-   - AASIST-L has **85,386 parameters (~341 KB FP32)**, making it small enough to run locally on consumer hardware without cloud GPU clusters.
+   - AASIST-L has **85,306 parameters (~341 KB FP32)**, making it small enough to run locally on consumer hardware without cloud GPU clusters.
 2. **Apple Silicon M3 Hardware Acceleration**:
    - Hardware: Apple MacBook Pro M3 (`Mac15,3`, 8 cores), PyTorch 2.14.1 with MPS.
    - Steady-state model inference latency: **p50 = 30.4 ms, p95 = 31.3 ms** (RTF = 0.0076, Throughput = 32.8 windows/sec).

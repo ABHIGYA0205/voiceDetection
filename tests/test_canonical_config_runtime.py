@@ -462,6 +462,7 @@ def test_detector_fallback_to_cpu_false_does_not_silently_fallback_on_inference(
     mock_model = MagicMock()
     mock_model.eval = MagicMock()
     mock_model.to = MagicMock()
+    mock_model.parameters.return_value = [torch.nn.Parameter(torch.zeros(1))]
     # Simulate a device error during forward pass
     mock_model.side_effect = RuntimeError("Hardware execution error")
 
