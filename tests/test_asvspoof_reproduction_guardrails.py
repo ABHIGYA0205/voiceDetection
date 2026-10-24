@@ -187,9 +187,7 @@ def test_report_template_and_script_are_fail_closed() -> None:
 
 
 def test_active_reproduction_docs_match_fail_closed_runner() -> None:
-    evaluation_card = Path("model_cards/aasist_l_evaluation_card.md").read_text(
-        encoding="utf-8"
-    )
+    evaluation_card = Path("model_cards/aasist_l_evaluation_card.md").read_text(encoding="utf-8")
     reproduction_doc = Path("docs/aasist_reproduction.md").read_text(encoding="utf-8")
     implementation_plan = Path("docs/implementation_plan.md").read_text(encoding="utf-8")
 
