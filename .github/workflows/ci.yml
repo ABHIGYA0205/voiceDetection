@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: 0.13.5
+          python-version: "3.11"
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install frozen dependencies
+        run: |
+          set -euo pipefail
+          uv sync --frozen --all-groups
+          cd apps/web
+          npm ci
+      - name: Python quality and tests
+        run: |
+          set -euo pipefail
+          uv run --frozen ruff check src services tests
+          uv run --frozen ruff format --check src services tests
+          uv run --frozen mypy src services tests
+          uv run --frozen pytest tests --cov=voiceshield --cov=services/api --cov-report=term-missing --cov-fail-under=88 -ra
+      - name: Frontend quality and browser tests
+        run: |
+          set -euo pipefail
+          cd apps/web
+          npm audit --audit-level=low
+          npm run build
+          npm test -- --run
+          npx playwright install chromium --with-deps
+          npm run test:e2e
+          npm run test:e2e:live
+      - name: Package and license checks
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          uv build
+          uv run --frozen python scripts/check_package_metadata.py
+          uv run --frozen python scripts/check_licenses.py
+          uv export --frozen --all-extras --all-groups --no-emit-project --output-file "$RUNNER_TEMP/voiceshield-requirements.txt"
+          uv run --frozen pip-audit --disable-pip --require-hashes --requirement "$RUNNER_TEMP/voiceshield-requirements.txt"

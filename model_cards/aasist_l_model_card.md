@@ -4,7 +4,7 @@
 **Base Architecture**: AASIST-L (Lightweight Audio Anti-Spoofing using Integrated Spectro-Temporal Graph Attention Networks)  
 **Upstream Provenance**: Clova AI Research / NAVER Corp & University of Seoul (Jung et al., ICASSP 2022)  
 **Upstream Repository**: [`https://github.com/clovaai/aasist`](https://github.com/clovaai/aasist) (Pinned commit: `a04c9863f63d44471dde8a6abcb3b082b07cd1d1`)  
-**Licence**: MIT License (Upstream Clova AI) / Apache-2.0 / MIT (VoiceShield integration boundary)  
+**License boundary**: Original VoiceShield code is Apache-2.0; vendored upstream AASIST source is MIT; the AASIST-L checkpoint and referenced datasets are governed by separate terms.
 **Model Type**: Binary Acoustic Anti-Spoofing / Synthetic Speech Detector  
 **Card Version**: `1.0.0` (Truthful Baseline)  
 **Date**: October 2026  

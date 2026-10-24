@@ -13,7 +13,7 @@ VoiceShield is an acoustic machine learning system designed to detect synthetic,
 - **Package Manager**: `uv` (recommended for deterministic Python dependency management).
 - **Python**: Python 3.11 (`brew install python@3.11`).
 - **Native Tools**: `ffmpeg`, `libsndfile` (`brew install ffmpeg libsndfile`).
-- **Node.js**: Node 20+ with `npm` (for the `apps/web` React dashboard).
+- **Node.js**: Node 22.12+ with `npm` (for the `apps/web` React dashboard; `.nvmrc` selects Node 22).
 
 ---
 
@@ -32,7 +32,8 @@ Alternatively using `uv` directly:
 ```bash
 uv venv --python /opt/homebrew/bin/python3.11 .venv
 source .venv/bin/activate
-uv sync --all-groups
+uv sync --frozen --all-groups
+cd apps/web && npm ci
 ```
 
 ### 2.2 Environment Configuration
@@ -58,6 +59,21 @@ make test-python
 # Run full checks (lint + typecheck + python tests + frontend build)
 make check-all
 ```
+
+The complete non-mutating local gate is `make check-all`. It runs frozen Python
+sync checks, Ruff lint/format checks, strict MyPy, the full Python coverage gate,
+`npm ci`, the production build, Vitest, both mocked and live Playwright suites,
+dependency vulnerability audits, resolved Python/npm license checks, and package
+metadata checks.
+
+### 3.1 License and supply-chain boundaries
+
+Original VoiceShield code is Apache-2.0. Vendored AASIST source is MIT and
+retains its upstream notices. The AASIST-L checkpoint and referenced datasets
+are separate terms; Apache-2.0 does not grant checkpoint redistribution rights.
+Python and npm dependencies retain their own licenses. CI validates these
+boundaries and does not claim legal clearance, detector accuracy, scientific
+validity, production security, or Safari compatibility.
 
 ---
 
@@ -238,6 +254,5 @@ Key capabilities and scientific guardrails:
 - **Cross-Condition Evaluation**: Matched, unseen-generator, unseen-channel, and external-test generalization tables.
 - **Latency Profiling**: Median (p50), 95th percentile (p95), mean latency, and Real-Time Factor (RTF).
 - **Publication-Quality Artifacts**: Auto-generates Markdown summary tables, machine-readable `metrics.csv`, and figures (`roc_curve.png`, `score_distributions.png`).
-
 
 

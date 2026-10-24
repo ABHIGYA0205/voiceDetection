@@ -1,4 +1,4 @@
-.PHONY: help setup install lint format typecheck test test-python test-web api api-mock web benchmark benchmark-quick check-all clean
+.PHONY: help setup lint format-check format typecheck test test-python test-web api api-mock web benchmark benchmark-quick check-all audit-license audit-python audit-npm package-check clean
 
 UV ?= $(shell which uv 2>/dev/null || echo "$$HOME/.local/bin/uv")
 PYTHON ?= $(shell command -v python3.11 2>/dev/null || echo "/opt/homebrew/bin/python3.11")
@@ -7,7 +7,8 @@ help:
 	@echo "VoiceShield Monorepo Commands:"
 	@echo "  make setup       - Create .venv and install all dependencies (python + web)"
 	@echo "  make lint        - Run ruff linter on Python codebase"
-	@echo "  make format      - Run ruff code formatter"
+	@echo "  make format      - Format Python source (mutating)"
+	@echo "  make format-check - Check Python formatting (non-mutating)"
 	@echo "  make typecheck   - Run mypy type checker on Python codebase"
 	@echo "  make test        - Run Python and Web test suites"
 	@echo "  make test-python - Run pytest suite"
@@ -17,15 +18,15 @@ help:
 	@echo "  make web         - Start React Vite frontend dev server"
 	@echo "  make benchmark   - Run full M3 benchmark suite including 10-minute soak test"
 	@echo "  make benchmark-quick - Run quick M3 benchmark suite (10s soak test)"
-	@echo "  make check-all   - Run lint, format check, typecheck, and all tests"
+	@echo "  make check-all   - Run the complete local quality and supply-chain gate"
 	@echo "  make clean       - Remove caches, build artifacts, and test reports"
 
 setup:
 	$(UV) venv --python $(PYTHON) .venv
-	$(UV) sync --all-groups
+	$(UV) sync --frozen --all-groups
 	@if [ -d "apps/web" ] && [ -f "apps/web/package.json" ]; then \
 		echo "Installing web app dependencies..."; \
-		cd apps/web && npm install; \
+		cd apps/web && npm ci; \
 	fi
 
 lint:
@@ -33,6 +34,9 @@ lint:
 
 format:
 	$(UV) run ruff format src services tests
+
+format-check:
+	$(UV) run --frozen ruff format --check src services tests
 
 typecheck:
 	$(UV) run mypy src services tests
@@ -62,10 +66,23 @@ benchmark:
 benchmark-quick:
 	$(UV) run python -m voiceshield.benchmark.cli --soak-duration 10 --iterations 20 --warmup 3
 
-check-all: lint typecheck test-python
-	@if [ -d "apps/web" ] && [ -f "apps/web/package.json" ]; then \
-		cd apps/web && npm run build; \
-	fi
+audit-python:
+	$(UV) export --frozen --all-extras --all-groups --no-emit-project --output-file "$${TMPDIR:-/tmp}/voiceshield-requirements.txt"
+	$(UV) run --frozen pip-audit --disable-pip --require-hashes --requirement "$${TMPDIR:-/tmp}/voiceshield-requirements.txt"
+
+audit-npm:
+	cd apps/web && npm audit --audit-level=low
+
+audit-license:
+	$(UV) run --frozen python scripts/check_licenses.py
+
+package-check:
+	rm -rf dist
+	$(UV) build
+	$(UV) run --frozen python scripts/check_package_metadata.py
+
+check-all: setup lint format-check typecheck test-python audit-python audit-npm audit-license package-check test-web
+	cd apps/web && npm run build && npm test -- --run && npx playwright install chromium --with-deps && npm run test:e2e && npm run test:e2e:live
 	@echo "All checks passed successfully."
 
 clean:

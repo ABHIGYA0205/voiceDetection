@@ -3,6 +3,13 @@ name = "voiceshield"
 version = "0.1.0"
 description = "Real-time synthetic speech detection and advisory pipeline"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = [
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "src/voiceshield/vendor/aasist/LICENSE",
+    "src/voiceshield/vendor/aasist/NOTICE",
+]
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "numpy>=1.26.0,<2.3.0",
@@ -24,6 +31,7 @@ dev = [
     "pre-commit>=3.6.0",
     "httpx>=0.27.0",
     "types-PyYAML>=6.0.12",
+    "pip-audit>=2.10.1,<3",
 ]
 training = [
     "scikit-learn>=1.4.0",
@@ -46,6 +54,8 @@ dev = [
     "pre-commit>=3.6.0",
     "httpx>=0.27.0",
     "types-PyYAML>=6.0.12",
+    "pip-audit>=2.10.1,<3",
+    "pip-audit>=2.10.1,<3",
 ]
 training = [
     "scikit-learn>=1.4.0",
@@ -119,6 +129,7 @@ module = [
     "sklearn.*",
     "matplotlib.*",
     "torchaudio.*",
+    "license_expression",
 ]
 ignore_missing_imports = true
 
