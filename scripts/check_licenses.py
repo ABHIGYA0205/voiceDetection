@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from importlib import metadata
@@ -33,7 +34,50 @@ ALLOWED = {
     "Unlicense",
     "CC-BY-4.0",
 }
-EXCEPTIONS: dict[str, tuple[str, str]] = {}
+# Full-text metadata is accepted only for these exact package/version/fingerprint
+# triples. The fingerprint prevents a later license-text change from being accepted.
+LEGACY_TEXT_EXCEPTIONS: dict[tuple[str, str, str], str] = {
+    (
+        "contourpy",
+        "1.3.3",
+        "b4099bb6133b28b1daecac01c5151b4f5d8d7d894d0885c565c750a683b60f1b",
+    ): "BSD-3-Clause",
+    (
+        "cycler",
+        "0.12.1",
+        "d242da8f1d13aeb786f303b6ce5001e961e95eadcfb58002254e208874c67ed0",
+    ): "BSD-3-Clause",
+    (
+        "kiwisolver",
+        "1.5.1",
+        "b120c7f02d5be4da749577ee9d408927463c774ef701be4093d95703860f6abc",
+    ): "BSD-3-Clause",
+    (
+        "matplotlib",
+        "3.11.2",
+        "fdc4dbfe6c39df1a8a2325363cb14cdf4d3b137fb7193fc61576d349bc50eda3",
+    ): "BSD-3-Clause",
+    (
+        "numpy",
+        "2.2.6",
+        "38a5f83e366fe46ff60fe676252e6b8d545b5ed4f90da1aa56fec77903a2402a",
+    ): "BSD-3-Clause",
+    (
+        "pip_api",
+        "0.0.35",
+        "0e7a64e3ff18df112dedf585be24ab5386bb6cb5c1b357882f239b1b55ef573e",
+    ): "Apache-2.0",
+    (
+        "python-discovery",
+        "1.6.4",
+        "fe2a9817987f862eaced948f0468c7f51d2fedfc48c5c505b246a49a3870e9a5",
+    ): "MIT",
+    (
+        "scipy",
+        "1.17.1",
+        "719257d46efd862de6569b7aba3ae59c39d20fefcc89a933646c65d686985334",
+    ): "BSD-3-Clause",
+}
 licensing = get_spdx_licensing()
 
 
@@ -57,24 +101,13 @@ def python_license(dist: metadata.Distribution) -> str:
     raw_values = dist.metadata.get_all("License") or []
     raw = raw_values[0].strip() if raw_values else ""
     if raw and raw.lower() not in {"unknown", "see license in"}:
-        normalized = raw.lower()
         if raw in ALLOWED:
             return raw
-        if (
-            "bsd 3-clause" in normalized
-            or "redistribution and use in source and binary forms" in normalized
-        ):
-            return "BSD-3-Clause"
-        if "bsd 2-clause" in normalized:
-            return "BSD-2-Clause"
-        if "mit license" in normalized or "permission is hereby granted" in normalized:
-            return "MIT"
-        if "apache license" in normalized:
-            return "Apache-2.0"
-        if "mozilla public license" in normalized:
-            return "MPL-2.0"
-        if "isc license" in normalized:
-            return "ISC"
+        normalized = " ".join(raw.split())
+        fingerprint = hashlib.sha256(normalized.encode()).hexdigest()
+        exception = LEGACY_TEXT_EXCEPTIONS.get((dist.metadata["Name"], dist.version, fingerprint))
+        if exception is not None:
+            return exception
     for classifier in dist.metadata.get_all("Classifier") or []:
         prefix = "License :: OSI Approved :: "
         if classifier.startswith(prefix):
@@ -87,7 +120,7 @@ def python_license(dist: metadata.Distribution) -> str:
             }
             if classifier.removeprefix(prefix) in mapping:
                 return mapping[classifier.removeprefix(prefix)]
-    raise ValueError(f"{dist.metadata['Name']}: missing Python license metadata")
+    raise ValueError(f"{dist.metadata['Name']}: missing or unreviewed Python license metadata")
 
 
 def check_python() -> int:

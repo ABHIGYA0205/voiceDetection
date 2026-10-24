@@ -1971,6 +1971,7 @@ api = [
 ]
 dev = [
     { name = "httpx" },
+    { name = "license-expression" },
     { name = "mypy" },
     { name = "pip-audit" },
     { name = "pre-commit" },
@@ -1994,6 +1995,7 @@ api = [
 ]
 dev = [
     { name = "httpx" },
+    { name = "license-expression" },
     { name = "mypy" },
     { name = "pip-audit" },
     { name = "pre-commit" },
@@ -2013,6 +2015,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'api'", specifier = ">=0.110.0" },
     { name = "httpx", marker = "extra == 'api'", specifier = ">=0.27.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27.0" },
+    { name = "license-expression", marker = "extra == 'dev'", specifier = ">=30.4.4,<31" },
     { name = "matplotlib", marker = "extra == 'training'", specifier = ">=3.8.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.9.0" },
     { name = "numpy", specifier = ">=1.26.0,<2.3.0" },
@@ -2044,6 +2047,7 @@ api = [
 ]
 dev = [
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "license-expression", specifier = ">=30.4.4,<31" },
     { name = "mypy", specifier = ">=1.9.0" },
     { name = "pip-audit", specifier = ">=2.10.1,<3" },
     { name = "pre-commit", specifier = ">=3.6.0" },

@@ -22,7 +22,9 @@ help:
 	@echo "  make clean       - Remove caches, build artifacts, and test reports"
 
 setup:
-	$(UV) venv --python $(PYTHON) .venv
+	@if [ ! -d ".venv" ]; then \
+		$(UV) venv --python $(PYTHON) .venv; \
+	fi
 	$(UV) sync --frozen --all-groups
 	@if [ -d "apps/web" ] && [ -f "apps/web/package.json" ]; then \
 		echo "Installing web app dependencies..."; \
@@ -30,7 +32,7 @@ setup:
 	fi
 
 lint:
-	$(UV) run ruff check src services tests
+	$(UV) run --frozen ruff check src services tests
 
 format:
 	$(UV) run ruff format src services tests
@@ -39,10 +41,15 @@ format-check:
 	$(UV) run --frozen ruff format --check src services tests
 
 typecheck:
-	$(UV) run mypy src services tests
+	$(UV) run --frozen mypy src services tests
 
 test-python:
-	$(UV) run pytest tests
+	$(UV) run --frozen pytest tests \
+		--cov=voiceshield \
+		--cov=services/api \
+		--cov-report=term-missing \
+		--cov-fail-under=88 \
+		-ra
 
 test-web:
 	@if [ -d "apps/web" ] && [ -f "apps/web/package.json" ]; then \
@@ -81,7 +88,7 @@ package-check:
 	$(UV) build
 	$(UV) run --frozen python scripts/check_package_metadata.py
 
-check-all: setup lint format-check typecheck test-python audit-python audit-npm audit-license package-check test-web
+check-all: setup lint format-check typecheck test-python audit-python audit-npm audit-license package-check
 	cd apps/web && npm run build && npm test -- --run && npx playwright install chromium --with-deps && npm run test:e2e && npm run test:e2e:live
 	@echo "All checks passed successfully."
 

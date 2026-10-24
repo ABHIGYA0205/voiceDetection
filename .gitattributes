@@ -4,3 +4,6 @@
 *.onnx filter=lfs diff=lfs merge=lfs -text
 *.safetensors filter=lfs diff=lfs merge=lfs -text
 *.bin filter=lfs diff=lfs merge=lfs -text
+
+# Preserve the verbatim upstream AASIST notice, including its intentional trailing space.
+src/voiceshield/vendor/aasist/NOTICE whitespace=-blank-at-eol
