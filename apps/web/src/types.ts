@@ -164,6 +164,9 @@ export interface FileInferenceResult {
   original_channels: number;
   total_windows: number;
   eligible_windows?: number;
+  raw_high_window_count?: number;
+  uncertain_window_count?: number;
+  high_window_count?: number;
   mean_synthetic_score: number | null;
   max_synthetic_score: number | null;
   mean_synthetic_likelihood?: number | null;
@@ -172,6 +175,7 @@ export interface FileInferenceResult {
   effective_threshold: number;
   operating_threshold_source: string;
   is_synthetic_suspected: boolean;
+  final_decision_state?: DetectionStatus;
   temporal_rule_explanation: string;
   is_mock_detector: boolean;
   config_hash?: string;

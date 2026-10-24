@@ -44,7 +44,8 @@ from voiceshield.models.aasist_adapter import (
 from voiceshield.models.base import BaseDetector, DetectorOutput
 from voiceshield.models.provenance import ModelProvenance
 from voiceshield.pipeline.cli import main as cli_main
-from voiceshield.pipeline.file_evaluator import evaluate_audio
+from voiceshield.pipeline.cli import save_cli_results
+from voiceshield.pipeline.file_evaluator import FileInferenceResult, evaluate_audio
 from voiceshield.vendor.aasist import AASISTModel
 
 
@@ -72,6 +73,46 @@ def create_synthetic_flac(
     samples = 0.4 * np.sin(2 * np.pi * 300.0 * t)
     sf.write(str(file_path), samples, sample_rate, format="FLAC")
     return file_path
+
+
+class SequenceDetector(BaseDetector):
+    """Fast detector double that emits a deterministic score trajectory."""
+
+    is_mock = True
+
+    def __init__(self, scores: list[float]) -> None:
+        self.scores = scores
+        self.index = 0
+
+    def predict(self, audio: Any) -> DetectorOutput:
+        score = self.scores[min(self.index, len(self.scores) - 1)]
+        self.index += 1
+        return DetectorOutput.from_scores(
+            raw_logits=(score, 1.0 - score),
+            bonafide_score=1.0 - score,
+            synthetic_score=score,
+            is_synthetic_suspected=score >= 0.65,
+            input_samples=len(audio),
+            device_used="cpu",
+            model_id="sequence-detector",
+        )
+
+    def predict_batch(self, batch: Any) -> list[DetectorOutput]:
+        return [self.predict(audio) for audio in batch]
+
+
+def evaluate_score_trajectory(tmp_path: Path, scores: list[float]) -> FileInferenceResult:
+    wav_path = create_synthetic_wav(
+        tmp_path / f"trajectory-{len(scores)}.wav",
+        duration_s=len(scores) + 3.0,
+    )
+    return evaluate_audio(
+        wav_path,
+        detector=SequenceDetector(scores),
+        hop_seconds=1.0,
+        window_seconds=4.0,
+        min_speech_seconds=2.0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +246,133 @@ def test_cli_deterministic_window_aggregation(tmp_path: Path) -> None:
         assert w.score_is_calibrated is False
         assert w.quality_status.peak_level is not None
         assert w.active_speech_seconds >= 0.0
+
+
+def test_offline_aggregation_preserves_mixed_evidence(tmp_path: Path) -> None:
+    """A strong raw crossing and later ambiguous evidence must remain UNCERTAIN."""
+    scores = [
+        0.704,
+        0.049,
+        0.012,
+        0.000,
+        0.021,
+        0.097,
+        0.039,
+        0.005,
+        0.051,
+        0.037,
+        0.071,
+        0.012,
+        0.846,
+        0.970,
+        0.458,
+        0.994,
+        0.006,
+        0.008,
+        0.148,
+        0.039,
+    ]
+    result = evaluate_score_trajectory(tmp_path, scores)
+
+    assert result.final_decision_state == "uncertain"
+    assert result.is_synthetic_suspected is False
+    assert result.raw_high_window_count == 4
+    assert result.uncertain_window_count > 0
+    assert result.high_window_count == 0
+    assert "mean raw score" in result.temporal_rule_explanation
+    assert "raw threshold crossing(s)" in result.temporal_rule_explanation
+    assert "Sustained elevation occurred: no" in result.temporal_rule_explanation
+
+
+@pytest.mark.parametrize(
+    ("scores", "expected_state", "expected_suspected"),
+    [
+        ([0.01, 0.04, 0.12, 0.2], "low", False),
+        ([0.9, 0.1, 0.1, 0.1], "uncertain", False),
+        ([0.9, 0.9, 0.9, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01], "high", True),
+    ],
+)
+def test_offline_aggregation_state_rules(
+    tmp_path: Path,
+    scores: list[float],
+    expected_state: str,
+    expected_suspected: bool,
+) -> None:
+    result = evaluate_score_trajectory(tmp_path, scores)
+
+    assert result.final_decision_state == expected_state
+    assert result.is_synthetic_suspected is expected_suspected
+    assert result.raw_high_window_count == sum(score >= 0.65 for score in scores)
+    assert result.raw_high_window_count >= 0
+    assert result.uncertain_window_count >= 0
+    assert result.high_window_count >= 0
+    if expected_state == "high":
+        assert result.windows[-1].decision_state == "low"
+        assert result.high_window_count > 0
+        assert result.final_decision_state == "high"
+        assert result.is_synthetic_suspected is True
+
+
+def test_offline_aggregation_no_eligible_windows_remains_insufficient(tmp_path: Path) -> None:
+    silent_wav = tmp_path / "silence.wav"
+    sf.write(silent_wav, np.zeros(4 * 16000, dtype=np.float32), 16000, format="WAV")
+    result = evaluate_audio(
+        silent_wav,
+        detector=SequenceDetector([0.9]),
+        hop_seconds=1.0,
+        window_seconds=4.0,
+        min_speech_seconds=2.0,
+    )
+
+    assert result.final_decision_state == "insufficient_evidence"
+    assert result.status == "insufficient_evidence"
+    assert result.raw_high_window_count == 0
+    assert result.uncertain_window_count == 0
+    assert result.high_window_count == 0
+
+
+def test_file_result_aggregation_counts_are_additive_with_safe_defaults() -> None:
+    result = FileInferenceResult(file_path="compatibility.wav")
+
+    assert result.raw_high_window_count == 0
+    assert result.uncertain_window_count == 0
+    assert result.high_window_count == 0
+    assert result.mean_synthetic_score is None
+
+
+def test_file_result_serialization_includes_aggregate_fields(tmp_path: Path) -> None:
+    result = evaluate_score_trajectory(tmp_path, [0.01, 0.04, 0.12, 0.2])
+    payload = result.model_dump()
+    json_output = result.model_dump_json()
+
+    assert payload["raw_high_window_count"] == 0
+    assert payload["uncertain_window_count"] == 0
+    assert payload["high_window_count"] == 0
+    assert payload["final_decision_state"] == "low"
+    for field in (
+        "raw_high_window_count",
+        "uncertain_window_count",
+        "high_window_count",
+        "final_decision_state",
+    ):
+        assert f'"{field}"' in json_output
+
+    csv_path = tmp_path / "results.csv"
+    save_cli_results([result], csv_path)
+    lines = csv_path.read_text(encoding="utf-8").splitlines()
+    headers = lines[0].split(",")
+    row = lines[1].split(",")
+    for field in (
+        "raw_high_window_count",
+        "uncertain_window_count",
+        "high_window_count",
+        "final_decision_state",
+    ):
+        assert field in headers
+    assert row[headers.index("raw_high_window_count")] == "0"
+    assert row[headers.index("uncertain_window_count")] == "0"
+    assert row[headers.index("high_window_count")] == "0"
+    assert row[headers.index("final_decision_state")] == "low"
 
 
 # ---------------------------------------------------------------------------

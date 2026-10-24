@@ -196,6 +196,21 @@ class FileInferenceResult(BaseModel):
     eligible_windows: int = Field(
         default=0, description="Number of windows with sufficient active speech."
     )
+    raw_high_window_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of eligible windows whose raw score reached the effective high threshold.",
+    )
+    uncertain_window_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of eligible windows in the UNCERTAIN temporal state.",
+    )
+    high_window_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of eligible windows in the sustained HIGH temporal state.",
+    )
     mean_synthetic_score: float | None = Field(
         default=None,
         ge=0.0,
@@ -234,11 +249,11 @@ class FileInferenceResult(BaseModel):
     )
     is_synthetic_suspected: bool = Field(
         default=False,
-        description="Overall file-level advisory classification derived from final temporal policy state.",
+        description="Conservative whole-file aggregate HIGH classification across all eligible windows.",
     )
     final_decision_state: str = Field(
         default="uncertain",
-        description="Final categorical advisory decision state from the shared temporal policy.",
+        description="Conservative whole-file aggregate advisory state across all eligible windows.",
     )
     temporal_rule_explanation: str = Field(
         default="",
@@ -650,30 +665,50 @@ def evaluate_audio(
     mean_score = float(np.mean(valid_scores)) if valid_scores else 0.0
     max_score = float(np.max(valid_scores)) if valid_scores else 0.0
 
-    # 8. File-level decision derived from final shared temporal-policy state
-    file_suspected = bool(policy.current_state == DecisionState.HIGH)
+    raw_high_window_count = sum(
+        1
+        for window in eligible_windows
+        if window.synthetic_score is not None and window.synthetic_score >= effective_threshold
+    )
+    uncertain_window_count = sum(
+        1 for window in eligible_windows if window.decision_state == DecisionState.UNCERTAIN.value
+    )
+    high_window_count = sum(
+        1 for window in eligible_windows if window.decision_state == DecisionState.HIGH.value
+    )
 
-    if file_suspected:
-        explanation = (
-            f"Advisory Warning: Sustained synthetic acoustic anomaly detected across temporal decision policy "
-            f"(Peak score: {max_score:.3f} >= threshold {effective_threshold:.3f}). "
-            "Pause and verify through a known independent channel. Do not automatically terminate or block calls."
+    if high_window_count > 0:
+        aggregate_state = DecisionState.HIGH
+    elif uncertain_window_count > 0 or raw_high_window_count > 0:
+        aggregate_state = DecisionState.UNCERTAIN
+    elif all(window.decision_state == DecisionState.LOW.value for window in eligible_windows):
+        aggregate_state = DecisionState.LOW
+    else:
+        aggregate_state = DecisionState.UNCERTAIN
+
+    file_suspected = aggregate_state == DecisionState.HIGH
+    explanation = (
+        f"Offline advisory aggregation: mean raw score {mean_score:.3f}, peak raw score "
+        f"{max_score:.3f}, effective threshold {effective_threshold:.3f}; "
+        f"{raw_high_window_count} raw threshold crossing(s), {uncertain_window_count} "
+        f"uncertain window(s), and {high_window_count} sustained HIGH window(s). "
+        f"Sustained elevation occurred: {'yes' if file_suspected else 'no'}. "
+    )
+    if aggregate_state == DecisionState.HIGH:
+        explanation += (
+            "Sustained synthetic acoustic anomaly detected across temporal decision policy. "
+            "Pause and verify through a known independent channel. Do not automatically "
+            "terminate or block calls."
         )
-    elif (
-        any(w.is_synthetic_suspected for w in eligible_windows)
-        or policy.current_state == DecisionState.UNCERTAIN
-    ):
-        explanation = (
-            f"Isolated or ambiguous synthetic acoustic anomaly detected, but anomaly was not sustained across "
-            f"temporal policy elevation criteria. "
-            f"Low anomaly overall across {num_eligible} evaluated window(s) (Mean score: {mean_score:.3f}, Peak score: {max_score:.3f} / threshold {effective_threshold:.3f}). "
-            "Advisory metric only; does NOT prove identity of caller."
+    elif aggregate_state == DecisionState.UNCERTAIN:
+        explanation += (
+            "Isolated or ambiguous synthetic acoustic anomaly detected; evidence is mixed "
+            "or not sustained. Advisory metric only and does NOT prove identity of caller."
         )
     else:
-        explanation = (
-            f"Low acoustic anomaly score — does not authenticate speech across {num_eligible} evaluated "
-            f"window(s) (Mean score: {mean_score:.3f}, Peak score: {max_score:.3f} / threshold {effective_threshold:.3f}). "
-            "Advisory metric only; does NOT prove identity of caller."
+        explanation += (
+            "All eligible windows remained LOW; advisory metric only and does NOT "
+            "authenticate speech."
         )
 
     return FileInferenceResult(
@@ -685,6 +720,9 @@ def evaluate_audio(
         original_channels=metadata.original_channels,
         total_windows=num_windows,
         eligible_windows=num_eligible,
+        raw_high_window_count=raw_high_window_count,
+        uncertain_window_count=uncertain_window_count,
+        high_window_count=high_window_count,
         mean_synthetic_score=round(mean_score, 4),
         max_synthetic_score=round(max_score, 4),
         mean_synthetic_likelihood=round(mean_score, 4),
@@ -693,7 +731,7 @@ def evaluate_audio(
         effective_threshold=effective_threshold,
         operating_threshold_source="unvalidated_heuristic",
         is_synthetic_suspected=file_suspected,
-        final_decision_state=policy.current_state.value,
+        final_decision_state=aggregate_state.value,
         temporal_rule_explanation=explanation,
         windows=windows,
         is_mock_detector=is_mock,

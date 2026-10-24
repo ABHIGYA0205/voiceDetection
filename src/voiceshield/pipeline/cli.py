@@ -102,7 +102,15 @@ def format_cli_summary_table(results: list[FileInferenceResult]) -> str:
         if len(fname) > 35:
             fname = fname[:32] + "..."
         if res.status == "success":
-            decision = "SUSPECTED" if res.is_synthetic_suspected else "LOW ANOMALY"
+            decision_state = res.final_decision_state
+            if decision_state not in {"high", "uncertain", "low"}:
+                decision_state = "high" if res.is_synthetic_suspected else "low"
+            if decision_state == "high":
+                decision = "SUSPECTED"
+            elif decision_state == "uncertain":
+                decision = "MIXED / UNCERTAIN"
+            else:
+                decision = "LOW ANOMALY"
             mean_str = (
                 f"{res.mean_synthetic_score:.3f}" if res.mean_synthetic_score is not None else "N/A"
             )
@@ -154,7 +162,11 @@ def save_cli_results(results: list[FileInferenceResult], output_path: Path) -> N
             "max_synthetic_score",
             "mean_synthetic_likelihood",
             "max_synthetic_likelihood",
+            "raw_high_window_count",
+            "uncertain_window_count",
+            "high_window_count",
             "is_synthetic_suspected",
+            "final_decision_state",
             "temporal_rule_explanation",
             "error_message",
         ]
@@ -185,7 +197,11 @@ def save_cli_results(results: list[FileInferenceResult], output_path: Path) -> N
                         "max_synthetic_likelihood": r.max_synthetic_likelihood
                         if r.max_synthetic_likelihood is not None
                         else "N/A",
+                        "raw_high_window_count": r.raw_high_window_count,
+                        "uncertain_window_count": r.uncertain_window_count,
+                        "high_window_count": r.high_window_count,
                         "is_synthetic_suspected": r.is_synthetic_suspected,
+                        "final_decision_state": r.final_decision_state,
                         "temporal_rule_explanation": r.temporal_rule_explanation,
                         "error_message": r.error_message or "",
                     }

@@ -911,7 +911,8 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
       effective_threshold: 0.65,
       operating_threshold_source: 'unvalidated_heuristic',
       is_synthetic_suspected: false,
-      status: 'uncertain',
+      final_decision_state: 'uncertain',
+      status: 'success',
       temporal_rule_explanation: 'Pre-confirmation temporal state.',
       is_mock_detector: false,
       windows: [{
@@ -957,6 +958,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
       fireEvent.click(screen.getByRole('button', { name: /Analyze Audio File/i }));
     });
     expect(document.querySelector('.window-table .timeline-badge')?.textContent).toBe('UNCERTAIN');
+    expect(screen.getByText(/\[~ MIXED \/ UNCERTAIN\]/i)).toBeDefined();
     expect(screen.queryByText('LOW ANOMALY')).toBeNull();
     expect(screen.getByText('0.613')).toBeDefined();
     expect(screen.getByText(/Awaiting consecutive elevated windows/)).toBeDefined();

@@ -41,6 +41,13 @@ export function fileWindowState(win: FileInferenceResult['windows'][number]): {
   }
 }
 
+export function resolveFileDecisionState(result: FileInferenceResult): DetectionStatus {
+  if (result.final_decision_state !== undefined) {
+    return result.final_decision_state;
+  }
+  return result.is_synthetic_suspected ? 'high' : 'low';
+}
+
 export function App(): React.JSX.Element {
   // Navigation tab
   const [activeTab, setActiveTab] = useState<'stream' | 'file'>('stream');
@@ -515,6 +522,8 @@ export function App(): React.JSX.Element {
 
   const isRecording = recordingState === 'recording' || recordingState === 'stopping';
 
+  const fileDecisionState = fileResult ? resolveFileDecisionState(fileResult) : null;
+
   return (
     <div className="app-container">
       {/* Header */}
@@ -953,14 +962,18 @@ export function App(): React.JSX.Element {
                       color:
                         fileResult.status === 'insufficient_evidence'
                           ? 'var(--accent-amber)'
-                          : fileResult.is_synthetic_suspected
+                          : fileDecisionState === 'uncertain'
+                          ? 'var(--accent-amber)'
+                          : fileDecisionState === 'high'
                           ? 'var(--accent-red)'
                           : 'var(--accent-emerald)',
                     }}
                   >
                     {fileResult.status === 'insufficient_evidence'
                       ? '[... INSUFFICIENT SPEECH]'
-                      : fileResult.is_synthetic_suspected
+                      : fileDecisionState === 'uncertain'
+                      ? '[~ MIXED / UNCERTAIN]'
+                      : fileDecisionState === 'high'
                       ? '[! HIGH ANOMALY]'
                       : '[✓ LOW ANOMALY]'}
                   </div>
@@ -1009,7 +1022,7 @@ export function App(): React.JSX.Element {
               </div>
 
               {/* Action Directive on High Anomaly File */}
-              {fileResult.is_synthetic_suspected && (
+              {fileDecisionState === 'high' && (
                 <section
                   className="action-directive-high"
                   role="alert"
