@@ -10,7 +10,14 @@ class MockAudioWorklet {
 class MockAudioContext {
   sampleRate = 48000;
   state = 'running';
+  destination = {};
   audioWorklet = new MockAudioWorklet();
+  resume = vi.fn().mockResolvedValue(undefined);
+  createGain = vi.fn().mockReturnValue({
+    gain: { value: 1 },
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+  });
   createMediaStreamSource = vi.fn().mockReturnValue({
     connect: vi.fn(),
     disconnect: vi.fn(),
@@ -398,6 +405,15 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
     // Verify all hardware tracks stopped
     expect(mockTracks[0].stop).toHaveBeenCalled();
+    expect(JSON.parse(ws.sentMessages[ws.sentMessages.length - 1] as string).type).toBe('stop');
+    await act(async () => {
+      ws.simulateServerMessage({
+        type: 'session_stopped',
+        session_id: 'test-session-123',
+        total_duration_seconds: 1,
+        total_windows_evaluated: 0,
+      });
+    });
     expect(ws.readyState).toBe(WebSocket.CLOSED);
 
     // Also verify unmount calls cleanup safely

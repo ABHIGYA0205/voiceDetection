@@ -72,7 +72,12 @@ export function App(): React.JSX.Element {
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const silentGainRef = useRef<GainNode | null>(null);
+  const stopTimerRef = useRef<number | null>(null);
+  const stopSentRef = useRef(false);
+  const mountedRef = useRef(true);
 
   // Check backend readiness on component mount
   useEffect(() => {
@@ -91,12 +96,23 @@ export function App(): React.JSX.Element {
             setIsMockDetector(Boolean(data.is_mock_detector));
           }
         } else if (resp.status === 503) {
-          const data = (await resp.json()) as { detail?: { reason?: string } };
+          const data = (await resp.json()) as { detail?: { reason?: string; message?: string } };
           if (isMounted) {
             setReadiness({
               status: 'not_ready',
               is_mock_detector: false,
-              reason: data.detail?.reason ?? 'Checkpoint absent or detector not initialized.',
+              reason:
+                data.detail?.reason ??
+                data.detail?.message ??
+                'Checkpoint absent or detector not initialized.',
+            });
+          }
+        } else {
+          if (isMounted) {
+            setReadiness({
+              status: 'error',
+              is_mock_detector: false,
+              reason: `VoiceShield readiness request failed with HTTP ${resp.status}.`,
             });
           }
         }
@@ -117,7 +133,7 @@ export function App(): React.JSX.Element {
     };
   }, []);
 
-  const stopAudioAndDisconnect = useCallback((): void => {
+  const stopAudioCapture = useCallback((): void => {
     // 1. Stop all microphone hardware tracks immediately
     if (mediaStreamRef.current) {
       try {
@@ -138,39 +154,92 @@ export function App(): React.JSX.Element {
     }
 
     // 2. Disconnect and close AudioWorklet and AudioContext
+    if (sourceNodeRef.current) {
+      try {
+        sourceNodeRef.current.disconnect();
+      } catch {
+        // Audio graph teardown is best effort.
+      }
+      sourceNodeRef.current = null;
+    }
     if (workletNodeRef.current) {
-      workletNodeRef.current.disconnect();
+      try {
+        workletNodeRef.current.disconnect();
+      } catch {
+        // Audio graph teardown is best effort.
+      }
       workletNodeRef.current = null;
+    }
+    if (silentGainRef.current) {
+      try {
+        silentGainRef.current.disconnect();
+      } catch {
+        // Audio graph teardown is best effort.
+      }
+      silentGainRef.current = null;
     }
 
     if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
       void audioContextRef.current.close();
       audioContextRef.current = null;
     }
-
-    // 3. Gracefully notify server and close WebSocket
-    if (wsRef.current) {
-      if (wsRef.current.readyState === WebSocket.OPEN) {
-        try {
-          wsRef.current.send(JSON.stringify({ type: 'stop' }));
-        } catch {
-          // Ignore send errors during shutdown
-        }
-        wsRef.current.close(1000, 'Client stopped');
-      }
-      wsRef.current = null;
-    }
-
-    setRecordingState('idle');
-    setConnectionState('disconnected');
   }, []);
+
+  const forceCleanup = useCallback((): void => {
+    if (stopTimerRef.current !== null) {
+      window.clearTimeout(stopTimerRef.current);
+      stopTimerRef.current = null;
+    }
+    try {
+      stopAudioCapture();
+      const ws = wsRef.current;
+      wsRef.current = null;
+      stopSentRef.current = false;
+      if (ws && ws.readyState !== WebSocket.CLOSED) {
+        try {
+          ws.close(1000, 'Client cleanup');
+        } catch {
+          // Cleanup is best effort.
+        }
+      }
+    } finally {
+      if (mountedRef.current) {
+        setRecordingState('idle');
+        setConnectionState('disconnected');
+      }
+    }
+  }, [stopAudioCapture]);
+
+  const stopAudioAndDisconnect = useCallback((): void => {
+    if (stopSentRef.current) return;
+    stopAudioCapture();
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      forceCleanup();
+      return;
+    }
+    stopSentRef.current = true;
+    setRecordingState('stopping');
+    try {
+      ws.send(JSON.stringify({ type: 'stop' }));
+    } catch {
+      forceCleanup();
+      return;
+    }
+    stopTimerRef.current = window.setTimeout(() => {
+      forceCleanup();
+      setRecordingState('idle');
+      setConnectionState('disconnected');
+    }, 1800);
+  }, [forceCleanup, stopAudioCapture]);
 
   // Cleanup on component unmount
   useEffect(() => {
     return () => {
-      stopAudioAndDisconnect();
+      mountedRef.current = false;
+      forceCleanup();
     };
-  }, [stopAudioAndDisconnect]);
+  }, [forceCleanup]);
 
   const startStream = async (): Promise<void> => {
     setErrorMessage(null);
@@ -195,6 +264,9 @@ export function App(): React.JSX.Element {
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       const audioCtx = new AudioCtxClass();
       audioContextRef.current = audioCtx;
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+      }
 
       // Load PCM AudioWorklet processor
       try {
@@ -238,8 +310,14 @@ export function App(): React.JSX.Element {
 
       const sourceNode = audioCtx.createMediaStreamSource(stream);
       const workletNode = new AudioWorkletNode(audioCtx, 'pcm-worklet-processor');
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0;
       workletNodeRef.current = workletNode;
+      sourceNodeRef.current = sourceNode;
+      silentGainRef.current = silentGain;
       sourceNode.connect(workletNode);
+      workletNode.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
 
       // 3. Establish WebSocket connection to backend
       const wsUrl = getWebSocketStreamUrl();
@@ -328,6 +406,8 @@ export function App(): React.JSX.Element {
             };
 
             setTimeline((prev) => [historyItem, ...prev.slice(0, 19)]);
+          } else if (data.type === 'session_stopped') {
+            forceCleanup();
           } else if (data.type === 'error') {
             setStatus('error');
             setErrorMessage(`${data.error_code}: ${data.message}`);
@@ -338,15 +418,18 @@ export function App(): React.JSX.Element {
       };
 
       ws.onerror = () => {
+        if (!mountedRef.current) return;
         setConnectionState('error');
         setStatus('error');
         setErrorMessage('WebSocket connection error. Is the VoiceShield backend running?');
-        stopAudioAndDisconnect();
+        forceCleanup();
       };
 
       ws.onclose = () => {
+        if (!mountedRef.current) return;
         setConnectionState('disconnected');
         setRecordingState('idle');
+        wsRef.current = null;
       };
     } catch (err: unknown) {
       const errorMsg =
@@ -354,7 +437,7 @@ export function App(): React.JSX.Element {
       setErrorMessage(errorMsg);
       setRecordingState('error');
       setConnectionState('error');
-      stopAudioAndDisconnect();
+      forceCleanup();
     }
   };
 
@@ -396,7 +479,7 @@ export function App(): React.JSX.Element {
     }
   };
 
-  const isRecording = recordingState === 'recording';
+  const isRecording = recordingState === 'recording' || recordingState === 'stopping';
 
   return (
     <div className="app-container">
@@ -602,9 +685,10 @@ export function App(): React.JSX.Element {
                     type="button"
                     className="btn btn-danger"
                     onClick={stopAudioAndDisconnect}
+                    disabled={recordingState === 'stopping'}
                     id="stop-mic-button"
                   >
-                    ⏹ Stop Stream & Disconnect
+                    {recordingState === 'stopping' ? '⏳ Stopping Stream...' : '⏹ Stop Stream & Disconnect'}
                   </button>
                 )}
               </div>

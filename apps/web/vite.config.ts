@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const apiTarget = process.env.VOICESHIELD_API_TARGET ?? 'http://127.0.0.1:8000';
+
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -8,7 +10,17 @@ export default defineConfig({
     host: '127.0.0.1',
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: apiTarget,
+        changeOrigin: true,
+        ws: true,
+      },
+    },
+  },
+  preview: {
+    host: '127.0.0.1',
+    proxy: {
+      '/api': {
+        target: apiTarget,
         changeOrigin: true,
         ws: true,
       },

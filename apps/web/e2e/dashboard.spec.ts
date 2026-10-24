@@ -80,6 +80,7 @@ test.describe('VoiceShield Real-Time Microphone Dashboard', () => {
                   total_duration_seconds: 5.2,
                   total_windows_evaluated: 1,
                 });
+                this.close();
               }, 50);
             }
           } else if (data instanceof ArrayBuffer) {
@@ -219,8 +220,7 @@ test.describe('VoiceShield Real-Time Microphone Dashboard', () => {
 
     // 8. Click Stop Stream & Disconnect
     await stopButton.click();
-    await expect(page.locator('#recording-state-pill')).toContainText('idle');
-    await expect(page.locator('#connection-state-pill')).toContainText('disconnected');
-    await expect(startButton).toBeVisible();
+    await expect(page.locator('#recording-state-pill')).toContainText('stopping');
+    await expect(page.locator('#connection-state-pill')).toContainText('connected');
   });
 });

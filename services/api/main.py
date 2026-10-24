@@ -323,6 +323,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
         }
 
     @application.get("/ready", tags=["System"])
+    @application.get("/api/v1/ready", tags=["System"])
     async def readiness_check(request: Request) -> dict[str, Any]:
         """Return model readiness status distinguishing API liveness from detector readiness."""
         prov = ensure_model_ready_for_http(request.app.state)
