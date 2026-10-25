@@ -14,7 +14,7 @@ updates:
     directory: /apps/web
     schedule:
       interval: weekly
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0
     groups:
       npm-minor-patch:
         update-types:
@@ -24,7 +24,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0
     groups:
       actions-minor-patch:
         update-types:
