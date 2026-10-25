@@ -5,15 +5,38 @@ VoiceShield is an acoustic machine learning system designed to detect synthetic,
 > **Important Advisory Disclaimer**
 > VoiceShield provides acoustic anomaly metrics and advisory warnings. Its outputs do **not** constitute identity proof and do **not** represent a fraud probability. VoiceShield warns and prompts independent verification; it does not automatically block calls. Browser clients access permitted local microphones only and cannot intercept arbitrary remote cellular calls.
 
-## Release status: v0.1.1
+## Project status
 
-VoiceShield v0.1.1 is an advisory local microphone/file-analysis engineering
-patch release. Offline file results now preserve meaningful raw threshold
-crossings and uncertain windows as mixed evidence instead of allowing a final
-LOW window to imply uniformly low history. HIGH still requires sustained policy
-evidence. The ASVspoof 2019 LA reproduction runner now fails closed on protocol
-cardinality, protocol/audio coverage, invalid smoke sampling, non-canonical EER
-comparisons, and incomplete report provenance.
+- **Latest published release:** [v0.1.1](https://github.com/ABHIGYA0205/voiceDetection/releases/tag/v0.1.1)
+- **Release commit:** [`fb61fd2`](https://github.com/ABHIGYA0205/voiceDetection/commit/fb61fd2f8a74fdfc5ed6d4e73771443a4fb8352c)
+- **Release notes:** [`docs/releases/v0.1.1.md`](docs/releases/v0.1.1.md)
+
+v0.1.1 is complete within its supported advisory engineering scope. The v0.1.1
+tag and release are frozen; subsequent scientific work belongs in a later
+release. This status does **not** claim scientifically validated detection
+accuracy.
+
+| Area | Status | What the status means |
+| --- | --- | --- |
+| Advisory product engineering | **Released** | Local microphone and authorized file analysis, real-time advisory scoring, mixed-evidence reporting, and fail-closed validation are included in v0.1.1. |
+| Official AASIST-L checkpoint execution | **Validated** | Checkpoint identity and integrity checks passed, and real-checkpoint latency was measured on Apple M3 CPU and MPS. |
+| ASVspoof 2019 LA prerequisites | **Passed** | The official evaluation protocol contains 71,237 unique trials: 7,355 bona fide and 63,882 spoof. All protocol IDs have matching audio; 696 permitted extra FLAC files are ignored. |
+| Full ASVspoof 2019 LA baseline | **Pending** | No complete 71,237-trial score set or locally reproduced EER has been accepted as evidence. |
+| Official min t-DCF | **Not computed** | The current reproduction runner does not implement the official ASVspoof min t-DCF calculation. Its generic normalized minDCF is not a substitute. |
+| Calibration and modern-generator accuracy | **Not established** | Scores remain uncalibrated, thresholds remain operating heuristics, and broad reliability across modern TTS, voice cloning, languages, codecs, noise, and replay has not been demonstrated. |
+
+The [upstream AASIST results](https://github.com/clovaai/aasist/blob/a04c9863f63d44471dde8a6abcb3b082b07cd1d1/README.md)
+report **0.99% EER** and **0.0309 min t-DCF** for AASIST-L on ASVspoof 2019 LA.
+Those are upstream reference values, not reproduced VoiceShield results.
+
+### What changed in v0.1.1
+
+Offline file results now preserve meaningful raw threshold crossings and
+uncertain windows as mixed evidence instead of allowing a final LOW window to
+imply uniformly low history. HIGH still requires sustained policy evidence. The
+ASVspoof 2019 LA reproduction runner fails closed on protocol cardinality,
+protocol/audio coverage, invalid smoke sampling, non-canonical EER comparisons,
+and incomplete report provenance.
 
 The real official AASIST-L checkpoint was validated on Apple M3 CPU and MPS,
 but the checkpoint is not distributed with VoiceShield; obtain it from the
@@ -21,8 +44,7 @@ but the checkpoint is not distributed with VoiceShield; obtain it from the
 Scores are uncalibrated acoustic anomaly scores and thresholds are unvalidated
 operating heuristics. Outputs do not authenticate speech, prove identity, or
 establish fraud. Browser capture is limited to permitted local microphone input
-and cannot intercept cellular calls. Full ASVspoof scoring, reproduced EER, and
-official min t-DCF computation remain pending.
+and cannot intercept cellular calls.
 
 ### Real-checkpoint engineering benchmark
 
