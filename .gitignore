@@ -96,3 +96,11 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# ASVspoof reproduction runner generated artifacts
+eval_progress.json*
+dev_progress.json*
+smoke_diagnostic.json*
+raw_scores.txt*
+reports/asvspoof_reproduction_report_*.md
+reports/reproduction/

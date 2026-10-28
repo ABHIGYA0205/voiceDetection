@@ -34,11 +34,24 @@
 
 ### 2.2 Runtime integrity controls and boundaries
 
-The v0.1.1 runner enforces the selected official protocol file rather than
+The reproduction runner enforces the selected official protocol file rather than
 creating new dataset splits. In canonical eval mode it requires exact class
 cardinality, unique protocol IDs, complete protocol-to-FLAC coverage, unique
 FLAC stems, supported labels, and scoring of protocol IDs only. Extra FLACs in
 the official archive are counted but are not scored.
+
+### 2.3 Resumable execution and CUDA evaluation foundation (v0.2.0 Phase 1)
+
+Phase 1 of v0.2.0 adds crash-safe, resumable evaluation (`--resume`, `--checkpoint-every`)
+and fail-closed CUDA support (`--device cuda`) to enable full scoring on interruption-prone
+environments such as Google Colab.
+
+- **Split Cardinalities**: Supported official partitions are evaluation (exactly 71,237 trials: 7,355 bona fide, 63,882 spoof) and development (exactly 24,844 trials: 2,548 bona fide, 22,296 spoof). Upstream ICASSP 2022 EER reference comparison (0.99%) is strictly **eval-only**; development scoring is supported for diagnostic verification but is never compared with 0.99%.
+- **Integrity Boundary**: Resumability and CUDA device selection do not validate model accuracy or alter benchmark formulas.
+- **Completeness Enforcement**: Release evidence (`raw_scores.txt`, `report.md`) is generated strictly when all trials for the selected split are fully scored.
+- **min t-DCF Status**: Official min t-DCF remains NOT COMPUTED and unimplemented.
+- **Predeclared Tolerance**: Numerical tolerance between CPU and CUDA inference is predeclared at $\text{atol}=10^{-4}, \text{rtol}=10^{-4}$; live equivalence remains **UNVERIFIED** until physical CUDA tests pass on real hardware.
+- **Hardware Prerequisites**: CUDA execution requires an external research-environment PyTorch build. Default project dependencies remain CPU-only.
 
 Train/dev/eval speaker separation and attack holdout are properties of the
 official ASVspoof protocol. This runner does not independently reconstruct

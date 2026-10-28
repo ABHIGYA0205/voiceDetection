@@ -137,8 +137,8 @@ class AASISTLDetector(BaseDetector):
             model_id: Model identity ('clovaai/aasist-l', 'custom/aasist-l', or 'mock/aasist-l').
             expected_sha256: Optional expected SHA-256 checksum to verify.
             model_config: Architecture hyperparameters dictionary (defaults to official AASIST-L).
-            preferred_device: 'mps', 'cpu', or None to read environment.
-            fallback_to_cpu: Whether to gracefully fall back to CPU if preferred device fails.
+            preferred_device: 'cuda', 'mps', 'cpu', or None to read environment.
+            fallback_to_cpu: Whether to gracefully fall back to CPU if preferred device fails (MPS only).
             threshold: Decision threshold for suspected synthetic classification.
             _instantiated_model: Internal parameter for unit-testing shape/control-flow with mocks.
         """
@@ -365,7 +365,7 @@ class AASISTLDetector(BaseDetector):
         try:
             self.model.to(self.device)
         except Exception as exc:
-            if not self.fallback_to_cpu:
+            if not self.fallback_to_cpu or self.device.type == "cuda":
                 raise
             logger.warning(
                 "Failed to place AASIST-L on device %s: %s. Falling back to CPU.", self.device, exc
@@ -431,7 +431,7 @@ class AASISTLDetector(BaseDetector):
                     # Official forward returns: (last_hidden, output_logits)
                     _, logits = self.model(tensor_in)
             except Exception as exc:
-                if not self.fallback_to_cpu:
+                if not self.fallback_to_cpu or self.device.type == "cuda":
                     raise
                 logger.warning(
                     "AASIST execution failed on %s (%s). Executing CPU fallback.",

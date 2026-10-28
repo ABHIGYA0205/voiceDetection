@@ -10,7 +10,7 @@
 |---|---:|---:|---|
 | EER | 0.99% (0.0099) | `{{ actual_eer_pct }}` | `{{ status_eer }}` |
 | Official min t-DCF | 0.0309 | NOT COMPUTED | NOT COMPUTED |
-| Evaluation set | ASVspoof 2019 LA (`{{ evaluated_protocol }}`) | `{{ total_eval_trials }}` trials | Counts derived from protocol |
+| Evaluation set | `{{ evaluated_protocol }}` | `{{ total_eval_trials }}` trials | Counts derived from protocol |
 
 The pinned AASIST repository reports AASIST-L EER 0.99%, min t-DCF 0.0309,
 and 85,306 parameters:
@@ -53,7 +53,12 @@ the upstream 0.0309 reference.
 - Registry checkpoint SHA-256: `{{ expected_checkpoint_sha256 }}`
 - Loaded checkpoint SHA-256: `{{ checkpoint_sha256 }}`
 - Device: `{{ compute_device }}`
+- Requested device: `{{ requested_device }}`
+- CUDA available: `{{ cuda_available }}`
+- CUDA device name: `{{ cuda_device_name }}`
 - MPS available: `{{ mps_available }}`
+- Deterministic seed: `{{ seed }}`
+- Deterministic algorithms: `{{ deterministic_algorithms }}`
 - Operating system/platform: `{{ os_version }}`
 - Python: `{{ python_version }}`
 - PyTorch: `{{ torch_version }}`
@@ -104,5 +109,6 @@ reproduction alone.
 
 ## 7. Artifacts
 
-- Raw predictions: `{{ raw_scores_path }}`
+- Raw predictions: `{{ raw_scores_path }}` (SHA-256: `{{ raw_scores_sha256 }}`)
 - Generated report: `{{ report_path }}`
+- Resume contract hash: `{{ resume_contract_hash }}`

@@ -78,6 +78,7 @@ def test_strict_official_cardinality_is_explicit(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(repro, "OFFICIAL_EVAL_COUNTS", miniature_counts)
     assert validate_protocol_cardinality(_trials(), strict_official=True) == miniature_counts
     assert OFFICIAL_EVAL_COUNTS == {"total": 71237, "bonafide": 7355, "spoof": 63882}
+    assert repro.OFFICIAL_DEV_COUNTS == {"total": 24844, "bonafide": 2548, "spoof": 22296}
 
 
 def test_stratified_smoke_selection_is_deterministic_and_two_class() -> None:
@@ -111,6 +112,19 @@ def test_production_parser_has_no_cardinality_bypass() -> None:
         option for action in build_parser()._actions for option in action.option_strings
     }
     assert "--allow-miniature-fixture" not in option_strings
+
+
+def test_production_parser_includes_resumable_and_cuda_options() -> None:
+    parser = build_parser()
+    option_strings = {option for action in parser._actions for option in action.option_strings}
+    assert "--resume" in option_strings
+    assert "--checkpoint-every" in option_strings
+    assert "--smoke-only" in option_strings
+    assert "--seed" in option_strings
+    assert "--device" in option_strings
+
+    device_action = next(a for a in parser._actions if "--device" in a.option_strings)
+    assert set(device_action.choices or []) == {"mps", "cpu", "cuda"}
 
 
 def test_eer_comparison_is_eval_only() -> None:
@@ -157,6 +171,12 @@ def test_report_renderer_rejects_unresolved_placeholders() -> None:
     assert render_report_template("value={{ value }}", {"{{ value }}": "ok"}) == "value=ok"
     with pytest.raises(ValueError, match="Unresolved report template"):
         render_report_template("value={{ missing }}", {})
+    with pytest.raises(
+        ValueError,
+        match=r"Unresolved report template placeholders: \['\{\{ alpha \}\}', '\{\{ beta \}\}']",
+    ) as exc_info:
+        render_report_template("multi={{ beta }} and {{ alpha }}", {})
+    assert "Unresolved report template placeholders" in str(exc_info.value)
 
 
 def test_report_template_and_script_are_fail_closed() -> None:

@@ -64,10 +64,11 @@ VoiceShield uses the official pre-trained AASIST-L baseline trained by NAVER Clo
 | :--- | :---: | :---: | :--- | :--- |
 | **ASVspoof 2019 LA Train** | 25,380 | 20 (8 M, 12 F) | A01–A06 (Neural & vocoder TTS / VC) | Academic / Research Use Only (Interspeech Consortium) |
 | **ASVspoof 2019 LA Dev** | 24,844 | 20 (8 M, 12 F) | A01–A06 (Known in-set generators) | Academic / Research Use Only (Interspeech Consortium) |
+| **ASVspoof 2019 LA Eval** | 71,237 | 48 (21 M, 27 F) | Unseen attacks: A07–A19 | Academic / Research Use Only (Interspeech Consortium) |
 | **VoiceShield Adaptation** | **None** | N/A | **Not yet adapted** | Frozen upstream weights; no fine-tuning applied. |
 
 - **Zero Speaker Leakage**: Training, development, and evaluation partitions in ASVspoof 2019 LA are strictly speaker-disjoint.
-- **Generator Holdout**: Evaluation split contains unseen synthetic speech generators (A07–A19) not present in the training set.
+- **Generator Holdout**: Evaluation split contains unseen synthetic speech generators (A07–A19) not present in the training set. Upstream published EER (0.99%) is strictly an evaluation-split metric; development split results are not comparable with it.
 
 ---
 
@@ -128,6 +129,7 @@ VoiceShield operates in an adversarial environment where generative models conti
 | **Background Noise & Crosstalk** | Multi-speaker crosstalk or street noise corrupts the SincNet filterbank representation, leading to false positives. | Energy-based VAD gates out non-speech segments ($\ge 0.8\text{ s}$ speech required per 4.0s window). |
 | **Human Impersonation & Mimics** | Human voice actors mimicking another person's cadence produce bona fide acoustic waveforms. | AASIST-L detects neural synthesis artifacts, not behavioral imitation; mimics will correctly score as bona fide. |
 | **Short Utterances ($< 1.0\text{ s}$)** | Utterances with insufficient speech duration do not contain enough phonemic transitions for reliable graph attention. | Temporal policy issues an immediate `INSUFFICIENT_SPEECH_DURATION` abstention rather than guessing. |
+| **CUDA Research Prerequisites** | Running evaluation on CUDA requires a research environment with a CUDA-capable PyTorch build. Default locked Linux dependencies remain CPU-only. | Explicit `--device cuda` fails closed if CUDA is unavailable; it never silently falls back to CPU. Acceptance numerical tolerance between CPU and CUDA inference is predeclared at atol=1e-4, rtol=1e-4; live equivalence remains UNVERIFIED until physical CUDA tests pass. CUDA support does not alter model accuracy, and official min t-DCF remains unimplemented. |
 
 ---
 
