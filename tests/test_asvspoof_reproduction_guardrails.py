@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -150,7 +151,55 @@ def test_skipped_smoke_is_not_reported_as_passed() -> None:
     assert fields["{{ smoke_status }}"] == "SKIPPED"
     assert fields["{{ smoke_samples_count }}"] == "0"
     assert fields["{{ smoke_mean_bonafide_score }}"] == "NOT COMPUTED"
+    assert fields["{{ smoke_mean_spoof_score }}"] == "NOT COMPUTED"
     assert fields["{{ smoke_direction_aligned }}"] == "NOT COMPUTED"
+
+
+def test_normal_smoke_mapping_formats_both_bonafide_and_spoof_means() -> None:
+    diagnostics = {
+        "mean_bonafide_score": 1.234567,
+        "mean_spoof_score": -0.987654,
+        "samples_evaluated": 10,
+        "direction_aligned": True,
+        "bonafide_samples": 5,
+        "spoof_samples": 5,
+        "elapsed_seconds": 0.123,
+    }
+    fields = smoke_report_replacements(diagnostics, skipped=False)
+    assert fields["{{ smoke_mean_bonafide_score }}"] == "1.2346"
+    assert fields["{{ smoke_mean_spoof_score }}"] == "-0.9877"
+
+
+def test_smoke_report_replacements_cover_all_template_smoke_placeholders() -> None:
+    template_path = Path("reports/templates/asvspoof_reproduction_report_template.md")
+    template_text = template_path.read_text(encoding="utf-8")
+    template_smoke_placeholders = set(re.findall(r"\{\{\s*smoke_[^}]+\}\}", template_text))
+    assert template_smoke_placeholders, (
+        "Expected at least one {{ smoke_* }} placeholder in template"
+    )
+
+    skipped_mapping = smoke_report_replacements({}, skipped=True)
+    missing_skipped = template_smoke_placeholders - set(skipped_mapping.keys())
+    assert not missing_skipped, (
+        f"Skipped smoke mapping missing template placeholders: {missing_skipped}"
+    )
+
+    normal_mapping = smoke_report_replacements(
+        {
+            "samples_evaluated": 4,
+            "direction_aligned": True,
+            "mean_bonafide_score": 1.0,
+            "mean_spoof_score": -1.0,
+            "bonafide_samples": 2,
+            "spoof_samples": 2,
+            "elapsed_seconds": 0.05,
+        },
+        skipped=False,
+    )
+    missing_normal = template_smoke_placeholders - set(normal_mapping.keys())
+    assert not missing_normal, (
+        f"Normal smoke mapping missing template placeholders: {missing_normal}"
+    )
 
 
 def test_command_provenance_quotes_paths_with_spaces() -> None:

@@ -185,6 +185,7 @@ def smoke_report_replacements(diagnostics: dict[str, Any], *, skipped: bool) -> 
             "{{ smoke_status }}": "SKIPPED",
             "{{ smoke_samples_count }}": "0",
             "{{ smoke_mean_bonafide_score }}": "NOT COMPUTED",
+            "{{ smoke_mean_spoof_score }}": "NOT COMPUTED",
             "{{ smoke_direction_aligned }}": "NOT COMPUTED",
             "{{ smoke_samples }}": "NOT COMPUTED (smoke verification skipped)",
             "{{ smoke_bonafide_count }}": "NOT COMPUTED",
@@ -200,6 +201,9 @@ def smoke_report_replacements(diagnostics: dict[str, Any], *, skipped: bool) -> 
         "{{ smoke_samples_count }}": str(samples),
         "{{ smoke_mean_bonafide_score }}": format_optional_float(
             diagnostics.get("mean_bonafide_score")
+        ),
+        "{{ smoke_mean_spoof_score }}": format_optional_float(
+            diagnostics.get("mean_spoof_score")
         ),
         "{{ smoke_direction_aligned }}": str(diagnostics.get("direction_aligned", "NOT COMPUTED")),
         "{{ smoke_samples }}": str(samples),
