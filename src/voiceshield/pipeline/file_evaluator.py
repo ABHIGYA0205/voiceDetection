@@ -24,6 +24,12 @@ from voiceshield.dsp.exceptions import (
 )
 from voiceshield.dsp.preprocessor import load_audio
 from voiceshield.dsp.quality import AudioQualityMetrics, compute_quality_metrics
+from voiceshield.dsp.reliability import (
+    LIMITED_REASONS,
+    InputReliabilityAssessment,
+    ReliabilityState,
+    assess_input_reliability,
+)
 from voiceshield.dsp.scheduler import CanonicalWindowScheduler
 from voiceshield.models.base import BaseDetector, DetectorOutput
 from voiceshield.streaming.policy import (
@@ -124,6 +130,9 @@ class WindowResult(BaseModel):
     quality_status: AudioQualityMetrics = Field(
         description="Audio quality diagnostics for this window."
     )
+    input_reliability: InputReliabilityAssessment = Field(
+        description="Input reliability assessment for this window."
+    )
     decision: TemporalDecision | None = Field(
         default=None,
         description="Structured temporal decision emitted for this window.",
@@ -175,7 +184,7 @@ class FileInferenceResult(BaseModel):
     file_path: str = Field(description="Source file path or identifier.")
     status: str = Field(
         default="success",
-        description="Status ('success', 'error', 'insufficient_evidence', 'unsupported').",
+        description="Status ('success', 'error', 'insufficient_evidence', 'limited_reliability', 'unsupported').",
     )
     error_message: str | None = Field(
         default=None, description="Error details if status == 'error'."
@@ -184,7 +193,8 @@ class FileInferenceResult(BaseModel):
         default=None, description="Stable error code if status == 'error'."
     )
     abstain_reason: str | None = Field(
-        default=None, description="Reason details if status == 'insufficient_evidence'."
+        default=None,
+        description="Reason details if status in ('insufficient_evidence', 'limited_reliability').",
     )
     duration_seconds: float = Field(default=0.0, description="Total duration of audio in seconds.")
     active_speech_duration_seconds: float = Field(
@@ -195,6 +205,25 @@ class FileInferenceResult(BaseModel):
     total_windows: int = Field(default=0, description="Number of windows evaluated.")
     eligible_windows: int = Field(
         default=0, description="Number of windows with sufficient active speech."
+    )
+    reliable_window_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of evaluated windows classified as reliable.",
+    )
+    limited_reliability_window_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of evaluated windows classified as limited reliability.",
+    )
+    insufficient_reliability_window_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of evaluated windows classified as insufficient reliability.",
+    )
+    quality_origin_verdict_allowed: bool = Field(
+        default=False,
+        description="Whether overall input audio quality allows an origin verdict (synthetic vs human).",
     )
     raw_high_window_count: int = Field(
         default=0,
@@ -309,6 +338,136 @@ class FileInferenceResult(BaseModel):
                     data.setdefault("max_synthetic_score", max_s)
                     data.setdefault("max_synthetic_likelihood", max_s)
         return data
+
+
+def _validate_window_safety_contracts(
+    windows: list[WindowResult],
+    num_windows: int,
+    reliable_window_count: int,
+    limited_reliability_window_count: int,
+    insufficient_reliability_window_count: int,
+    num_eligible: int,
+) -> None:
+    """Validate runtime safety contracts for evaluated windows fail-closed."""
+    total_reliability_counts = (
+        reliable_window_count
+        + limited_reliability_window_count
+        + insufficient_reliability_window_count
+    )
+    if total_reliability_counts != num_windows:
+        raise RuntimeError(
+            f"Reliability window counters invariant violated: reliable ({reliable_window_count}) + "
+            f"limited ({limited_reliability_window_count}) + insufficient ({insufficient_reliability_window_count}) "
+            f"= {total_reliability_counts}, but total_windows is {num_windows}."
+        )
+
+    if num_eligible != reliable_window_count:
+        raise RuntimeError(
+            f"Eligible windows count invariant violated: eligible_windows ({num_eligible}) != "
+            f"reliable_window_count ({reliable_window_count})."
+        )
+
+    for w in windows:
+        if w.is_eligible:
+            if w.input_reliability.state != ReliabilityState.RELIABLE:
+                raise RuntimeError(
+                    f"Window {w.window_index} marked eligible but input_reliability.state is "
+                    f"'{w.input_reliability.state.value}'; expected '{ReliabilityState.RELIABLE.value}'."
+                )
+            if not w.input_reliability.origin_verdict_allowed:
+                raise RuntimeError(
+                    f"Window {w.window_index} marked eligible but origin_verdict_allowed is False."
+                )
+            if w.decision_reason == ReasonCode.INSUFFICIENT_SPEECH_DURATION.value:
+                raise RuntimeError(
+                    f"Window {w.window_index} marked eligible but decision_reason is "
+                    f"'{ReasonCode.INSUFFICIENT_SPEECH_DURATION.value}'."
+                )
+            if w.synthetic_score is None:
+                raise RuntimeError(
+                    f"Window {w.window_index} marked eligible but synthetic_score is None."
+                )
+            if w.raw_spoof_logit is None:
+                raise RuntimeError(
+                    f"Window {w.window_index} marked eligible but raw_spoof_logit is None."
+                )
+            if w.raw_bonafide_logit is None:
+                raise RuntimeError(
+                    f"Window {w.window_index} marked eligible but raw_bonafide_logit is None."
+                )
+            if w.raw_bonafide_score is None:
+                raise RuntimeError(
+                    f"Window {w.window_index} marked eligible but raw_bonafide_score is None."
+                )
+            if w.abstain_reason is not None:
+                raise RuntimeError(
+                    f"Window {w.window_index} marked eligible but abstain_reason is '{w.abstain_reason}' "
+                    "(expected None)."
+                )
+        else:
+            if w.input_reliability.origin_verdict_allowed is not False:
+                raise RuntimeError(
+                    f"Non-reliable window {w.window_index} has origin_verdict_allowed="
+                    f"{w.input_reliability.origin_verdict_allowed} (expected False)."
+                )
+            if w.synthetic_score is not None:
+                raise RuntimeError(
+                    f"Non-reliable window {w.window_index} has synthetic_score="
+                    f"{w.synthetic_score} (expected None)."
+                )
+            if w.uncalibrated_synthetic_score is not None:
+                raise RuntimeError(
+                    f"Non-reliable window {w.window_index} has uncalibrated_synthetic_score="
+                    f"{w.uncalibrated_synthetic_score} (expected None)."
+                )
+            if w.synthetic_likelihood is not None:
+                raise RuntimeError(
+                    f"Non-reliable window {w.window_index} has synthetic_likelihood="
+                    f"{w.synthetic_likelihood} (expected None)."
+                )
+            if w.calibrated_synthetic_likelihood is not None:
+                raise RuntimeError(
+                    f"Non-reliable window {w.window_index} has calibrated_synthetic_likelihood="
+                    f"{w.calibrated_synthetic_likelihood} (expected None)."
+                )
+            if w.score_is_calibrated is not False:
+                raise RuntimeError(
+                    f"Non-reliable window {w.window_index} has score_is_calibrated=True "
+                    "(expected False)."
+                )
+            if w.is_synthetic_suspected is not False:
+                raise RuntimeError(
+                    f"Non-reliable window {w.window_index} has is_synthetic_suspected=True "
+                    "(expected False)."
+                )
+            if w.is_eligible is not False:
+                raise RuntimeError(
+                    f"Non-reliable window {w.window_index} has is_eligible=True (expected False)."
+                )
+            if w.raw_spoof_logit is not None:
+                raise RuntimeError(
+                    f"Non-reliable window {w.window_index} has raw_spoof_logit="
+                    f"{w.raw_spoof_logit} (expected None)."
+                )
+            if w.raw_bonafide_logit is not None:
+                raise RuntimeError(
+                    f"Non-reliable window {w.window_index} has raw_bonafide_logit="
+                    f"{w.raw_bonafide_logit} (expected None)."
+                )
+            if w.raw_bonafide_score is not None:
+                raise RuntimeError(
+                    f"Non-reliable window {w.window_index} has raw_bonafide_score="
+                    f"{w.raw_bonafide_score} (expected None)."
+                )
+            if w.abstain_reason not in (
+                ReasonCode.INSUFFICIENT_SPEECH_DURATION.value,
+                ReasonCode.SIGNAL_QUALITY_DEGRADED.value,
+            ):
+                raise RuntimeError(
+                    f"Non-reliable window {w.window_index} has invalid abstain_reason "
+                    f"'{w.abstain_reason}'; expected one of "
+                    f"{(ReasonCode.INSUFFICIENT_SPEECH_DURATION.value, ReasonCode.SIGNAL_QUALITY_DEGRADED.value)}."
+                )
 
 
 def evaluate_audio(
@@ -502,6 +661,10 @@ def evaluate_audio(
             original_channels=metadata.original_channels,
             total_windows=0,
             eligible_windows=0,
+            reliable_window_count=0,
+            limited_reliability_window_count=0,
+            insufficient_reliability_window_count=0,
+            quality_origin_verdict_allowed=False,
             mean_synthetic_score=None,
             max_synthetic_score=None,
             mean_synthetic_likelihood=None,
@@ -528,12 +691,25 @@ def evaluate_audio(
         chunk_quality = compute_quality_metrics(chunk)
         speech_sec = vad.compute_speech_duration(chunk, target_sr)
 
-        if speech_sec < effective_min_speech:
-            decision = policy.evaluate_insufficient_speech(
+        reliability = assess_input_reliability(
+            metrics=chunk_quality,
+            active_speech_seconds=speech_sec,
+            required_min_speech_seconds=effective_min_speech,
+        )
+
+        if not reliability.origin_verdict_allowed:
+            decision = policy.evaluate_reliability_abstention(
+                assessment=reliability,
                 window_index=lw.window_index,
                 window_start_sec=start_sec,
                 window_end_sec=end_sec,
                 speech_seconds=speech_sec,
+            )
+            win_abstain = (
+                ReasonCode.INSUFFICIENT_SPEECH_DURATION.value
+                if speech_sec < effective_min_speech
+                and not any(r in LIMITED_REASONS for r in reliability.reasons)
+                else decision.reason.value
             )
             windows.append(
                 WindowResult(
@@ -546,15 +722,16 @@ def evaluate_audio(
                     synthetic_score=None,
                     uncalibrated_synthetic_score=None,
                     synthetic_likelihood=None,
-                    score_is_calibrated=False,
                     calibrated_synthetic_likelihood=None,
+                    score_is_calibrated=False,
                     effective_threshold=effective_threshold,
                     is_synthetic_suspected=False,
                     active_speech_seconds=speech_sec,
                     is_eligible=False,
                     is_partial=False,
-                    abstain_reason=ReasonCode.INSUFFICIENT_SPEECH_DURATION.value,
+                    abstain_reason=win_abstain,
                     quality_status=chunk_quality,
+                    input_reliability=reliability,
                     decision=decision,
                     decision_state=decision.state.value,
                     decision_reason=decision.reason.value,
@@ -584,8 +761,9 @@ def evaluate_audio(
                     raw_bonafide_score=det_output.bonafide_score,
                     synthetic_score=score,
                     uncalibrated_synthetic_score=score,
-                    score_is_calibrated=False,
+                    synthetic_likelihood=score,
                     calibrated_synthetic_likelihood=None,
+                    score_is_calibrated=False,
                     effective_threshold=effective_threshold,
                     is_synthetic_suspected=is_suspected,
                     active_speech_seconds=speech_sec,
@@ -593,6 +771,7 @@ def evaluate_audio(
                     is_partial=False,
                     abstain_reason=None,
                     quality_status=chunk_quality,
+                    input_reliability=reliability,
                     decision=decision,
                     decision_state=decision.state.value,
                     decision_reason=decision.reason.value,
@@ -602,64 +781,108 @@ def evaluate_audio(
                 )
             )
 
-    for w in windows:
-        if w.is_eligible:
-            assert w.decision_reason != ReasonCode.INSUFFICIENT_SPEECH_DURATION.value, (
-                f"Window {w.window_index} marked eligible but policy returned insufficient_speech_duration"
-            )
-            assert w.synthetic_score is not None, (
-                f"Window {w.window_index} eligible but score is None"
-            )
-            assert w.raw_spoof_logit is not None, (
-                f"Window {w.window_index} eligible but raw_spoof_logit is None"
-            )
-        else:
-            assert w.synthetic_score is None, (
-                f"Window {w.window_index} abstained but score is not None"
-            )
-            assert w.raw_spoof_logit is None, (
-                f"Window {w.window_index} abstained but raw_spoof_logit is not None"
-            )
-            assert w.abstain_reason == ReasonCode.INSUFFICIENT_SPEECH_DURATION.value
+    num_windows = len(windows)
+    reliable_window_count = sum(
+        1 for w in windows if w.input_reliability.state == ReliabilityState.RELIABLE
+    )
+    limited_reliability_window_count = sum(
+        1 for w in windows if w.input_reliability.state == ReliabilityState.LIMITED
+    )
+    insufficient_reliability_window_count = sum(
+        1 for w in windows if w.input_reliability.state == ReliabilityState.INSUFFICIENT
+    )
 
     eligible_windows = [w for w in windows if w.is_eligible]
-    num_windows = len(windows)
     num_eligible = len(eligible_windows)
 
-    # 7. If no windows have sufficient active speech, return insufficient_evidence / abstain
+    # Invariants
+    _validate_window_safety_contracts(
+        windows=windows,
+        num_windows=num_windows,
+        reliable_window_count=reliable_window_count,
+        limited_reliability_window_count=limited_reliability_window_count,
+        insufficient_reliability_window_count=insufficient_reliability_window_count,
+        num_eligible=num_eligible,
+    )
+
+    # 7. Fail-closed aggregation
     if num_eligible == 0:
-        explanation = (
-            f"Insufficient active speech detected across file ({total_active_speech:.2f}s active speech "
-            f"below required minimum threshold of {effective_min_speech:.2f}s). Decision abstained — does "
-            "not evaluate synthetic anomalies without active speech. (Note: Energy VAD is a heuristic, "
-            "not an infallible speech detector)."
-        )
-        return FileInferenceResult(
-            file_path=path_str,
-            status="insufficient_evidence",
-            abstain_reason=ReasonCode.INSUFFICIENT_SPEECH_DURATION.value,
-            duration_seconds=round(metadata.duration_seconds, 3),
-            active_speech_duration_seconds=total_active_speech,
-            original_sample_rate=metadata.original_sample_rate,
-            original_channels=metadata.original_channels,
-            total_windows=num_windows,
-            eligible_windows=0,
-            mean_synthetic_score=None,
-            max_synthetic_score=None,
-            mean_synthetic_likelihood=None,
-            max_synthetic_likelihood=None,
-            score_is_calibrated=False,
-            effective_threshold=effective_threshold,
-            operating_threshold_source="unvalidated_heuristic",
-            is_synthetic_suspected=False,
-            final_decision_state=DecisionState.INSUFFICIENT_EVIDENCE.value,
-            temporal_rule_explanation=explanation,
-            windows=windows,
-            is_mock_detector=is_mock,
-            config_hash=effective_config_hash,
-            metadata=res_metadata,
-            disclaimers=Disclaimers(),
-        )
+        if limited_reliability_window_count > 0:
+            # Case D: No RELIABLE windows but one or more LIMITED windows
+            explanation = (
+                f"Offline advisory aggregation: no reliable speech windows were available and "
+                f"{limited_reliability_window_count} of {num_windows} window(s) had degraded signal quality. "
+                "Degraded input quality prevented a binary origin verdict; primary file verdict abstained. "
+                "Audio quality is a separate reliability signal and does not constitute evidence of human or synthetic origin."
+            )
+            return FileInferenceResult(
+                file_path=path_str,
+                status="limited_reliability",
+                abstain_reason=ReasonCode.SIGNAL_QUALITY_DEGRADED.value,
+                duration_seconds=round(metadata.duration_seconds, 3),
+                active_speech_duration_seconds=total_active_speech,
+                original_sample_rate=metadata.original_sample_rate,
+                original_channels=metadata.original_channels,
+                total_windows=num_windows,
+                eligible_windows=0,
+                reliable_window_count=0,
+                limited_reliability_window_count=limited_reliability_window_count,
+                insufficient_reliability_window_count=insufficient_reliability_window_count,
+                quality_origin_verdict_allowed=False,
+                mean_synthetic_score=None,
+                max_synthetic_score=None,
+                mean_synthetic_likelihood=None,
+                max_synthetic_likelihood=None,
+                score_is_calibrated=False,
+                effective_threshold=effective_threshold,
+                operating_threshold_source="unvalidated_heuristic",
+                is_synthetic_suspected=False,
+                final_decision_state=DecisionState.UNCERTAIN.value,
+                temporal_rule_explanation=explanation,
+                windows=windows,
+                is_mock_detector=is_mock,
+                config_hash=effective_config_hash,
+                metadata=res_metadata,
+                disclaimers=Disclaimers(),
+            )
+        else:
+            # Case C: No RELIABLE windows and no LIMITED windows (all windows INSUFFICIENT)
+            explanation = (
+                f"Insufficient active speech detected across file ({total_active_speech:.2f}s active speech "
+                f"below required minimum threshold of {effective_min_speech:.2f}s). Decision abstained — does "
+                "not evaluate synthetic anomalies without active speech. (Note: Energy VAD is a heuristic, "
+                "not an infallible speech detector)."
+            )
+            return FileInferenceResult(
+                file_path=path_str,
+                status="insufficient_evidence",
+                abstain_reason=ReasonCode.INSUFFICIENT_SPEECH_DURATION.value,
+                duration_seconds=round(metadata.duration_seconds, 3),
+                active_speech_duration_seconds=total_active_speech,
+                original_sample_rate=metadata.original_sample_rate,
+                original_channels=metadata.original_channels,
+                total_windows=num_windows,
+                eligible_windows=0,
+                reliable_window_count=0,
+                limited_reliability_window_count=0,
+                insufficient_reliability_window_count=insufficient_reliability_window_count,
+                quality_origin_verdict_allowed=False,
+                mean_synthetic_score=None,
+                max_synthetic_score=None,
+                mean_synthetic_likelihood=None,
+                max_synthetic_likelihood=None,
+                score_is_calibrated=False,
+                effective_threshold=effective_threshold,
+                operating_threshold_source="unvalidated_heuristic",
+                is_synthetic_suspected=False,
+                final_decision_state=DecisionState.INSUFFICIENT_EVIDENCE.value,
+                temporal_rule_explanation=explanation,
+                windows=windows,
+                is_mock_detector=is_mock,
+                config_hash=effective_config_hash,
+                metadata=res_metadata,
+                disclaimers=Disclaimers(),
+            )
 
     valid_scores = [w.synthetic_score for w in eligible_windows if w.synthetic_score is not None]
     mean_score = float(np.mean(valid_scores)) if valid_scores else 0.0
@@ -677,49 +900,74 @@ def evaluate_audio(
         1 for window in eligible_windows if window.decision_state == DecisionState.HIGH.value
     )
 
-    if high_window_count > 0:
-        aggregate_state = DecisionState.HIGH
-    elif uncertain_window_count > 0 or raw_high_window_count > 0:
-        aggregate_state = DecisionState.UNCERTAIN
-    elif all(window.decision_state == DecisionState.LOW.value for window in eligible_windows):
-        aggregate_state = DecisionState.LOW
-    else:
-        aggregate_state = DecisionState.UNCERTAIN
-
-    file_suspected = aggregate_state == DecisionState.HIGH
-    explanation = (
-        f"Offline advisory aggregation: mean raw score {mean_score:.3f}, peak raw score "
-        f"{max_score:.3f}, effective threshold {effective_threshold:.3f}; "
-        f"{raw_high_window_count} raw threshold crossing(s), {uncertain_window_count} "
-        f"uncertain window(s), and {high_window_count} sustained HIGH window(s). "
-        f"Sustained elevation occurred: {'yes' if file_suspected else 'no'}. "
-    )
-    if aggregate_state == DecisionState.HIGH:
-        explanation += (
-            "Sustained synthetic acoustic anomaly detected across temporal decision policy. "
-            "Pause and verify through a known independent channel. Do not automatically "
-            "terminate or block calls."
-        )
-    elif aggregate_state == DecisionState.UNCERTAIN:
-        explanation += (
-            "Isolated or ambiguous synthetic acoustic anomaly detected; evidence is mixed "
-            "or not sustained. Advisory metric only and does NOT prove identity of caller."
+    if limited_reliability_window_count > 0:
+        # Case A: At least one LIMITED window (with at least one RELIABLE window)
+        file_status = "limited_reliability"
+        aggregate_state_str = DecisionState.UNCERTAIN.value
+        file_suspected = False
+        quality_origin_verdict_allowed = False
+        abstain_reason = ReasonCode.SIGNAL_QUALITY_DEGRADED.value
+        explanation = (
+            f"Offline advisory aggregation: {limited_reliability_window_count} of {num_windows} window(s) "
+            f"had degraded signal quality ({reliable_window_count} reliable, {insufficient_reliability_window_count} insufficient). "
+            f"Reliable window evidence: mean raw score {mean_score:.3f}, peak raw score {max_score:.3f}, "
+            f"{raw_high_window_count} raw high threshold crossing(s), {high_window_count} sustained HIGH window(s). "
+            "Degraded input quality prevented a binary origin verdict; primary file verdict abstained. "
+            "Audio quality is a separate reliability signal and does not constitute evidence of human or synthetic origin."
         )
     else:
-        explanation += (
-            "All eligible windows remained LOW; advisory metric only and does NOT "
-            "authenticate speech."
+        # Case B: No LIMITED windows and at least one RELIABLE window
+        file_status = "success"
+        quality_origin_verdict_allowed = True
+        abstain_reason = None
+        if high_window_count > 0:
+            aggregate_state = DecisionState.HIGH
+        elif uncertain_window_count > 0 or raw_high_window_count > 0:
+            aggregate_state = DecisionState.UNCERTAIN
+        elif all(window.decision_state == DecisionState.LOW.value for window in eligible_windows):
+            aggregate_state = DecisionState.LOW
+        else:
+            aggregate_state = DecisionState.UNCERTAIN
+        aggregate_state_str = aggregate_state.value
+        file_suspected = aggregate_state == DecisionState.HIGH
+        explanation = (
+            f"Offline advisory aggregation: mean raw score {mean_score:.3f}, peak raw score "
+            f"{max_score:.3f}, effective threshold {effective_threshold:.3f}; "
+            f"{raw_high_window_count} raw threshold crossing(s), {uncertain_window_count} "
+            f"uncertain window(s), and {high_window_count} sustained HIGH window(s). "
+            f"Sustained elevation occurred: {'yes' if file_suspected else 'no'}. "
         )
+        if aggregate_state == DecisionState.HIGH:
+            explanation += (
+                "Sustained synthetic acoustic anomaly detected across temporal decision policy. "
+                "Pause and verify through a known independent channel. Do not automatically "
+                "terminate or block calls."
+            )
+        elif aggregate_state == DecisionState.UNCERTAIN:
+            explanation += (
+                "Isolated or ambiguous synthetic acoustic anomaly detected; evidence is mixed "
+                "or not sustained. Advisory metric only and does NOT prove identity of caller."
+            )
+        else:
+            explanation += (
+                "All eligible windows remained LOW; advisory metric only and does NOT "
+                "authenticate speech."
+            )
 
     return FileInferenceResult(
         file_path=path_str,
-        status="success",
+        status=file_status,
+        abstain_reason=abstain_reason,
         duration_seconds=round(metadata.duration_seconds, 3),
         active_speech_duration_seconds=total_active_speech,
         original_sample_rate=metadata.original_sample_rate,
         original_channels=metadata.original_channels,
         total_windows=num_windows,
         eligible_windows=num_eligible,
+        reliable_window_count=reliable_window_count,
+        limited_reliability_window_count=limited_reliability_window_count,
+        insufficient_reliability_window_count=insufficient_reliability_window_count,
+        quality_origin_verdict_allowed=quality_origin_verdict_allowed,
         raw_high_window_count=raw_high_window_count,
         uncertain_window_count=uncertain_window_count,
         high_window_count=high_window_count,
@@ -731,7 +979,7 @@ def evaluate_audio(
         effective_threshold=effective_threshold,
         operating_threshold_source="unvalidated_heuristic",
         is_synthetic_suspected=file_suspected,
-        final_decision_state=aggregate_state.value,
+        final_decision_state=aggregate_state_str,
         temporal_rule_explanation=explanation,
         windows=windows,
         is_mock_detector=is_mock,

@@ -8,6 +8,11 @@ import numpy as np
 from pydantic import BaseModel, Field
 
 from voiceshield.config.schema import TemporalPolicyConfig, WindowingConfig
+from voiceshield.dsp.reliability import (
+    InputReliabilityAssessment,
+    ReliabilityReason,
+    ReliabilityState,
+)
 
 
 class DecisionState(StrEnum):
@@ -144,6 +149,69 @@ class TemporalDecisionPolicy:
                 f"Active speech ({speech_seconds:.2f}s) is below required minimum threshold "
                 f"({self.window_cfg.min_speech_seconds:.2f}s) for reliable inference."
             ),
+            window_index=window_index,
+            window_start_sec=window_start_sec,
+            window_end_sec=window_end_sec,
+            speech_seconds=speech_seconds,
+            history_scores=list(self.smoothed_history[-5:]),
+        )
+
+    def evaluate_reliability_abstention(
+        self,
+        assessment: InputReliabilityAssessment,
+        window_index: int = 0,
+        window_start_sec: float = 0.0,
+        window_end_sec: float = 0.0,
+        speech_seconds: float = 0.0,
+    ) -> TemporalDecision:
+        """Emit a structured temporal decision for non-reliable audio windows.
+
+        Advisory output only: indicates signal quality or speech duration degradation;
+        does not interpret quality as evidence of human or synthetic speech.
+        """
+        if not isinstance(assessment, InputReliabilityAssessment):
+            raise TypeError(
+                f"assessment must be an InputReliabilityAssessment, got {type(assessment).__name__}"
+            )
+
+        if assessment.state == ReliabilityState.RELIABLE or assessment.origin_verdict_allowed:
+            raise ValueError(
+                "Cannot evaluate reliability abstention for a RELIABLE assessment with origin_verdict_allowed=True"
+            )
+
+        # Backward compatibility: pure insufficient speech delegates to existing behavior
+        if assessment.reasons == (ReliabilityReason.INSUFFICIENT_SPEECH,):
+            return self.evaluate_insufficient_speech(
+                window_index=window_index,
+                window_start_sec=window_start_sec,
+                window_end_sec=window_end_sec,
+                speech_seconds=speech_seconds,
+            )
+
+        self.window_count += 1
+
+        state: DecisionState
+        if assessment.state == ReliabilityState.LIMITED:
+            state = DecisionState.UNCERTAIN
+        elif assessment.state == ReliabilityState.INSUFFICIENT:
+            state = DecisionState.INSUFFICIENT_EVIDENCE
+        else:
+            raise ValueError(f"Unexpected reliability state: {assessment.state}")
+
+        reasons_str = ", ".join(r.value for r in assessment.reasons)
+        details = (
+            f"Input reliability is {assessment.state.value} due to: {reasons_str}. "
+            f"{assessment.explanation}"
+        )
+
+        return TemporalDecision(
+            state=state,
+            synthetic_score=None,
+            score_is_calibrated=False,
+            calibrated_score=None,
+            smoothed_score=self.smoothed_history[-1] if self.smoothed_history else 0.0,
+            reason=ReasonCode.SIGNAL_QUALITY_DEGRADED,
+            reason_details=details,
             window_index=window_index,
             window_start_sec=window_start_sec,
             window_end_sec=window_end_sec,
