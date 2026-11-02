@@ -221,6 +221,11 @@ class FileInferenceResult(BaseModel):
         ge=0,
         description="Number of evaluated windows classified as insufficient reliability.",
     )
+    degraded_quality_window_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of evaluated windows whose reasons contain at least one degraded-quality (LIMITED_REASONS) member. Overlapping and reason-based.",
+    )
     quality_origin_verdict_allowed: bool = Field(
         default=False,
         description="Whether overall input audio quality allows an origin verdict (synthetic vs human).",
@@ -346,6 +351,7 @@ def _validate_window_safety_contracts(
     reliable_window_count: int,
     limited_reliability_window_count: int,
     insufficient_reliability_window_count: int,
+    degraded_quality_window_count: int,
     num_eligible: int,
 ) -> None:
     """Validate runtime safety contracts for evaluated windows fail-closed."""
@@ -359,6 +365,15 @@ def _validate_window_safety_contracts(
             f"Reliability window counters invariant violated: reliable ({reliable_window_count}) + "
             f"limited ({limited_reliability_window_count}) + insufficient ({insufficient_reliability_window_count}) "
             f"= {total_reliability_counts}, but total_windows is {num_windows}."
+        )
+
+    expected_degraded_quality_window_count = sum(
+        1 for w in windows if any(r in LIMITED_REASONS for r in w.input_reliability.reasons)
+    )
+    if degraded_quality_window_count != expected_degraded_quality_window_count:
+        raise RuntimeError(
+            f"Degraded quality window count invariant violated: supplied ({degraded_quality_window_count}) "
+            f"!= derived from window reasons ({expected_degraded_quality_window_count})."
         )
 
     if num_eligible != reliable_window_count:
@@ -664,6 +679,7 @@ def evaluate_audio(
             reliable_window_count=0,
             limited_reliability_window_count=0,
             insufficient_reliability_window_count=0,
+            degraded_quality_window_count=0,
             quality_origin_verdict_allowed=False,
             mean_synthetic_score=None,
             max_synthetic_score=None,
@@ -791,6 +807,9 @@ def evaluate_audio(
     insufficient_reliability_window_count = sum(
         1 for w in windows if w.input_reliability.state == ReliabilityState.INSUFFICIENT
     )
+    degraded_quality_window_count = sum(
+        1 for w in windows if any(r in LIMITED_REASONS for r in w.input_reliability.reasons)
+    )
 
     eligible_windows = [w for w in windows if w.is_eligible]
     num_eligible = len(eligible_windows)
@@ -802,13 +821,14 @@ def evaluate_audio(
         reliable_window_count=reliable_window_count,
         limited_reliability_window_count=limited_reliability_window_count,
         insufficient_reliability_window_count=insufficient_reliability_window_count,
+        degraded_quality_window_count=degraded_quality_window_count,
         num_eligible=num_eligible,
     )
 
     # 7. Fail-closed aggregation
     if num_eligible == 0:
         if limited_reliability_window_count > 0:
-            # Case D: No RELIABLE windows but one or more LIMITED windows
+            # Case D: No RELIABLE windows but one or more exact LIMITED windows
             explanation = (
                 f"Offline advisory aggregation: no reliable speech windows were available and "
                 f"{limited_reliability_window_count} of {num_windows} window(s) had degraded signal quality. "
@@ -828,6 +848,7 @@ def evaluate_audio(
                 reliable_window_count=0,
                 limited_reliability_window_count=limited_reliability_window_count,
                 insufficient_reliability_window_count=insufficient_reliability_window_count,
+                degraded_quality_window_count=degraded_quality_window_count,
                 quality_origin_verdict_allowed=False,
                 mean_synthetic_score=None,
                 max_synthetic_score=None,
@@ -846,13 +867,19 @@ def evaluate_audio(
                 disclaimers=Disclaimers(),
             )
         else:
-            # Case C: No RELIABLE windows and no LIMITED windows (all windows INSUFFICIENT)
+            # Case C: No RELIABLE windows and no exact LIMITED windows (all windows INSUFFICIENT)
             explanation = (
                 f"Insufficient active speech detected across file ({total_active_speech:.2f}s active speech "
                 f"below required minimum threshold of {effective_min_speech:.2f}s). Decision abstained — does "
                 "not evaluate synthetic anomalies without active speech. (Note: Energy VAD is a heuristic, "
                 "not an infallible speech detector)."
             )
+            if degraded_quality_window_count > 0:
+                explanation += (
+                    f" Note: {degraded_quality_window_count} of {num_windows} window(s) exhibited degraded signal quality "
+                    "diagnostics, but insufficient active speech remains the primary status because no inference-eligible "
+                    "evidence was available."
+                )
             return FileInferenceResult(
                 file_path=path_str,
                 status="insufficient_evidence",
@@ -866,6 +893,7 @@ def evaluate_audio(
                 reliable_window_count=0,
                 limited_reliability_window_count=0,
                 insufficient_reliability_window_count=insufficient_reliability_window_count,
+                degraded_quality_window_count=degraded_quality_window_count,
                 quality_origin_verdict_allowed=False,
                 mean_synthetic_score=None,
                 max_synthetic_score=None,
@@ -900,15 +928,15 @@ def evaluate_audio(
         1 for window in eligible_windows if window.decision_state == DecisionState.HIGH.value
     )
 
-    if limited_reliability_window_count > 0:
-        # Case A: At least one LIMITED window (with at least one RELIABLE window)
+    if degraded_quality_window_count > 0:
+        # Case A: At least one degraded quality window (with at least one RELIABLE window)
         file_status = "limited_reliability"
         aggregate_state_str = DecisionState.UNCERTAIN.value
         file_suspected = False
         quality_origin_verdict_allowed = False
         abstain_reason = ReasonCode.SIGNAL_QUALITY_DEGRADED.value
         explanation = (
-            f"Offline advisory aggregation: {limited_reliability_window_count} of {num_windows} window(s) "
+            f"Offline advisory aggregation: {degraded_quality_window_count} of {num_windows} window(s) "
             f"had degraded signal quality ({reliable_window_count} reliable, {insufficient_reliability_window_count} insufficient). "
             f"Reliable window evidence: mean raw score {mean_score:.3f}, peak raw score {max_score:.3f}, "
             f"{raw_high_window_count} raw high threshold crossing(s), {high_window_count} sustained HIGH window(s). "
@@ -916,7 +944,7 @@ def evaluate_audio(
             "Audio quality is a separate reliability signal and does not constitute evidence of human or synthetic origin."
         )
     else:
-        # Case B: No LIMITED windows and at least one RELIABLE window
+        # Case B: No degraded quality windows and at least one RELIABLE window
         file_status = "success"
         quality_origin_verdict_allowed = True
         abstain_reason = None
@@ -967,6 +995,7 @@ def evaluate_audio(
         reliable_window_count=reliable_window_count,
         limited_reliability_window_count=limited_reliability_window_count,
         insufficient_reliability_window_count=insufficient_reliability_window_count,
+        degraded_quality_window_count=degraded_quality_window_count,
         quality_origin_verdict_allowed=quality_origin_verdict_allowed,
         raw_high_window_count=raw_high_window_count,
         uncertain_window_count=uncertain_window_count,

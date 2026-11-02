@@ -212,6 +212,7 @@ class ServerStopAck(BaseModel):
     reliable_window_count: int = 0
     limited_reliability_window_count: int = 0
     insufficient_reliability_window_count: int = 0
+    degraded_quality_window_count: int = 0
     quality_origin_verdict_allowed: bool = False
     final_decision_state: str = "insufficient_evidence"
 
@@ -800,6 +801,11 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                         final_reason = ReasonCode.SIGNAL_QUALITY_DEGRADED.value
                         final_decision_state = "uncertain"
                         quality_origin_verdict_allowed = False
+                    elif total_eligible_evaluated > 0 and session.degraded_quality_window_count > 0:
+                        final_status = "limited_reliability"
+                        final_reason = ReasonCode.SIGNAL_QUALITY_DEGRADED.value
+                        final_decision_state = "uncertain"
+                        quality_origin_verdict_allowed = False
                     elif total_eligible_evaluated > 0:
                         final_status = "success"
                         final_reason = None
@@ -823,6 +829,7 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                             reliable_window_count=session.reliable_window_count,
                             limited_reliability_window_count=session.limited_reliability_window_count,
                             insufficient_reliability_window_count=session.insufficient_reliability_window_count,
+                            degraded_quality_window_count=session.degraded_quality_window_count,
                             quality_origin_verdict_allowed=quality_origin_verdict_allowed,
                             final_decision_state=final_decision_state,
                         ).model_dump()

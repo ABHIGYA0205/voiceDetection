@@ -234,6 +234,7 @@ class StreamingSession:
         self.reliable_window_count: int = 0
         self.limited_reliability_window_count: int = 0
         self.insufficient_reliability_window_count: int = 0
+        self.degraded_quality_window_count: int = 0
 
     @property
     def is_finalized(self) -> bool:
@@ -337,6 +338,7 @@ class StreamingSession:
         self.reliable_window_count = 0
         self.limited_reliability_window_count = 0
         self.insufficient_reliability_window_count = 0
+        self.degraded_quality_window_count = 0
 
     def _process_logical_window(
         self,
@@ -373,6 +375,9 @@ class StreamingSession:
             self.insufficient_reliability_window_count += 1
         else:
             raise RuntimeError(f"Unknown reliability state: {reliability.state}")
+
+        if any(r in LIMITED_REASONS for r in reliability.reasons):
+            self.degraded_quality_window_count += 1
 
         expected_total = (
             self.reliable_window_count

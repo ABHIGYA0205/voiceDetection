@@ -92,6 +92,22 @@ def make_short_speech(
     return np.asarray(signal, dtype=np.float32)
 
 
+def make_short_clipped_speech(
+    duration_sec: float = 4.0,
+    speech_duration_sec: float = 0.5,
+    sample_rate: int = 16000,
+    freq: float = 300.0,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Generate audio with active speech duration below 0.8s AND severe digital clipping."""
+    num_samples = int(round(duration_sec * sample_rate))
+    speech_samples = int(round(speech_duration_sec * sample_rate))
+    signal = np.zeros(num_samples, dtype=np.float32)
+    t_sp = np.linspace(0, speech_duration_sec, speech_samples, endpoint=False, dtype=np.float32)
+    raw = 1.5 * np.sin(2.0 * np.pi * freq * t_sp)
+    signal[:speech_samples] = np.clip(raw, -1.0, 1.0)
+    return np.asarray(signal, dtype=np.float32)
+
+
 def to_pcm16_bytes(samples: np.ndarray[Any, np.dtype[np.float32]]) -> bytes:
     """Convert float32 samples in [-1.0, 1.0] to int16 PCM byte string."""
     clamped = np.clip(samples, -1.0, 1.0)
@@ -266,6 +282,7 @@ def test_silence_is_insufficient_signal_quality_degraded_zero_detector_calls() -
     assert session.insufficient_reliability_window_count == 1
     assert session.reliable_window_count == 0
     assert session.limited_reliability_window_count == 0
+    assert session.degraded_quality_window_count == 0
     assert session.total_windows_generated == 1
 
 
@@ -289,6 +306,7 @@ def test_pure_short_speech_retains_insufficient_speech_duration() -> None:
     assert session.insufficient_reliability_window_count == 1
     assert session.reliable_window_count == 0
     assert session.limited_reliability_window_count == 0
+    assert session.degraded_quality_window_count == 0
 
 
 def test_abstentions_do_not_mutate_score_histories() -> None:
@@ -454,12 +472,14 @@ def test_session_reset_clears_all_counters_and_state() -> None:
     assert session.total_windows_generated > 0
     assert session.reliable_window_count > 0
     assert session.limited_reliability_window_count > 0
+    assert session.degraded_quality_window_count > 0
 
     session.reset()
 
     assert session.reliable_window_count == 0
     assert session.limited_reliability_window_count == 0
     assert session.insufficient_reliability_window_count == 0
+    assert session.degraded_quality_window_count == 0
     assert session.total_windows_generated == 0
     assert session.total_windows_dropped == 0
     assert session.has_pending_window is False
@@ -572,6 +592,7 @@ def test_websocket_clean_window_json_contract() -> None:
                 assert stop_ack is not None
                 assert stop_ack["reliable_window_count"] == 1
                 assert stop_ack["limited_reliability_window_count"] == 0
+                assert stop_ack["degraded_quality_window_count"] == 0
                 assert stop_ack["quality_origin_verdict_allowed"] is True
 
                 assert detector.call_count == 1
@@ -646,6 +667,7 @@ def test_websocket_limited_reliability_signals(
                 assert stop_ack["status"] == "limited_reliability"
                 assert stop_ack["final_decision_state"] == "uncertain"
                 assert stop_ack["final_reason"] == "signal_quality_degraded"
+                assert stop_ack["degraded_quality_window_count"] == 1
                 assert stop_ack["quality_origin_verdict_allowed"] is False
         finally:
             app.state.detector = orig
@@ -699,6 +721,7 @@ def test_websocket_silence_json_contract() -> None:
                 assert stop_ack is not None
                 assert stop_ack["status"] == "insufficient_evidence"
                 assert stop_ack["final_reason"] == "insufficient_speech_duration"
+                assert stop_ack["degraded_quality_window_count"] == 0
                 assert stop_ack["quality_origin_verdict_allowed"] is False
         finally:
             app.state.detector = orig
@@ -774,6 +797,7 @@ def test_sustained_high_followed_by_limited_produces_limited_reliability_stopack
                 assert stop_ack["final_reason"] == "signal_quality_degraded"
                 assert stop_ack["quality_origin_verdict_allowed"] is False
                 assert stop_ack["limited_reliability_window_count"] > 0
+                assert stop_ack["degraded_quality_window_count"] > 0
                 assert stop_ack["reliable_window_count"] > 0
         finally:
             app.state.detector = orig
@@ -837,6 +861,7 @@ def test_websocket_stop_precedence_all_cases() -> None:
                 assert stop_ack["total_windows_generated"] == 0
                 assert stop_ack["status"] == "insufficient_evidence"
                 assert stop_ack["final_reason"] == "insufficient_contiguous_audio"
+                assert stop_ack["degraded_quality_window_count"] == 0
                 assert stop_ack["quality_origin_verdict_allowed"] is False
                 assert stop_ack["final_decision_state"] == "insufficient_evidence"
 
@@ -880,6 +905,7 @@ def test_websocket_stop_precedence_all_cases() -> None:
                 assert stop_ack["reliable_window_count"] > 0
                 assert stop_ack["insufficient_reliability_window_count"] > 0
                 assert stop_ack["limited_reliability_window_count"] == 0
+                assert stop_ack["degraded_quality_window_count"] == 0
                 assert stop_ack["status"] == "success"
                 assert stop_ack["quality_origin_verdict_allowed"] is True
                 assert stop_ack["final_reason"] is None
@@ -900,5 +926,219 @@ def test_websocket_stop_precedence_all_cases() -> None:
                 # Verify detector was never called for this silence window:
                 # call count matches reliable window count
                 assert detector.call_count == stop_ack["reliable_window_count"]
+        finally:
+            app.state.detector = orig
+
+
+# ==============================================================================
+# Stage A4: Mixed-Reason Degraded-Quality Aggregation Tests
+# ==============================================================================
+
+
+def test_streaming_session_reliable_evidence_followed_by_short_clipped_window() -> None:
+    """Stage A4 Test D (unit): Session with reliable evidence followed by short clipped window."""
+    session = StreamingSession()
+
+    # 1. Chunk 0: 1.0s clean speech + 3.0s silence -> generates Window 0 (RELIABLE)
+    t0 = np.linspace(0, 1.0, 16000, endpoint=False, dtype=np.float32)
+    c0 = np.zeros(64000, dtype=np.float32)
+    c0[:16000] = 0.4 * np.sin(2 * np.pi * 300.0 * t0)
+
+    res0 = session.ingest_pcm(c0, sample_rate=16000)
+    assert res0.window_ready is True
+    assert session.reliable_window_count == 1
+    assert session.limited_reliability_window_count == 0
+    assert session.insufficient_reliability_window_count == 0
+    assert session.degraded_quality_window_count == 0
+
+    w0 = session.pop_pending_window()
+    assert w0 is not None
+    assert w0.is_eligible is True
+    assert w0.input_reliability.state == ReliabilityState.RELIABLE
+    session.complete_inference(synthetic_score=0.85, window=w0)
+
+    # 2. Chunk 1: 0.5s clipped speech + 0.5s silence (1.0s total -> completes Window 1)
+    c1 = np.zeros(16000, dtype=np.float32)
+    t1 = np.linspace(0, 0.5, 8000, endpoint=False, dtype=np.float32)
+    c1[:8000] = np.clip(1.5 * np.sin(2 * np.pi * 300.0 * t1), -1.0, 1.0)
+
+    res1 = session.ingest_pcm(c1, sample_rate=16000)
+    assert res1.window_ready is True
+    assert res1.pending_window_available is False
+    assert session.has_pending_window is False
+
+    # Counters: limited unchanged (0), insufficient increments (1), degraded increments (1)
+    assert session.reliable_window_count == 1
+    assert session.limited_reliability_window_count == 0
+    assert session.insufficient_reliability_window_count == 1
+    assert session.degraded_quality_window_count == 1
+    assert session.total_windows_generated == 2
+
+    # Invariant: reliable + limited + insufficient == total
+    assert (
+        session.reliable_window_count
+        + session.limited_reliability_window_count
+        + session.insufficient_reliability_window_count
+        == session.total_windows_generated
+    )
+
+    # Immediate abstention for the mixed-reason window
+    assert len(res1.immediate_abstentions) == 1
+    abs1 = res1.immediate_abstentions[0]
+    assert abs1.input_reliability.state == ReliabilityState.INSUFFICIENT
+    assert ReliabilityReason.INSUFFICIENT_SPEECH in abs1.input_reliability.reasons
+    assert ReliabilityReason.SEVERE_CLIPPING in abs1.input_reliability.reasons
+    assert abs1.input_reliability.origin_verdict_allowed is False
+    assert abs1.decision.synthetic_score is None
+    assert abs1.decision.state == DecisionState.INSUFFICIENT_EVIDENCE
+    assert abs1.decision.reason == ReasonCode.SIGNAL_QUALITY_DEGRADED
+
+
+def test_websocket_reliable_evidence_followed_by_short_clipped_window() -> None:
+    """Stage A4 Test D (integration): WebSocket with reliable evidence followed by short clipped window."""
+    detector = RecordingDetector(score=0.85)
+    with TestClient(app) as client:
+        orig = getattr(app.state, "detector", None)
+        app.state.detector = detector
+        try:
+            with client.websocket_connect("/api/v1/stream") as ws:
+                ws.send_json(
+                    {
+                        "type": "start",
+                        "sample_rate": 16000,
+                        "channels": 1,
+                        "pcm_encoding": "int16",
+                    }
+                )
+                start_ack = ws.receive_json()
+                assert start_ack["type"] == "session_started"
+
+                # 1. Send 1.0s clean active speech + 3.0s silence -> generates Window 0 (RELIABLE)
+                t0 = np.linspace(0, 1.0, 16000, endpoint=False, dtype=np.float32)
+                c0 = np.zeros(64000, dtype=np.float32)
+                c0[:16000] = 0.4 * np.sin(2 * np.pi * 300.0 * t0)
+
+                ws.send_bytes(to_pcm16_bytes(c0))
+                res0 = receive_window_result(ws, 0)
+                assert res0["is_eligible"] is True
+                assert res0["input_reliability"]["state"] == "reliable"
+                assert detector.call_count == 1
+
+                # 2. Send 0.5s clipped active speech + 0.5s silence -> completes Window 1
+                c1 = np.zeros(16000, dtype=np.float32)
+                t1 = np.linspace(0, 0.5, 8000, endpoint=False, dtype=np.float32)
+                c1[:8000] = np.clip(1.5 * np.sin(2 * np.pi * 300.0 * t1), -1.0, 1.0)
+
+                ws.send_bytes(to_pcm16_bytes(c1))
+                res1 = receive_window_result(ws, 1)
+
+                # Mixed window state is INSUFFICIENT
+                assert res1["input_reliability"]["state"] == "insufficient"
+                # Reasons contain INSUFFICIENT_SPEECH and SEVERE_CLIPPING
+                assert "insufficient_speech" in res1["input_reliability"]["reasons"]
+                assert "severe_clipping" in res1["input_reliability"]["reasons"]
+                # All model score fields for that window are null
+                assert res1["is_eligible"] is False
+                assert res1["synthetic_score"] is None
+                assert res1["uncalibrated_synthetic_score"] is None
+                assert res1["raw_score"] is None
+                assert res1["calibrated_score"] is None
+                assert res1["score_is_calibrated"] is False
+                # No detector call occurs for that window
+                assert detector.call_count == 1
+
+                # 3. Stop session
+                ws.send_json({"type": "stop"})
+                stop_ack = None
+                while True:
+                    msg = ws.receive_json()
+                    if msg["type"] == "session_stopped":
+                        stop_ack = msg
+                        break
+
+                assert stop_ack is not None
+                # Stop status is limited_reliability / uncertain
+                assert stop_ack["status"] == "limited_reliability"
+                assert stop_ack["final_decision_state"] == "uncertain"
+                assert stop_ack["final_reason"] == "signal_quality_degraded"
+                assert stop_ack["quality_origin_verdict_allowed"] is False
+                # Counters: limited_reliability_window_count remains unchanged (0)
+                assert stop_ack["limited_reliability_window_count"] == 0
+                # insufficient_reliability_window_count increments (1)
+                assert stop_ack["insufficient_reliability_window_count"] == 1
+                # degraded_quality_window_count increments (1)
+                assert stop_ack["degraded_quality_window_count"] == 1
+                assert stop_ack["reliable_window_count"] == 1
+                assert detector.call_count == 1
+        finally:
+            app.state.detector = orig
+
+
+def test_streaming_marginal_snr_insufficient_forces_limited_reliability() -> None:
+    """Stage A4: 4s canonical marginal-SNR signal below VAD threshold forces streaming limited_reliability."""
+    detector = RecordingDetector(score=0.90)
+    with TestClient(app) as client:
+        orig = getattr(app.state, "detector", None)
+        app.state.detector = detector
+        try:
+            with client.websocket_connect("/api/v1/stream") as ws:
+                ws.send_json(
+                    {
+                        "type": "start",
+                        "sample_rate": 16000,
+                        "channels": 1,
+                        "pcm_encoding": "int16",
+                    }
+                )
+                ws.receive_json()
+
+                # Send 4.0s of canonical marginal-SNR signal (RMS ~ 0.012, peak ~ 0.013, SNR ~ 1.4 dB)
+                sr = 16000
+                t = np.linspace(0, 4.0, int(sr * 4.0), endpoint=False, dtype=np.float32)
+                samples = (0.012 + 0.001 * np.sin(2.0 * np.pi * 300.0 * t)).astype(np.float32)
+                ws.send_bytes(to_pcm16_bytes(samples))
+
+                res0 = receive_window_result(ws, 0)
+                # Window state is insufficient
+                assert res0["input_reliability"]["state"] == "insufficient"
+                # Reasons contain insufficient_speech and marginal_snr
+                assert "insufficient_speech" in res0["input_reliability"]["reasons"]
+                assert "marginal_snr" in res0["input_reliability"]["reasons"]
+                assert "severe_clipping" not in res0["input_reliability"]["reasons"]
+                assert "low_energy" not in res0["input_reliability"]["reasons"]
+
+                # Detector call count remains zero
+                assert detector.call_count == 0
+
+                # All model score fields are null
+                assert res0["is_eligible"] is False
+                assert res0["synthetic_score"] is None
+                assert res0["uncalibrated_synthetic_score"] is None
+                assert res0["raw_score"] is None
+                assert res0["calibrated_score"] is None
+                assert res0["score_is_calibrated"] is False
+
+                # Stop session
+                ws.send_json({"type": "stop"})
+                stop_ack = None
+                while True:
+                    msg = ws.receive_json()
+                    if msg["type"] == "session_stopped":
+                        stop_ack = msg
+                        break
+
+                assert stop_ack is not None
+                # Stop status is insufficient_evidence
+                assert stop_ack["status"] == "insufficient_evidence"
+                assert stop_ack["final_decision_state"] == "insufficient_evidence"
+                assert stop_ack["final_reason"] == "insufficient_speech_duration"
+                # Origin verdict is forbidden
+                assert stop_ack["quality_origin_verdict_allowed"] is False
+                # Counters: preserve degraded diagnostic count
+                assert stop_ack["degraded_quality_window_count"] == 1
+                assert stop_ack["limited_reliability_window_count"] == 0
+                assert stop_ack["insufficient_reliability_window_count"] == 1
+                assert stop_ack["reliable_window_count"] == 0
+                assert detector.call_count == 0
         finally:
             app.state.detector = orig

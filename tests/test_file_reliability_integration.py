@@ -121,7 +121,7 @@ def make_silence_wav(path: Path, duration_s: float = 4.0, sr: int = 16000) -> Pa
 
 def make_short_speech_wav(
     path: Path,
-    speech_duration_s: float = 0.2,
+    speech_duration_s: float = 0.5,
     total_duration_s: float = 4.0,
     sr: int = 16000,
 ) -> Path:
@@ -130,6 +130,21 @@ def make_short_speech_wav(
     n_pulse = int(speech_duration_s * sr)
     t = np.linspace(0, speech_duration_s, n_pulse, endpoint=False, dtype=np.float32)
     samples[:n_pulse] = 0.5 * np.sin(2 * np.pi * 440.0 * t)
+    sf.write(str(path), samples, sr, format="WAV", subtype="PCM_16")
+    return path
+
+
+def make_short_clipped_wav(
+    path: Path,
+    speech_duration_s: float = 0.5,
+    total_duration_s: float = 4.0,
+    sr: int = 16000,
+) -> Path:
+    """Create an audio file where active speech duration is below threshold AND clipped."""
+    samples = np.zeros(int(sr * total_duration_s), dtype=np.float32)
+    n_pulse = int(speech_duration_s * sr)
+    t = np.linspace(0, speech_duration_s, n_pulse, endpoint=False, dtype=np.float32)
+    samples[:n_pulse] = np.clip(5.0 * np.sin(2 * np.pi * 300.0 * t), -1.0, 1.0)
     sf.write(str(path), samples, sr, format="WAV", subtype="PCM_16")
     return path
 
@@ -310,7 +325,9 @@ def test_short_speech_remains_insufficient_and_detector_not_called(tmp_path: Pat
     assert result.abstain_reason == ReasonCode.INSUFFICIENT_SPEECH_DURATION.value
     assert result.final_decision_state == DecisionState.INSUFFICIENT_EVIDENCE.value
     assert result.reliable_window_count == 0
+    assert result.limited_reliability_window_count == 0
     assert result.insufficient_reliability_window_count == 1
+    assert result.degraded_quality_window_count == 0
     assert result.quality_origin_verdict_allowed is False
 
     win = result.windows[0]
@@ -527,6 +544,7 @@ def test_reliable_windows_plus_pause_preserves_aggregation(tmp_path: Path) -> No
     assert result.reliable_window_count == 2
     assert result.insufficient_reliability_window_count == 1
     assert result.limited_reliability_window_count == 0
+    assert result.degraded_quality_window_count == 0
     assert result.eligible_windows == 2
 
     # Status must be success, origin verdict allowed, and aggregation preserved
@@ -691,10 +709,12 @@ def test_fastapi_json_includes_reliability_fields(tmp_path: Path) -> None:
         assert "reliable_window_count" in data
         assert "limited_reliability_window_count" in data
         assert "insufficient_reliability_window_count" in data
+        assert "degraded_quality_window_count" in data
         assert "quality_origin_verdict_allowed" in data
         assert data["reliable_window_count"] == 1
         assert data["limited_reliability_window_count"] == 0
         assert data["insufficient_reliability_window_count"] == 0
+        assert data["degraded_quality_window_count"] == 0
         assert data["quality_origin_verdict_allowed"] is True
 
         # Per-window assessment
@@ -888,6 +908,7 @@ def test_validate_window_safety_contracts_counter_mismatch() -> None:
             reliable_window_count=1,
             limited_reliability_window_count=0,
             insufficient_reliability_window_count=0,
+            degraded_quality_window_count=0,
             num_eligible=1,
         )
 
@@ -900,6 +921,7 @@ def test_validate_window_safety_contracts_eligible_mismatch() -> None:
             reliable_window_count=1,
             limited_reliability_window_count=0,
             insufficient_reliability_window_count=0,
+            degraded_quality_window_count=0,
             num_eligible=0,
         )
 
@@ -943,6 +965,7 @@ def test_validate_window_safety_contracts_eligible_violations() -> None:
             reliable_window_count=1,
             limited_reliability_window_count=0,
             insufficient_reliability_window_count=0,
+            degraded_quality_window_count=1,
             num_eligible=1,
         )
 
@@ -984,6 +1007,7 @@ def test_validate_window_safety_contracts_non_reliable_violations() -> None:
             reliable_window_count=0,
             limited_reliability_window_count=1,
             insufficient_reliability_window_count=0,
+            degraded_quality_window_count=1,
             num_eligible=0,
         )
 
@@ -1007,5 +1031,228 @@ def test_validate_window_safety_contracts_non_reliable_violations() -> None:
             reliable_window_count=0,
             limited_reliability_window_count=1,
             insufficient_reliability_window_count=0,
+            degraded_quality_window_count=1,
             num_eligible=0,
         )
+
+
+# ===========================================================================
+# Stage A4: Mixed-Reason Degraded-Quality Aggregation Parity Tests
+# ===========================================================================
+
+
+def test_mixed_reason_insufficient_plus_reliable_low_forces_limited_reliability(
+    tmp_path: Path,
+) -> None:
+    """Stage A4 Test A: Uploaded file containing one reliable LOW window plus one short clipped INSUFFICIENT window."""
+    sr = 16000
+    t = np.linspace(0, 4.0, int(sr * 4.0), endpoint=False, dtype=np.float32)
+    s_clean = (0.5 * np.sin(2 * np.pi * 300.0 * t)).astype(np.float32)
+
+    s_short_clipped = np.zeros(int(sr * 4.0), dtype=np.float32)
+    n_pulse = int(0.5 * sr)
+    t_pulse = np.linspace(0, 0.5, n_pulse, endpoint=False, dtype=np.float32)
+    s_short_clipped[:n_pulse] = np.clip(5.0 * np.sin(2 * np.pi * 300.0 * t_pulse), -1.0, 1.0)
+
+    samples = np.concatenate([s_clean, s_short_clipped])
+    wav_path = tmp_path / "mixed_low_insufficient_clipped.wav"
+    sf.write(str(wav_path), samples, sr, format="WAV", subtype="PCM_16")
+
+    detector = CountingDetector(scores=[0.10, 0.99])
+    result = evaluate_audio(wav_path, detector=detector, window_seconds=4.0, hop_seconds=4.0)
+
+    # 1. Mixed window state is INSUFFICIENT
+    assert result.windows[1].input_reliability.state == ReliabilityState.INSUFFICIENT
+    # 2. Reasons include INSUFFICIENT_SPEECH and SEVERE_CLIPPING
+    assert ReliabilityReason.INSUFFICIENT_SPEECH in result.windows[1].input_reliability.reasons
+    assert ReliabilityReason.SEVERE_CLIPPING in result.windows[1].input_reliability.reasons
+    # 3. Counters: limited_reliability_window_count remains 0, insufficient is 1, degraded is 1
+    assert result.limited_reliability_window_count == 0
+    assert result.insufficient_reliability_window_count == 1
+    assert result.degraded_quality_window_count == 1
+    assert result.reliable_window_count == 1
+    assert result.total_windows == 2
+    # Invariant: reliable + limited + insufficient == total
+    assert (
+        result.reliable_window_count
+        + result.limited_reliability_window_count
+        + result.insufficient_reliability_window_count
+        == result.total_windows
+    )
+    # 4. Detector is called ONLY for the reliable window
+    assert detector.predict_calls == 1
+    assert result.windows[0].synthetic_score == 0.10
+    assert result.windows[1].synthetic_score is None
+    # 5. Final status is limited_reliability / uncertain
+    assert result.status == "limited_reliability"
+    assert result.final_decision_state == "uncertain"
+    # 6. Origin verdict is forbidden
+    assert result.quality_origin_verdict_allowed is False
+    assert result.is_synthetic_suspected is False
+    assert result.abstain_reason == ReasonCode.SIGNAL_QUALITY_DEGRADED.value
+
+
+def test_all_insufficient_mixed_reason_clipped_file_forces_limited_reliability(
+    tmp_path: Path,
+) -> None:
+    """Stage A4 Test B: Uploaded file with no reliable windows and one short clipped mixed-reason window."""
+    sr = 16000
+    s_short_clipped = np.zeros(int(sr * 4.0), dtype=np.float32)
+    n_pulse = int(0.5 * sr)
+    t_pulse = np.linspace(0, 0.5, n_pulse, endpoint=False, dtype=np.float32)
+    s_short_clipped[:n_pulse] = np.clip(5.0 * np.sin(2 * np.pi * 300.0 * t_pulse), -1.0, 1.0)
+
+    wav_path = tmp_path / "all_insufficient_clipped.wav"
+    sf.write(str(wav_path), s_short_clipped, sr, format="WAV", subtype="PCM_16")
+
+    detector = CountingDetector(scores=[0.99])
+    result = evaluate_audio(wav_path, detector=detector, window_seconds=4.0, hop_seconds=4.0)
+
+    # All model score/logit fields are null
+    assert result.mean_synthetic_score is None
+    assert result.max_synthetic_score is None
+    assert result.mean_synthetic_likelihood is None
+    assert result.max_synthetic_likelihood is None
+    assert result.windows[0].synthetic_score is None
+    assert result.windows[0].raw_spoof_logit is None
+    assert result.windows[0].raw_bonafide_logit is None
+    assert result.windows[0].raw_bonafide_score is None
+
+    # Detector call count is zero
+    assert detector.predict_calls == 0
+
+    # State counter remains INSUFFICIENT
+    assert result.reliable_window_count == 0
+    assert result.limited_reliability_window_count == 0
+    assert result.insufficient_reliability_window_count == 1
+    assert result.total_windows == 1
+    assert result.eligible_windows == 0
+
+    # Degraded counter is 1
+    assert result.degraded_quality_window_count == 1
+
+    # Final result is insufficient_evidence
+    assert result.status == "insufficient_evidence"
+    assert result.final_decision_state == "insufficient_evidence"
+    assert result.quality_origin_verdict_allowed is False
+    assert result.is_synthetic_suspected is False
+    assert result.abstain_reason == ReasonCode.INSUFFICIENT_SPEECH_DURATION.value
+
+
+def test_sustained_high_followed_by_mixed_reason_insufficient_forces_limited_reliability(
+    tmp_path: Path,
+) -> None:
+    """Stage A4 Test C: Sustained reliable HIGH uploaded evidence followed by a mixed-reason INSUFFICIENT degraded window."""
+    sr = 16000
+    t = np.linspace(0, 4.0, int(sr * 4.0), endpoint=False, dtype=np.float32)
+    s_clean = (0.5 * np.sin(2 * np.pi * 300.0 * t)).astype(np.float32)
+
+    s_short_clipped = np.zeros(int(sr * 4.0), dtype=np.float32)
+    n_pulse = int(0.5 * sr)
+    t_pulse = np.linspace(0, 0.5, n_pulse, endpoint=False, dtype=np.float32)
+    s_short_clipped[:n_pulse] = np.clip(5.0 * np.sin(2 * np.pi * 300.0 * t_pulse), -1.0, 1.0)
+
+    # 3 consecutive HIGH clean windows (satisfying 3-of-5 sustained elevation) + 1 short clipped window
+    samples = np.concatenate([s_clean, s_clean, s_clean, s_short_clipped])
+    wav_path = tmp_path / "mixed_high_insufficient_clipped.wav"
+    sf.write(str(wav_path), samples, sr, format="WAV", subtype="PCM_16")
+
+    detector = CountingDetector(scores=[0.90, 0.90, 0.90, 0.99])
+    result = evaluate_audio(
+        wav_path, detector=detector, window_seconds=4.0, hop_seconds=4.0, threshold=0.65
+    )
+
+    # Detector only called for the 3 clean windows
+    assert detector.predict_calls == 3
+    assert result.total_windows == 4
+    assert result.eligible_windows == 3
+    assert result.reliable_window_count == 3
+    assert result.limited_reliability_window_count == 0
+    assert result.insufficient_reliability_window_count == 1
+    assert result.degraded_quality_window_count == 1
+
+    # Mixed window verification
+    assert result.windows[3].input_reliability.state == ReliabilityState.INSUFFICIENT
+    assert ReliabilityReason.INSUFFICIENT_SPEECH in result.windows[3].input_reliability.reasons
+    assert ReliabilityReason.SEVERE_CLIPPING in result.windows[3].input_reliability.reasons
+    assert result.windows[3].synthetic_score is None
+
+    # Sustained elevation evidence is present in reliable window history
+    assert result.high_window_count == 1
+    assert result.raw_high_window_count == 3
+
+    # Final result is STILL limited_reliability / uncertain, never HIGH
+    assert result.status == "limited_reliability"
+    assert result.final_decision_state == DecisionState.UNCERTAIN.value
+    assert result.final_decision_state != DecisionState.HIGH.value
+    assert result.is_synthetic_suspected is False
+    assert result.quality_origin_verdict_allowed is False
+    assert result.abstain_reason == ReasonCode.SIGNAL_QUALITY_DEGRADED.value
+
+
+def test_validate_window_safety_contracts_degraded_mismatch() -> None:
+    """Stage A4 Test H: Verify the runtime validator rejects a deliberately incorrect degraded counter."""
+    with pytest.raises(RuntimeError, match="Degraded quality window count invariant violated"):
+        _validate_window_safety_contracts(
+            windows=[],
+            num_windows=0,
+            reliable_window_count=0,
+            limited_reliability_window_count=0,
+            insufficient_reliability_window_count=0,
+            degraded_quality_window_count=1,  # Derived is 0, supplied is 1
+            num_eligible=0,
+        )
+
+
+def test_all_insufficient_mixed_reason_marginal_snr_file_forces_limited_reliability(
+    tmp_path: Path,
+) -> None:
+    """Stage A4: A 4s non-clipped, non-silent, marginal-SNR signal below VAD threshold forces limited_reliability."""
+    sr = 16000
+    t = np.linspace(0, 4.0, int(sr * 4.0), endpoint=False, dtype=np.float32)
+    # RMS ~ 0.012 (> 0.01 not low energy, < 0.015 below VAD threshold), peak ~ 0.013 (not clipped, not silent)
+    # SNR ~ 1.4 dB (< 12.0 dB marginal SNR)
+    samples = (0.012 + 0.001 * np.sin(2.0 * np.pi * 300.0 * t)).astype(np.float32)
+
+    wav_path = tmp_path / "marginal_snr_insufficient.wav"
+    sf.write(str(wav_path), samples, sr, format="WAV", subtype="PCM_16")
+
+    detector = CountingDetector(scores=[0.99])
+    result = evaluate_audio(wav_path, detector=detector, window_seconds=4.0, hop_seconds=4.0)
+
+    # Detector call count is zero
+    assert detector.predict_calls == 0
+
+    # Window assessment verification
+    assert len(result.windows) == 1
+    win = result.windows[0]
+    assert win.input_reliability.state == ReliabilityState.INSUFFICIENT
+    assert ReliabilityReason.INSUFFICIENT_SPEECH in win.input_reliability.reasons
+    assert ReliabilityReason.MARGINAL_SNR in win.input_reliability.reasons
+    assert ReliabilityReason.SEVERE_CLIPPING not in win.input_reliability.reasons
+    assert ReliabilityReason.LOW_ENERGY not in win.input_reliability.reasons
+
+    # All model score/logit fields are null
+    assert result.mean_synthetic_score is None
+    assert result.max_synthetic_score is None
+    assert result.mean_synthetic_likelihood is None
+    assert result.max_synthetic_likelihood is None
+    assert win.synthetic_score is None
+    assert win.raw_spoof_logit is None
+    assert win.raw_bonafide_logit is None
+    assert win.raw_bonafide_score is None
+
+    # Counters
+    assert result.reliable_window_count == 0
+    assert result.limited_reliability_window_count == 0
+    assert result.insufficient_reliability_window_count == 1
+    assert result.degraded_quality_window_count == 1
+    assert result.total_windows == 1
+    assert result.eligible_windows == 0
+
+    # Final result is insufficient_evidence
+    assert result.status == "insufficient_evidence"
+    assert result.final_decision_state == "insufficient_evidence"
+    assert result.quality_origin_verdict_allowed is False
+    assert result.is_synthetic_suspected is False
+    assert result.abstain_reason == ReasonCode.INSUFFICIENT_SPEECH_DURATION.value
