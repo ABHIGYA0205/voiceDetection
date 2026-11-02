@@ -179,7 +179,7 @@ def test_insufficient_speech_abstention() -> None:
     assert res.pending_window_available is False  # Abstained: NOT queued for model inference
     assert res.immediate_decision is not None
     assert res.immediate_decision.state == DecisionState.INSUFFICIENT_EVIDENCE
-    assert res.immediate_decision.reason == ReasonCode.INSUFFICIENT_SPEECH_DURATION
+    assert res.immediate_decision.reason == ReasonCode.SIGNAL_QUALITY_DEGRADED
     assert session.has_pending_window is False
 
 

@@ -7,7 +7,7 @@ import uuid
 from typing import Any
 
 import numpy as np
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.dsp.exceptions import (
@@ -17,7 +17,14 @@ from voiceshield.dsp.exceptions import (
     InvalidAudioValueError,
     UnsupportedAudioError,
 )
-from voiceshield.dsp.scheduler import CanonicalWindowScheduler
+from voiceshield.dsp.quality import AudioQualityMetrics, compute_quality_metrics
+from voiceshield.dsp.reliability import (
+    LIMITED_REASONS,
+    InputReliabilityAssessment,
+    ReliabilityState,
+    assess_input_reliability,
+)
+from voiceshield.dsp.scheduler import CanonicalWindowScheduler, LogicalWindow
 from voiceshield.streaming.policy import (
     ReasonCode,
     TemporalDecision,
@@ -66,13 +73,44 @@ class WindowForInference(BaseModel):
     end_time: float = Field(description="Stream end timestamp in seconds.")
     speech_seconds: float = Field(description="Active speech duration in seconds.")
     is_eligible: bool = Field(
-        description="Whether window passed speech duration gating and is eligible for model inference."
+        description="Whether window has RELIABLE input reliability with origin_verdict_allowed=True and is eligible for model inference."
     )
     abstain_reason: ReasonCode | None = Field(
         default=None, description="Reason code if window was abstained from model inference."
     )
     quality_flags: AudioQualityFlags = Field(
         default_factory=AudioQualityFlags, description="Quality flags associated with this window."
+    )
+    input_reliability: InputReliabilityAssessment = Field(
+        description="Input reliability assessment for this window."
+    )
+    quality_metrics: AudioQualityMetrics = Field(
+        description="Audio quality metrics for this window."
+    )
+
+    @property
+    def quality_status(self) -> AudioQualityMetrics:
+        """Compatibility property returning quality_metrics."""
+        return self.quality_metrics
+
+
+class StreamingAbstention(BaseModel):
+    """Abstention record for a non-reliable or insufficient-speech window."""
+
+    window_index: int = Field(description="Sequential window index.")
+    continuity_segment_id: int = Field(default=0, description="Continuity segment identifier.")
+    start_time: float = Field(description="Window start timestamp in seconds.")
+    end_time: float = Field(description="Window end timestamp in seconds.")
+    speech_seconds: float = Field(description="Active speech duration in seconds.")
+    input_reliability: InputReliabilityAssessment = Field(
+        description="Input reliability assessment for this window."
+    )
+    quality_metrics: AudioQualityMetrics = Field(
+        description="Audio quality metrics for this window."
+    )
+    abstain_reason: ReasonCode = Field(description="Machine-readable abstain reason code.")
+    decision: TemporalDecision = Field(
+        description="Temporal decision produced for this abstained window."
     )
 
 
@@ -92,6 +130,7 @@ class IngestResult(BaseModel):
     generated_window_end_times: list[float] = Field(default_factory=list)
     immediate_decisions: list[TemporalDecision] = Field(default_factory=list)
     immediate_decision: TemporalDecision | None = None
+    immediate_abstentions: list[StreamingAbstention] = Field(default_factory=list)
     windows_dropped_this_ingest: int = 0
     total_windows_generated: int = 0
     total_windows_dropped: int = 0
@@ -99,6 +138,24 @@ class IngestResult(BaseModel):
     continuity_reset: bool = False
     continuity_segment_id: int = 0
     timestamp_delta: float = 0.0
+
+    @model_validator(mode="after")
+    def _validate_decision_alignment(self) -> IngestResult:
+        """Validate that compatibility decisions and typed abstentions remain aligned."""
+        if len(self.immediate_decisions) != len(self.immediate_abstentions):
+            raise ValueError(
+                f"Count mismatch between immediate_decisions ({len(self.immediate_decisions)}) "
+                f"and immediate_abstentions ({len(self.immediate_abstentions)})."
+            )
+        for i, (d, a) in enumerate(
+            zip(self.immediate_decisions, self.immediate_abstentions, strict=True)
+        ):
+            if d != a.decision:
+                raise ValueError(
+                    f"Immediate decision at index {i} does not match abstention.decision: "
+                    f"{d} != {a.decision}"
+                )
+        return self
 
 
 class StreamingSession:
@@ -172,6 +229,11 @@ class StreamingSession:
         # Cumulative quality flags
         self.quality_flags = AudioQualityFlags()
         self._is_finalized: bool = False
+
+        # Input reliability counters (generated logical windows)
+        self.reliable_window_count: int = 0
+        self.limited_reliability_window_count: int = 0
+        self.insufficient_reliability_window_count: int = 0
 
     @property
     def is_finalized(self) -> bool:
@@ -272,15 +334,115 @@ class StreamingSession:
         self.quality_flags = AudioQualityFlags()
         self._is_finalized = False
 
-    def finalize(self) -> tuple[list[WindowForInference], list[TemporalDecision]]:
+        self.reliable_window_count = 0
+        self.limited_reliability_window_count = 0
+        self.insufficient_reliability_window_count = 0
+
+    def _process_logical_window(
+        self,
+        lw: LogicalWindow,
+        frame_flags: AudioQualityFlags,
+    ) -> tuple[WindowForInference | None, StreamingAbstention | None]:
+        """Classify a completed canonical logical window for input reliability.
+
+        Evaluates untouched physical metrics and active speech duration, increments
+        the appropriate session counter, and either prepares an eligible WindowForInference
+        (if RELIABLE) or generates an immediate StreamingAbstention.
+
+        Args:
+            lw: Completed canonical logical window from CanonicalWindowScheduler.
+            frame_flags: Current frame or cumulative quality flags.
+
+        Returns:
+            tuple[WindowForInference | None, StreamingAbstention | None]: Exactly one of
+            the two elements is non-None.
+        """
+        metrics = compute_quality_metrics(lw.samples)
+        speech_sec = self.vad.compute_speech_duration(lw.samples, self.sample_rate)
+        reliability = assess_input_reliability(
+            metrics=metrics,
+            active_speech_seconds=speech_sec,
+            required_min_speech_seconds=self.min_speech_seconds,
+        )
+
+        if reliability.state == ReliabilityState.RELIABLE:
+            self.reliable_window_count += 1
+        elif reliability.state == ReliabilityState.LIMITED:
+            self.limited_reliability_window_count += 1
+        elif reliability.state == ReliabilityState.INSUFFICIENT:
+            self.insufficient_reliability_window_count += 1
+        else:
+            raise RuntimeError(f"Unknown reliability state: {reliability.state}")
+
+        expected_total = (
+            self.reliable_window_count
+            + self.limited_reliability_window_count
+            + self.insufficient_reliability_window_count
+        )
+        if expected_total != lw.window_index + 1:
+            raise RuntimeError(
+                f"Reliability counters sum ({expected_total}) does not match "
+                f"window index ({lw.window_index + 1})."
+            )
+
+        if reliability.state == ReliabilityState.RELIABLE:
+            if not reliability.origin_verdict_allowed:
+                raise RuntimeError(
+                    "Safety violation: RELIABLE assessment has origin_verdict_allowed=False."
+                )
+            win = WindowForInference(
+                window_index=lw.window_index,
+                continuity_segment_id=lw.continuity_segment_id,
+                samples=lw.samples,
+                start_time=lw.start_time,
+                end_time=lw.end_time,
+                speech_seconds=speech_sec,
+                is_eligible=True,
+                abstain_reason=None,
+                quality_flags=frame_flags,
+                input_reliability=reliability,
+                quality_metrics=metrics,
+            )
+            return win, None
+
+        # Non-reliable window: evaluate temporal decision abstention
+        decision = self.temporal_policy.evaluate_reliability_abstention(
+            assessment=reliability,
+            window_index=lw.window_index,
+            window_start_sec=lw.start_time,
+            window_end_sec=lw.end_time,
+            speech_seconds=speech_sec,
+        )
+
+        abstain_reason = (
+            ReasonCode.INSUFFICIENT_SPEECH_DURATION
+            if speech_sec < self.min_speech_seconds
+            and not any(r in LIMITED_REASONS for r in reliability.reasons)
+            else decision.reason
+        )
+
+        abstention = StreamingAbstention(
+            window_index=lw.window_index,
+            continuity_segment_id=lw.continuity_segment_id,
+            start_time=lw.start_time,
+            end_time=lw.end_time,
+            speech_seconds=speech_sec,
+            input_reliability=reliability,
+            quality_metrics=metrics,
+            abstain_reason=abstain_reason,
+            decision=decision,
+        )
+        return None, abstention
+
+    def finalize(self) -> tuple[list[WindowForInference], list[StreamingAbstention]]:
         """Idempotently finalize the streaming session at end-of-stream.
 
         Flushes the canonical resampler, passes flushed canonical samples into the scheduler,
-        generates any newly completed full windows and immediate abstentions, and marks the session finalized.
+        generates any newly completed full windows and immediate typed abstentions, and marks the session finalized.
 
         Returns:
-            tuple[list[WindowForInference], list[TemporalDecision]]: Newly completed eligible windows
-            and immediate abstentions resulting from resampler flush.
+            tuple[list[WindowForInference], list[StreamingAbstention]]: Newly completed eligible windows
+            and immediate typed abstentions resulting from resampler flush.
         """
         if self._is_finalized:
             return [], []
@@ -288,7 +450,7 @@ class StreamingSession:
         self._is_finalized = True
 
         new_eligible: list[WindowForInference] = []
-        new_abstentions: list[TemporalDecision] = []
+        new_abstentions: list[StreamingAbstention] = []
 
         if self._resampler is None:
             return new_eligible, new_abstentions
@@ -299,31 +461,29 @@ class StreamingSession:
 
         due_windows = self.scheduler.push_samples(flushed)
         for lw in due_windows:
-            speech_sec = self.vad.compute_speech_duration(lw.samples, self.sample_rate)
-            if speech_sec < self.min_speech_seconds:
-                imm = self.temporal_policy.evaluate_insufficient_speech(
-                    window_index=lw.window_index,
-                    window_start_sec=lw.start_time,
-                    window_end_sec=lw.end_time,
-                    speech_seconds=speech_sec,
-                )
-                new_abstentions.append(imm)
-            else:
-                win = WindowForInference(
-                    window_index=lw.window_index,
-                    continuity_segment_id=lw.continuity_segment_id,
-                    samples=lw.samples,
-                    start_time=lw.start_time,
-                    end_time=lw.end_time,
-                    speech_seconds=speech_sec,
-                    is_eligible=True,
-                    abstain_reason=None,
-                    quality_flags=self.quality_flags,
-                )
+            win, abstention = self._process_logical_window(lw, self.quality_flags)
+            if abstention is not None:
+                new_abstentions.append(abstention)
+            elif win is not None:
                 new_eligible.append(win)
                 if self._pending_window is not None:
                     self.total_windows_dropped += 1
                 self._pending_window = win
+            else:
+                raise RuntimeError(
+                    "Logical window produced neither inference window nor abstention."
+                )
+
+        expected_total = (
+            self.reliable_window_count
+            + self.limited_reliability_window_count
+            + self.insufficient_reliability_window_count
+        )
+        if expected_total != self.total_windows_generated:
+            raise RuntimeError(
+                f"Reliability counters sum ({expected_total}) does not match "
+                f"total_windows_generated ({self.total_windows_generated})."
+            )
 
         return new_eligible, new_abstentions
 
@@ -523,6 +683,7 @@ class StreamingSession:
                 generated_window_end_times=[],
                 immediate_decisions=[],
                 immediate_decision=None,
+                immediate_abstentions=[],
                 windows_dropped_this_ingest=windows_dropped_this_ingest,
                 total_windows_generated=self.total_windows_generated,
                 total_windows_dropped=self.total_windows_dropped,
@@ -550,6 +711,7 @@ class StreamingSession:
         generated_window_indices: list[int] = []
         generated_window_end_times: list[float] = []
         immediate_decisions: list[TemporalDecision] = []
+        immediate_abstentions: list[StreamingAbstention] = []
 
         due_windows = self.scheduler.push_samples(resampled)
         for lw in due_windows:
@@ -557,47 +719,30 @@ class StreamingSession:
             generated_window_indices.append(lw.window_index)
             generated_window_end_times.append(lw.end_time)
 
-            speech_sec = self.vad.compute_speech_duration(lw.samples, self.sample_rate)
-
-            if speech_sec < self.min_speech_seconds:
-                # Abstain from inference
-                window = WindowForInference(
-                    window_index=lw.window_index,
-                    continuity_segment_id=lw.continuity_segment_id,
-                    samples=lw.samples,
-                    start_time=lw.start_time,
-                    end_time=lw.end_time,
-                    speech_seconds=speech_sec,
-                    is_eligible=False,
-                    abstain_reason=ReasonCode.INSUFFICIENT_SPEECH_DURATION,
-                    quality_flags=frame_flags,
-                )
-                decision = self.temporal_policy.evaluate_insufficient_speech(
-                    window_index=lw.window_index,
-                    window_start_sec=lw.start_time,
-                    window_end_sec=lw.end_time,
-                    speech_seconds=speech_sec,
-                )
-                immediate_decisions.append(decision)
-            else:
-                # Window is eligible for model inference
-                window = WindowForInference(
-                    window_index=lw.window_index,
-                    continuity_segment_id=lw.continuity_segment_id,
-                    samples=lw.samples,
-                    start_time=lw.start_time,
-                    end_time=lw.end_time,
-                    speech_seconds=speech_sec,
-                    is_eligible=True,
-                    abstain_reason=None,
-                    quality_flags=frame_flags,
-                )
-                # Bounded backpressure: at most 1 pending window.
-                # If a pending window exists, replace it and increment dropped count.
+            win, abstention = self._process_logical_window(lw, frame_flags)
+            if abstention is not None:
+                immediate_decisions.append(abstention.decision)
+                immediate_abstentions.append(abstention)
+            elif win is not None:
                 if self._pending_window is not None:
                     self.total_windows_dropped += 1
                     windows_dropped_this_ingest += 1
-                self._pending_window = window
+                self._pending_window = win
+            else:
+                raise RuntimeError(
+                    "Logical window produced neither inference window nor abstention."
+                )
+
+        expected_total = (
+            self.reliable_window_count
+            + self.limited_reliability_window_count
+            + self.insufficient_reliability_window_count
+        )
+        if expected_total != self.total_windows_generated:
+            raise RuntimeError(
+                f"Reliability counters sum ({expected_total}) does not match "
+                f"total_windows_generated ({self.total_windows_generated})."
+            )
 
         current_stream_time = (
             self._stream_start_timestamp or 0.0
@@ -615,6 +760,7 @@ class StreamingSession:
             generated_window_end_times=generated_window_end_times,
             immediate_decisions=immediate_decisions,
             immediate_decision=immediate_decisions[0] if immediate_decisions else None,
+            immediate_abstentions=immediate_abstentions,
             windows_dropped_this_ingest=windows_dropped_this_ingest,
             total_windows_generated=self.total_windows_generated,
             total_windows_dropped=self.total_windows_dropped,
@@ -664,7 +810,24 @@ class StreamingSession:
         was_stale = self._in_flight_window_stale
         self._in_flight_window_stale = False
 
-        assert window is not None
+        if window is None:
+            raise RuntimeError("Cannot complete inference without a valid WindowForInference.")
+
+        if not window.is_eligible:
+            raise RuntimeError(
+                f"Window {window.window_index} passed to complete_inference is not eligible "
+                f"(is_eligible=False)."
+            )
+
+        if (
+            window.input_reliability.state != ReliabilityState.RELIABLE
+            or not window.input_reliability.origin_verdict_allowed
+        ):
+            raise RuntimeError(
+                f"Window {window.window_index} passed to complete_inference is not RELIABLE: "
+                f"state={window.input_reliability.state}, "
+                f"origin_verdict_allowed={window.input_reliability.origin_verdict_allowed}."
+            )
 
         # Stale-result suppression across continuity segments
         if was_stale or window.continuity_segment_id != self.continuity_segment_id:

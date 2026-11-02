@@ -30,8 +30,16 @@ from voiceshield.dsp.exceptions import (
     InvalidAudioValueError,
     UnsupportedAudioError,
 )
+from voiceshield.dsp.quality import AudioQualityMetrics
+from voiceshield.dsp.reliability import (
+    InputReliabilityAssessment,
+    ReliabilityState,
+)
 from voiceshield.streaming.policy import ReasonCode
-from voiceshield.streaming.session import StreamingSession, WindowForInference
+from voiceshield.streaming.session import (
+    StreamingSession,
+    WindowForInference,
+)
 
 logger = logging.getLogger("voiceshield.api.stream")
 router = APIRouter(prefix="/api/v1", tags=["Streaming"])
@@ -165,6 +173,9 @@ class ServerWindowResult(BaseModel):
     raw_score: float | None = None
     calibrated_score: float | None = None
     decision: dict[str, Any]
+    input_reliability: InputReliabilityAssessment
+    quality_status: AudioQualityMetrics
+    abstain_reason: str | None = None
 
 
 def _safe_stream_audio_error(exc: AudioPreprocessingError) -> str:
@@ -198,6 +209,11 @@ class ServerStopAck(BaseModel):
     total_windows_dropped: int = 0
     status: str = "success"
     final_reason: str | None = None
+    reliable_window_count: int = 0
+    limited_reliability_window_count: int = 0
+    insufficient_reliability_window_count: int = 0
+    quality_origin_verdict_allowed: bool = False
+    final_decision_state: str = "insufficient_evidence"
 
 
 class ServerErrorEvent(BaseModel):
@@ -574,6 +590,16 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                 if detector is None:
                     raise RuntimeError("VoiceShield detector is not initialized.")
 
+                if (
+                    not win.is_eligible
+                    or win.input_reliability.state != ReliabilityState.RELIABLE
+                    or not win.input_reliability.origin_verdict_allowed
+                ):
+                    raise RuntimeError(
+                        f"Attempted to dispatch non-reliable window {win.window_index} to detector "
+                        f"(is_eligible={win.is_eligible}, state={win.input_reliability.state})."
+                    )
+
                 output = await worker.execute(detector.predict, win.samples)
                 synth_score = float(output.synthetic_score)
 
@@ -581,7 +607,10 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     logger.info("Discarding inference result for closing session %s", session_id)
                     return
 
-                assert session is not None
+                if session is None:
+                    raise RuntimeError(
+                        f"Session {session_id} is uninitialized during inference completion."
+                    )
                 decision = session.complete_inference(
                     synthetic_score=synth_score,
                     window=win,
@@ -617,6 +646,9 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     raw_score=synth_score,
                     calibrated_score=None,
                     decision=decision.model_dump(),
+                    input_reliability=win.input_reliability,
+                    quality_status=win.quality_metrics,
+                    abstain_reason=None,
                 )
                 if not is_closing:
                     await websocket.send_json(result_event.model_dump())
@@ -709,18 +741,19 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
 
                 if cmd_data.get("type") == "stop":
                     logger.info("Session %s received stop command from client.", session_id)
-                    assert session is not None
+                    if session is None:
+                        raise RuntimeError(f"Session {session_id} is uninitialized on stop.")
                     new_eligible, new_abstentions = session.finalize()
 
                     # 1. Send immediate abstention events for any window completed during flush
-                    for imm in new_abstentions:
+                    for abstention in new_abstentions:
                         total_windows_evaluated += 1
                         abstained_event = ServerWindowResult(
                             session_id=session_id,
-                            window_index=imm.window_index,
-                            window_start_sec=imm.window_start_sec,
-                            window_end_sec=imm.window_end_sec,
-                            speech_seconds=imm.speech_seconds,
+                            window_index=abstention.window_index,
+                            window_start_sec=abstention.start_time,
+                            window_end_sec=abstention.end_time,
+                            speech_seconds=abstention.speech_seconds,
                             is_eligible=False,
                             synthetic_score=None,
                             uncalibrated_synthetic_score=None,
@@ -731,7 +764,10 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                             operating_threshold_source="unvalidated_heuristic",
                             raw_score=None,
                             calibrated_score=None,
-                            decision=imm.model_dump(),
+                            decision=abstention.decision.model_dump(),
+                            input_reliability=abstention.input_reliability,
+                            quality_status=abstention.quality_metrics,
+                            abstain_reason=abstention.abstain_reason.value,
                         )
                         await websocket.send_json(abstained_event.model_dump())
 
@@ -752,15 +788,28 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     if had_model_inference_error:
                         final_status = "error"
                         final_reason = "model_inference_error"
+                        final_decision_state = session.temporal_policy.current_state.value
+                        quality_origin_verdict_allowed = False
                     elif session.total_windows_generated == 0:
                         final_status = "insufficient_evidence"
                         final_reason = ReasonCode.INSUFFICIENT_CONTIGUOUS_AUDIO.value
+                        final_decision_state = "insufficient_evidence"
+                        quality_origin_verdict_allowed = False
+                    elif session.limited_reliability_window_count > 0:
+                        final_status = "limited_reliability"
+                        final_reason = ReasonCode.SIGNAL_QUALITY_DEGRADED.value
+                        final_decision_state = "uncertain"
+                        quality_origin_verdict_allowed = False
                     elif total_eligible_evaluated > 0:
                         final_status = "success"
                         final_reason = None
+                        final_decision_state = session.temporal_policy.current_state.value
+                        quality_origin_verdict_allowed = True
                     else:
                         final_status = "insufficient_evidence"
                         final_reason = ReasonCode.INSUFFICIENT_SPEECH_DURATION.value
+                        final_decision_state = "insufficient_evidence"
+                        quality_origin_verdict_allowed = False
 
                     await websocket.send_json(
                         ServerStopAck(
@@ -771,6 +820,11 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                             total_windows_dropped=session.total_windows_dropped,
                             status=final_status,
                             final_reason=final_reason,
+                            reliable_window_count=session.reliable_window_count,
+                            limited_reliability_window_count=session.limited_reliability_window_count,
+                            insufficient_reliability_window_count=session.insufficient_reliability_window_count,
+                            quality_origin_verdict_allowed=quality_origin_verdict_allowed,
+                            final_decision_state=final_decision_state,
                         ).model_dump()
                     )
                     await websocket.close(
@@ -899,15 +953,15 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     )
                     await websocket.send_json(quality_event.model_dump())
 
-                # 6. Handle immediate abstention decisions (insufficient speech)
-                for imm in ingest_res.immediate_decisions:
+                # 6. Handle immediate abstention decisions
+                for abstention in ingest_res.immediate_abstentions:
                     total_windows_evaluated += 1
                     abstained_event = ServerWindowResult(
                         session_id=session_id,
-                        window_index=imm.window_index,
-                        window_start_sec=imm.window_start_sec,
-                        window_end_sec=imm.window_end_sec,
-                        speech_seconds=imm.speech_seconds,
+                        window_index=abstention.window_index,
+                        window_start_sec=abstention.start_time,
+                        window_end_sec=abstention.end_time,
+                        speech_seconds=abstention.speech_seconds,
                         is_eligible=False,
                         synthetic_score=None,
                         uncalibrated_synthetic_score=None,
@@ -918,7 +972,10 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                         operating_threshold_source="unvalidated_heuristic",
                         raw_score=None,
                         calibrated_score=None,
-                        decision=imm.model_dump(),
+                        decision=abstention.decision.model_dump(),
+                        input_reliability=abstention.input_reliability,
+                        quality_status=abstention.quality_metrics,
+                        abstain_reason=abstention.abstain_reason.value,
                     )
                     await websocket.send_json(abstained_event.model_dump())
 

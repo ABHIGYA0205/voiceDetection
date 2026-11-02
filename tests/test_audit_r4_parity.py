@@ -524,9 +524,9 @@ def test_detector_and_temporal_decision_parity(tmp_path: Path, rate: int, channe
         pos += step_bytes
 
     # Finalize session at EOS and drain final window
-    new_win, new_imm = session.finalize()
-    for imm in new_imm:
-        streaming_decisions.append((None, imm))
+    new_win, new_abstentions = session.finalize()
+    for abstention in new_abstentions:
+        streaming_decisions.append((None, abstention.decision))
     drain_pending()
 
     # Assert zero dropped windows in no-overload harness
@@ -891,7 +891,8 @@ def test_websocket_stop_silence_speech_abstention() -> None:
                 assert len(win_results) == 1
                 assert win_results[0]["is_eligible"] is False
                 assert win_results[0]["synthetic_score"] is None
-                assert win_results[0]["decision"]["reason"] == "insufficient_speech_duration"
+                assert win_results[0]["decision"]["reason"] == "signal_quality_degraded"
+                assert win_results[0]["abstain_reason"] == "insufficient_speech_duration"
 
                 assert stop_ack is not None
                 assert stop_ack["total_windows_generated"] == 1
