@@ -15,6 +15,12 @@ from voiceshield.dsp.preprocessor import (
     pad_or_crop_waveform,
 )
 from voiceshield.dsp.quality import AudioQualityMetrics, compute_quality_metrics
+from voiceshield.dsp.reliability import (
+    InputReliabilityAssessment,
+    ReliabilityReason,
+    ReliabilityState,
+    assess_input_reliability,
+)
 from voiceshield.dsp.resampler import resample_audio
 
 __all__ = [
@@ -24,9 +30,13 @@ __all__ = [
     "AudioQualityMetrics",
     "CorruptAudioError",
     "EmptyAudioError",
+    "InputReliabilityAssessment",
     "InvalidAudioValueError",
     "PreprocessedAudio",
+    "ReliabilityReason",
+    "ReliabilityState",
     "UnsupportedAudioError",
+    "assess_input_reliability",
     "compute_quality_metrics",
     "load_audio",
     "pad_or_crop_waveform",
