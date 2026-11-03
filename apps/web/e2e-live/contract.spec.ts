@@ -105,7 +105,7 @@ test.describe('VoiceShield live browser/API contract', () => {
     );
     await page.goto('/');
     const ready = await (await readyResponse).json();
-    await page.getByRole('button', { name: /File Audio Analysis/i }).click();
+    await page.getByRole('tab', { name: /File Audio Analysis/i }).click();
     await page.locator('#audio-file-input').setInputFiles({
       name: 'r9-fixture.wav',
       mimeType: 'audio/wav',

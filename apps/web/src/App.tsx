@@ -2267,6 +2267,43 @@ export const App: React.FC = () => {
     ? 'Raw Model Score (Advisory Evidence from Reliable Windows)'
     : 'Raw uncalibrated window score';
 
+  const runtimeInfo = (() => {
+    if (readiness.status === 'checking') {
+      return { label: 'Checking', stateClass: 'checking' };
+    }
+    if (readiness.status === 'not_ready' || readiness.status === 'error') {
+      return { label: 'Unavailable', stateClass: 'unavailable' };
+    }
+    if (isMockDetector) {
+      return { label: 'Mock Detector (Demo)', stateClass: 'mock' };
+    }
+    return { label: 'Non-Mock Detector', stateClass: 'non-mock' };
+  })();
+
+  const handleTabKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>): void => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      const nextTab = activeTab === 'stream' ? 'file' : 'stream';
+      setActiveTab(nextTab);
+      const nextId = nextTab === 'stream' ? 'tab-stream-btn' : 'tab-file-btn';
+      document.getElementById(nextId)?.focus();
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const prevTab = activeTab === 'file' ? 'stream' : 'file';
+      setActiveTab(prevTab);
+      const prevId = prevTab === 'stream' ? 'tab-stream-btn' : 'tab-file-btn';
+      document.getElementById(prevId)?.focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      setActiveTab('stream');
+      document.getElementById('tab-stream-btn')?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      setActiveTab('file');
+      document.getElementById('tab-file-btn')?.focus();
+    }
+  };
+
   return (
     <div className="app-container">
       {/* Header */}
@@ -2275,15 +2312,46 @@ export const App: React.FC = () => {
           <div className="brand-icon" aria-hidden="true">
             🛡️
           </div>
-          <div>
-            <h1 className="brand-title">VoiceShield</h1>
+          <div className="brand-text">
+            <div className="brand-heading-row">
+              <h1 className="brand-title">VoiceShield</h1>
+              <span className="brand-badge">Advisory Acoustic Analysis</span>
+            </div>
             <p className="brand-subtitle">
               Local Microphone Advisory Demo (Local input only — does not capture cellular telephony)
             </p>
           </div>
         </div>
 
-        <div className="connection-badges">
+        <div className="trust-strip" role="region" aria-label="System status">
+          <div
+            className={`status-pill pill-readiness-${readiness.status}`}
+            id="readiness-state-pill"
+            data-testid="readiness-state-pill"
+            title={readiness.reason || undefined}
+          >
+            <span className="dot" aria-hidden="true" />
+            <span>
+              System:{' '}
+              {readiness.status === 'ready'
+                ? 'Ready'
+                : readiness.status === 'checking'
+                ? 'Checking...'
+                : readiness.status === 'not_ready'
+                ? 'Not Ready'
+                : 'Unavailable'}
+            </span>
+          </div>
+
+          <div
+            className={`status-pill pill-runtime-${runtimeInfo.stateClass}`}
+            id="detector-runtime-pill"
+            data-testid="detector-runtime-pill"
+          >
+            <span className="dot" aria-hidden="true" />
+            <span>Runtime: {runtimeInfo.label}</span>
+          </div>
+
           <div className={`status-pill pill-${connectionState}`} id="connection-state-pill">
             <span className="dot" aria-hidden="true" />
             <span>Connection: {connectionState}</span>
@@ -2330,23 +2398,37 @@ export const App: React.FC = () => {
       )}
 
       {/* Navigation Tabs */}
-      <nav className="demo-tabs" aria-label="Demo mode navigation">
-        <button
-          type="button"
-          className={`tab-btn ${activeTab === 'stream' ? 'active' : ''}`}
-          onClick={() => setActiveTab('stream')}
-          id="tab-stream-btn"
-        >
-          🎙️ Live Microphone Stream
-        </button>
-        <button
-          type="button"
-          className={`tab-btn ${activeTab === 'file' ? 'active' : ''}`}
-          onClick={() => setActiveTab('file')}
-          id="tab-file-btn"
-        >
-          📁 File Audio Analysis
-        </button>
+      <nav className="demo-tabs-nav" aria-label="Analysis mode navigation">
+        <div role="tablist" aria-label="Analysis Mode" className="demo-tabs">
+          <button
+            type="button"
+            role="tab"
+            className={`tab-btn ${activeTab === 'stream' ? 'active' : ''}`}
+            onClick={() => setActiveTab('stream')}
+            onKeyDown={handleTabKeyDown}
+            id="tab-stream-btn"
+            aria-selected={activeTab === 'stream'}
+            aria-controls="panel-stream"
+            tabIndex={activeTab === 'stream' ? 0 : -1}
+          >
+            <span aria-hidden="true">🎙️</span>
+            <span>Live Microphone Stream</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className={`tab-btn ${activeTab === 'file' ? 'active' : ''}`}
+            onClick={() => setActiveTab('file')}
+            onKeyDown={handleTabKeyDown}
+            id="tab-file-btn"
+            aria-selected={activeTab === 'file'}
+            aria-controls="panel-file"
+            tabIndex={activeTab === 'file' ? 0 : -1}
+          >
+            <span aria-hidden="true">📁</span>
+            <span>File Audio Analysis</span>
+          </button>
+        </div>
       </nav>
 
       {/* Strict Compliance and Privacy Banner */}
@@ -2368,7 +2450,7 @@ export const App: React.FC = () => {
       </div>
 
       {errorMessage && (
-        <div className="alert-error" role="alert" id="stream-error-alert">
+        <div className="alert-error" role="alert" id="stream-error-alert" aria-live="assertive">
           <span className="alert-icon" aria-hidden="true">
             ✕
           </span>
@@ -2376,201 +2458,225 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* ========================================================================= */}
-      {/* TAB 1: Real-time Streaming Dashboard                                      */}
-      {/* ========================================================================= */}
-      {activeTab === 'stream' && (
-        <>
-          {/* Action Directive on High Anomaly — ONLY rendered when reliable and permitted */}
-          {status === 'high' && liveOriginVerdictAllowed && (
-            <section
-              className="action-directive-high"
-              role="alert"
-              aria-live="assertive"
-              id="high-status-action-banner"
-            >
-              <div className="action-icon" aria-hidden="true">
-                ⚠️
+      <main className="main-content">
+        {/* ========================================================================= */}
+        {/* TAB 1: Real-time Streaming Dashboard                                      */}
+        {/* ========================================================================= */}
+        {activeTab === 'stream' && (
+          <div
+            role="tabpanel"
+            id="panel-stream"
+            aria-labelledby="tab-stream-btn"
+            tabIndex={0}
+            className="tabpanel-content"
+          >
+            <h2 className="sr-only">Live Microphone Stream Analysis</h2>
+            {/* Action Directive on High Anomaly — ONLY rendered when reliable and permitted */}
+            {status === 'high' && liveOriginVerdictAllowed && (
+              <section
+                className="action-directive-high"
+                role="alert"
+                aria-live="assertive"
+                id="high-status-action-banner"
+              >
+                <div className="action-icon" aria-hidden="true">
+                  ⚠️
+                </div>
+                <div className="action-body">
+                  <h4>ACTION DIRECTIVE</h4>
+                  <p className="action-strong">
+                    Pause and verify through a known independent channel.
+                  </p>
+                  <p className="action-subtext">
+                    Elevated synthetic speech anomaly score sustained over multiple consecutive windows. Do
+                    not rely on voice identity.
+                  </p>
+                </div>
+              </section>
+            )}
+
+            {/* Main Grid Dashboard */}
+            <section className="grid-dashboard" aria-label="Streaming Assessment Controls and Status">
+              {/* Status Card */}
+              <div className="card status-card">
+                <h3 className="card-title">
+                  <span>Assessment Status</span>
+                  <span className="sub-label">4.0s Window • 1.0s Hop</span>
+                </h3>
+
+                <div
+                  className={`status-indicator-box status-box-${status}`}
+                  role="status"
+                  aria-live="polite"
+                  id="current-status-box"
+                >
+                  <div className="status-header-row">
+                    {/* Accessible Non-Color Indicator Text Badge */}
+                    <div className="non-color-indicator" id="accessible-status-indicator">
+                      {status === 'low' && '[✓ LOW ANOMALY]'}
+                      {status === 'uncertain' && '[? UNCERTAIN]'}
+                      {status === 'high' && '[! HIGH ANOMALY]'}
+                      {status === 'insufficient_evidence' && '[... INSUFFICIENT SPEECH]'}
+                      {status === 'limited_reliability' && '[~ LIMITED RELIABILITY]'}
+                      {status === 'error' && '[✕ ERROR]'}
+                    </div>
+
+                    <div
+                      className={`verdict-permission-pill permission-${
+                        liveOriginVerdictAllowed ? 'permitted' : 'withheld'
+                      }`}
+                      id="stream-verdict-permission-status"
+                    >
+                      <span className="permission-icon" aria-hidden="true">
+                        {liveOriginVerdictAllowed ? '✓' : '⊘'}
+                      </span>
+                      <span>
+                        Origin Verdict: {liveOriginVerdictAllowed ? 'Permitted' : 'Withheld (Gate Active)'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="status-label-heading" id="status-heading">
+                    {status === 'low' && 'Low acoustic anomaly score — does not authenticate speech'}
+                    {status === 'uncertain' && 'Uncertain / Ambiguous Zone'}
+                    {status === 'high' && 'High Acoustic Anomaly Score'}
+                    {status === 'insufficient_evidence' && 'Insufficient Active Speech'}
+                    {status === 'limited_reliability' && 'Limited Reliability'}
+                    {status === 'error' && 'Assessment Error'}
+                  </div>
+
+                  <p className="status-reason" id="status-reason-details">
+                    {status === 'limited_reliability' && 'LIMITED RELIABILITY — ORIGIN VERDICT WITHHELD'}
+                    {status === 'insufficient_evidence' && 'INSUFFICIENT EVIDENCE — ORIGIN VERDICT WITHHELD'}
+                    {status !== 'limited_reliability' && status !== 'insufficient_evidence' && reasonDetails}
+                  </p>
+                  {(status === 'limited_reliability' || status === 'insufficient_evidence') && reasonDetails && (
+                    <div className="status-reason-subtext" style={{ fontSize: '0.85rem', marginTop: '0.25rem' }}>
+                      {reasonDetails}
+                    </div>
+                  )}
+                </div>
+
+                {/* Raw and temporally smoothed score display */}
+                <div className="score-container" id="score-container">
+                  {uncalibratedScore !== null ? (
+                    <div className="score-block">
+                      <span className="score-type" id="raw-score-label">{streamScoreLabel}:</span>
+                      <span className="score-value" id="raw-score-value">
+                        score {uncalibratedScore.toFixed(3)}
+                      </span>
+                      <span className="score-source-note" id="threshold-provenance-note" style={{ fontSize: '0.8rem' }}>
+                        Low threshold: {thresholdLow.toFixed(3)} | High threshold: {thresholdHigh.toFixed(3)} ({operatingThresholdSource === 'unvalidated_heuristic' ? 'unvalidated heuristic' : operatingThresholdSource}). The intermediate range is UNCERTAIN; thresholds apply to the smoothed score/history.
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="score-block">
+                      <span className="score-type">Score:</span>
+                      <span className="score-value-pending" id="score-pending-value">
+                        {status === 'limited_reliability' || status === 'insufficient_evidence'
+                          ? 'N/A — inference withheld'
+                          : 'Awaiting 4.0s window...'}
+                      </span>
+                    </div>
+                  )}
+                  <div className="score-block">
+                    <span className="score-type">EWMA-smoothed policy score:</span>
+                    <span className="score-value" id="smoothed-score-value">
+                      {smoothedScore !== null ? smoothedScore.toFixed(3) : 'N/A'}
+                    </span>
+                    <span className="score-source-note" style={{ fontSize: '0.8rem' }}>
+                      Temporal decisions and explanations use the smoothed policy score/history, not necessarily the latest raw score.
+                    </span>
+                  </div>
+                </div>
+
+                {/* Control Actions (Require User Gesture) */}
+                <div className="controls-row">
+                  {!isRecording ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={startStream}
+                      id="start-mic-button"
+                    >
+                      🎤 Start Microphone Stream
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      onClick={stopAudioAndDisconnect}
+                      disabled={recordingState === 'stopping'}
+                      id="stop-mic-button"
+                    >
+                      {recordingState === 'stopping' ? '⏳ Stopping Stream...' : '⏹ Stop Stream & Disconnect'}
+                    </button>
+                  )}
+                </div>
               </div>
-              <div className="action-body">
-                <h4>ACTION DIRECTIVE</h4>
-                <p className="action-strong">
-                  Pause and verify through a known independent channel.
-                </p>
-                <p className="action-subtext">
-                  Elevated synthetic speech anomaly score sustained over multiple consecutive windows. Do
-                  not rely on voice identity.
-                </p>
+
+              {/* Quality & Gating Metrics Card */}
+              <div className="card metrics-card">
+                <h3 className="card-title">
+                  <span>Audio Quality & Speech Gating</span>
+                </h3>
+
+                <div className="metrics-list">
+                  <div className="metric-row">
+                    <span className="metric-name">Active Speech in Window</span>
+                    <span
+                      className={`metric-status ${
+                        activeSpeechSeconds >= 0.8 ? 'metric-clean' : 'metric-warn'
+                      }`}
+                      id="speech-duration-status"
+                    >
+                      {activeSpeechSeconds.toFixed(2)}s / 4.0s{' '}
+                      {activeSpeechSeconds >= 0.8 ? '(Sufficient)' : '(Insufficient < 0.8s)'}
+                    </span>
+                  </div>
+
+                  <div className="metric-row">
+                    <span className="metric-name">Clipping Distortion</span>
+                    <span
+                      className={`metric-status ${
+                        qualityMetrics.isClipping ? 'metric-warn' : 'metric-clean'
+                      }`}
+                      id="clipping-status"
+                    >
+                      {qualityMetrics.isClipping
+                        ? `Clipping Detected (${qualityMetrics.clippingCount} frame(s))`
+                        : 'Clean'}
+                    </span>
+                  </div>
+
+                  <div className="metric-row">
+                    <span className="metric-name">Signal Energy (Silence Gate)</span>
+                    <span
+                      className={`metric-status ${
+                        qualityMetrics.isSilent ? 'metric-warn' : 'metric-clean'
+                      }`}
+                      id="silence-status"
+                    >
+                      {qualityMetrics.isSilent ? 'Near Silence (RMS < 1e-4)' : 'Active Signal'}
+                    </span>
+                  </div>
+
+                  <div className="metric-row">
+                    <span className="metric-name">Timing Continuity</span>
+                    <span
+                      className={`metric-status ${
+                        qualityMetrics.hasTimingGap ? 'metric-warn' : 'metric-clean'
+                      }`}
+                      id="timing-gap-status"
+                    >
+                      {qualityMetrics.hasTimingGap
+                        ? `Discontinuity Flagged (${qualityMetrics.gapCount} gap(s))`
+                        : 'Continuous'}
+                    </span>
+                  </div>
+                </div>
               </div>
             </section>
-          )}
-
-          {/* Main Grid Dashboard */}
-          <main className="grid-dashboard">
-            {/* Status Card */}
-            <div className="card status-card">
-              <div className="card-title">
-                <span>Assessment Status</span>
-                <span className="sub-label">4.0s Window • 1.0s Hop</span>
-              </div>
-
-              <div
-                className={`status-indicator-box status-box-${status}`}
-                role="status"
-                aria-live="polite"
-                id="current-status-box"
-              >
-                {/* Accessible Non-Color Indicator Text Badge */}
-                <div className="non-color-indicator" id="accessible-status-indicator">
-                  {status === 'low' && '[✓ LOW ANOMALY]'}
-                  {status === 'uncertain' && '[? UNCERTAIN]'}
-                  {status === 'high' && '[! HIGH ANOMALY]'}
-                  {status === 'insufficient_evidence' && '[... INSUFFICIENT SPEECH]'}
-                  {status === 'limited_reliability' && '[~ LIMITED RELIABILITY]'}
-                  {status === 'error' && '[✕ ERROR]'}
-                </div>
-
-                <div className="status-label-heading" id="status-heading">
-                  {status === 'low' && 'Low acoustic anomaly score — does not authenticate speech'}
-                  {status === 'uncertain' && 'Uncertain / Ambiguous Zone'}
-                  {status === 'high' && 'High Acoustic Anomaly Score'}
-                  {status === 'insufficient_evidence' && 'Insufficient Active Speech'}
-                  {status === 'limited_reliability' && 'Limited Reliability'}
-                  {status === 'error' && 'Assessment Error'}
-                </div>
-
-                <p className="status-reason" id="status-reason-details">
-                  {status === 'limited_reliability' && 'LIMITED RELIABILITY — ORIGIN VERDICT WITHHELD'}
-                  {status === 'insufficient_evidence' && 'INSUFFICIENT EVIDENCE — ORIGIN VERDICT WITHHELD'}
-                  {status !== 'limited_reliability' && status !== 'insufficient_evidence' && reasonDetails}
-                </p>
-                {(status === 'limited_reliability' || status === 'insufficient_evidence') && reasonDetails && (
-                  <div className="status-reason-subtext" style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                    {reasonDetails}
-                  </div>
-                )}
-              </div>
-
-              {/* Raw and temporally smoothed score display */}
-              <div className="score-container" id="score-container">
-                {uncalibratedScore !== null ? (
-                  <div className="score-block">
-                    <span className="score-type" id="raw-score-label">{streamScoreLabel}:</span>
-                    <span className="score-value" id="raw-score-value">
-                      score {uncalibratedScore.toFixed(3)}
-                    </span>
-                    <span className="score-source-note" id="threshold-provenance-note" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                      Low threshold: {thresholdLow.toFixed(3)} | High threshold: {thresholdHigh.toFixed(3)} ({operatingThresholdSource === 'unvalidated_heuristic' ? 'unvalidated heuristic' : operatingThresholdSource}). The intermediate range is UNCERTAIN; thresholds apply to the smoothed score/history.
-                    </span>
-                  </div>
-                ) : (
-                  <div className="score-block">
-                    <span className="score-type">Score:</span>
-                    <span className="score-value-pending" id="score-pending-value">
-                      {status === 'limited_reliability' || status === 'insufficient_evidence'
-                        ? 'N/A — inference withheld'
-                        : 'Awaiting 4.0s window...'}
-                    </span>
-                  </div>
-                )}
-                <div className="score-block">
-                  <span className="score-type">EWMA-smoothed policy score:</span>
-                  <span className="score-value" id="smoothed-score-value">
-                    {smoothedScore !== null ? smoothedScore.toFixed(3) : 'N/A'}
-                  </span>
-                  <span className="score-source-note" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                    Temporal decisions and explanations use the smoothed policy score/history, not necessarily the latest raw score.
-                  </span>
-                </div>
-              </div>
-
-              {/* Control Actions (Require User Gesture) */}
-              <div className="controls-row">
-                {!isRecording ? (
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={startStream}
-                    id="start-mic-button"
-                  >
-                    🎤 Start Microphone Stream
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn btn-danger"
-                    onClick={stopAudioAndDisconnect}
-                    disabled={recordingState === 'stopping'}
-                    id="stop-mic-button"
-                  >
-                    {recordingState === 'stopping' ? '⏳ Stopping Stream...' : '⏹ Stop Stream & Disconnect'}
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Quality & Gating Metrics Card */}
-            <div className="card metrics-card">
-              <div className="card-title">
-                <span>Audio Quality & Speech Gating</span>
-              </div>
-
-              <div className="metrics-list">
-                <div className="metric-row">
-                  <span className="metric-name">Active Speech in Window</span>
-                  <span
-                    className={`metric-status ${
-                      activeSpeechSeconds >= 0.8 ? 'metric-clean' : 'metric-warn'
-                    }`}
-                    id="speech-duration-status"
-                  >
-                    {activeSpeechSeconds.toFixed(2)}s / 4.0s{' '}
-                    {activeSpeechSeconds >= 0.8 ? '(Sufficient)' : '(Insufficient < 0.8s)'}
-                  </span>
-                </div>
-
-                <div className="metric-row">
-                  <span className="metric-name">Clipping Distortion</span>
-                  <span
-                    className={`metric-status ${
-                      qualityMetrics.isClipping ? 'metric-warn' : 'metric-clean'
-                    }`}
-                    id="clipping-status"
-                  >
-                    {qualityMetrics.isClipping
-                      ? `Clipping Detected (${qualityMetrics.clippingCount} frame(s))`
-                      : 'Clean'}
-                  </span>
-                </div>
-
-                <div className="metric-row">
-                  <span className="metric-name">Signal Energy (Silence Gate)</span>
-                  <span
-                    className={`metric-status ${
-                      qualityMetrics.isSilent ? 'metric-warn' : 'metric-clean'
-                    }`}
-                    id="silence-status"
-                  >
-                    {qualityMetrics.isSilent ? 'Near Silence (RMS < 1e-4)' : 'Active Signal'}
-                  </span>
-                </div>
-
-                <div className="metric-row">
-                  <span className="metric-name">Timing Continuity</span>
-                  <span
-                    className={`metric-status ${
-                      qualityMetrics.hasTimingGap ? 'metric-warn' : 'metric-clean'
-                    }`}
-                    id="timing-gap-status"
-                  >
-                    {qualityMetrics.hasTimingGap
-                      ? `Discontinuity Flagged (${qualityMetrics.gapCount} gap(s))`
-                      : 'Continuous'}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </main>
 
           {/* Compact Stream Reliability Summary Section */}
           <section className="reliability-summary-card" data-testid="stream-reliability-summary" aria-label="Stream reliability summary">
@@ -2656,7 +2762,7 @@ export const App: React.FC = () => {
                       </span>
                     </div>
                     {item.inputReliability?.reasons && item.inputReliability.reasons.length > 0 && (
-                      <div className="timeline-reasons" style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                      <div className="timeline-reasons" style={{ fontSize: '0.8rem', marginTop: '0.25rem' }}>
                         Reasons: {item.inputReliability.reasons.join(', ')}
                       </div>
                     )}
@@ -2666,14 +2772,22 @@ export const App: React.FC = () => {
               </div>
             )}
           </section>
-        </>
+        </div>
       )}
 
       {/* ========================================================================= */}
       {/* TAB 2: File Audio Analysis                                                */}
       {/* ========================================================================= */}
       {activeTab === 'file' && (
-        <section className="file-analysis-card" aria-label="Offline audio file analysis">
+        <div
+          role="tabpanel"
+          id="panel-file"
+          aria-labelledby="tab-file-btn"
+          tabIndex={0}
+          className="tabpanel-content"
+        >
+          <h2 className="sr-only">Offline Audio File Analysis</h2>
+          <section className="file-analysis-card" aria-label="Offline audio file analysis">
           <form onSubmit={handleFileAnalysis}>
             <div
               className="file-dropzone"
@@ -2837,13 +2951,27 @@ export const App: React.FC = () => {
                         </div>
                         <div
                           className="verdict-subtitle"
-                          style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}
+                          style={{ fontSize: '0.85rem' }}
                         >
                           {subtitleText}
                         </div>
                       </>
                     );
                   })()}
+                  <div
+                    className={`verdict-permission-pill permission-${
+                      fileVerdictPermitted ? 'permitted' : 'withheld'
+                    }`}
+                    id="file-verdict-permission-pill"
+                    style={{ marginTop: '0.5rem' }}
+                  >
+                    <span className="permission-icon" aria-hidden="true">
+                      {fileVerdictPermitted ? '✓' : '⊘'}
+                    </span>
+                    <span>
+                      Origin Verdict: {fileVerdictPermitted ? 'Permitted' : 'Withheld (Gate Active)'}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="verdict-stat">
@@ -2979,7 +3107,7 @@ export const App: React.FC = () => {
                               {relState.toUpperCase()}
                             </span>
                             {win.input_reliability?.reasons && win.input_reliability.reasons.length > 0 && (
-                              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                              <div className="window-reliability-reasons" style={{ fontSize: '0.75rem' }}>
                                 {win.input_reliability.reasons.join(', ')}
                               </div>
                             )}
@@ -3025,7 +3153,9 @@ export const App: React.FC = () => {
             </div>
           )}
         </section>
+        </div>
       )}
+      </main>
     </div>
   );
 };

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import { StrictMode } from 'react';
 import {
   App,
@@ -1115,7 +1115,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
     // Switch to file tab
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+      fireEvent.click(screen.getByRole('tab', { name: /File Audio Analysis/i }));
     });
 
     // Upload mock file
@@ -1237,7 +1237,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
     // Switch to file tab
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+      fireEvent.click(screen.getByRole('tab', { name: /File Audio Analysis/i }));
     });
 
     // Upload mock file
@@ -1346,7 +1346,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
     });
     render(<App />);
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+      fireEvent.click(screen.getByRole('tab', { name: /File Audio Analysis/i }));
     });
     await act(async () => {
       fireEvent.change(document.getElementById('audio-file-input') as HTMLInputElement, {
@@ -1370,7 +1370,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
     expect(screen.getByRole('button', { name: /Start Microphone Stream/i })).toBeDefined();
 
     // Click File Analysis tab
-    const fileTabBtn = screen.getByRole('button', { name: /File Audio Analysis/i });
+    const fileTabBtn = screen.getByRole('tab', { name: /File Audio Analysis/i });
     await act(async () => {
       fireEvent.click(fileTabBtn);
     });
@@ -1380,7 +1380,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
     expect(screen.getByLabelText(/Decision Threshold/i)).toBeDefined();
 
     // Switch back to stream tab
-    const streamTabBtn = screen.getByRole('button', { name: /Live Microphone Stream/i });
+    const streamTabBtn = screen.getByRole('tab', { name: /Live Microphone Stream/i });
     await act(async () => {
       fireEvent.click(streamTabBtn);
     });
@@ -1856,7 +1856,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
       render(<App />);
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+        fireEvent.click(screen.getByRole('tab', { name: /File Audio Analysis/i }));
       });
       await act(async () => {
         fireEvent.change(document.getElementById('audio-file-input') as HTMLInputElement, {
@@ -1955,7 +1955,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
       render(<App />);
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+        fireEvent.click(screen.getByRole('tab', { name: /File Audio Analysis/i }));
       });
       await act(async () => {
         fireEvent.change(document.getElementById('audio-file-input') as HTMLInputElement, {
@@ -2089,7 +2089,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
       render(<App />);
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+        fireEvent.click(screen.getByRole('tab', { name: /File Audio Analysis/i }));
       });
       await act(async () => {
         fireEvent.change(document.getElementById('audio-file-input') as HTMLInputElement, {
@@ -2133,7 +2133,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
       render(<App />);
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+        fireEvent.click(screen.getByRole('tab', { name: /File Audio Analysis/i }));
       });
       await act(async () => {
         fireEvent.change(document.getElementById('audio-file-input') as HTMLInputElement, {
@@ -2629,7 +2629,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
         render(<App />);
         await act(async () => {
-          fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+          fireEvent.click(screen.getByRole('tab', { name: /File Audio Analysis/i }));
         });
         await act(async () => {
           fireEvent.change(document.getElementById('audio-file-input') as HTMLInputElement, {
@@ -2715,7 +2715,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
         render(<App />);
         await act(async () => {
-          fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+          fireEvent.click(screen.getByRole('tab', { name: /File Audio Analysis/i }));
         });
         await act(async () => {
           fireEvent.change(document.getElementById('audio-file-input') as HTMLInputElement, {
@@ -2800,7 +2800,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
         render(<App />);
         await act(async () => {
-          fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+          fireEvent.click(screen.getByRole('tab', { name: /File Audio Analysis/i }));
         });
         await act(async () => {
           fireEvent.change(document.getElementById('audio-file-input') as HTMLInputElement, {
@@ -3255,7 +3255,7 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
 
         render(<App />);
         await act(async () => {
-          fireEvent.click(screen.getByRole('button', { name: /File Audio Analysis/i }));
+          fireEvent.click(screen.getByRole('tab', { name: /File Audio Analysis/i }));
         });
         await act(async () => {
           fireEvent.change(document.getElementById('audio-file-input') as HTMLInputElement, {
@@ -3765,6 +3765,366 @@ describe('VoiceShield Dashboard State Transitions & Rendering', () => {
           expect(val.error).toMatch(/synthetic_score.*decision\.synthetic_score/i);
         }
       });
+    });
+  });
+
+  describe('VoiceShield Trust Dashboard Hardening (Stage B2)', () => {
+    it('B2-1: verifies tablist, tab, and tabpanel ARIA semantics with no nested interactive descendants', async () => {
+      await act(async () => {
+        render(<App />);
+      });
+
+      const tablist = screen.getByRole('tablist', { name: /Analysis Mode/i });
+      expect(tablist).toBeDefined();
+
+      const streamTab = screen.getByRole('tab', { name: /Live Microphone Stream/i });
+      expect(streamTab.getAttribute('aria-selected')).toBe('true');
+      expect(streamTab.getAttribute('aria-controls')).toBe('panel-stream');
+      expect(streamTab.getAttribute('tabindex')).toBe('0');
+
+      const fileTab = screen.getByRole('tab', { name: /File Audio Analysis/i });
+      expect(fileTab.getAttribute('aria-selected')).toBe('false');
+      expect(fileTab.getAttribute('aria-controls')).toBe('panel-file');
+      expect(fileTab.getAttribute('tabindex')).toBe('-1');
+      expect(screen.getAllByRole('tab', { name: /File Audio Analysis/i })).toHaveLength(1);
+      expect(screen.queryByRole('button', { name: /File Audio Analysis/i })).toBeNull();
+
+      // Prove neither tab contains any descendant with role="button", link, or another interactive role
+      const interactiveRoles = ['button', 'link', 'checkbox', 'menuitem', 'option', 'radio', 'switch', 'textbox'];
+      for (const tab of [streamTab, fileTab]) {
+        for (const role of interactiveRoles) {
+          expect(within(tab).queryByRole(role)).toBeNull();
+        }
+        expect(tab.querySelectorAll('button, a, input, select, textarea').length).toBe(0);
+      }
+
+      const streamPanel = screen.getByRole('tabpanel', { name: /Live Microphone Stream/i });
+      expect(streamPanel.id).toBe('panel-stream');
+    });
+
+    it('B2-2: supports keyboard navigation with ArrowLeft, ArrowRight, Home, and End', async () => {
+      await act(async () => {
+        render(<App />);
+      });
+
+      const streamTab = screen.getByRole('tab', { name: /Live Microphone Stream/i });
+      const fileTab = screen.getByRole('tab', { name: /File Audio Analysis/i });
+
+      // Navigate from stream to file via ArrowRight
+      await act(async () => {
+        fireEvent.keyDown(streamTab, { key: 'ArrowRight' });
+      });
+      expect(fileTab.getAttribute('aria-selected')).toBe('true');
+      expect(streamTab.getAttribute('aria-selected')).toBe('false');
+      expect(screen.getByRole('tabpanel', { name: /File Audio Analysis/i }).id).toBe('panel-file');
+
+      // Navigate from file to stream via ArrowLeft
+      await act(async () => {
+        fireEvent.keyDown(fileTab, { key: 'ArrowLeft' });
+      });
+      expect(streamTab.getAttribute('aria-selected')).toBe('true');
+      expect(fileTab.getAttribute('aria-selected')).toBe('false');
+      expect(screen.getByRole('tabpanel', { name: /Live Microphone Stream/i }).id).toBe('panel-stream');
+
+      // Navigate via End key to last tab
+      await act(async () => {
+        fireEvent.keyDown(streamTab, { key: 'End' });
+      });
+      expect(fileTab.getAttribute('aria-selected')).toBe('true');
+
+      // Navigate via Home key to first tab
+      await act(async () => {
+        fireEvent.keyDown(fileTab, { key: 'Home' });
+      });
+      expect(streamTab.getAttribute('aria-selected')).toBe('true');
+    });
+
+    it('B2-3: truthful runtime indicator states (checking, unavailable, mock-ready, non-mock-ready)', async () => {
+      // 1. Initial checking state
+      vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() => {
+        return new Promise(() => {});
+      });
+
+      const render1 = render(<App />);
+      const checkingPill = document.getElementById('detector-runtime-pill');
+      expect(checkingPill?.textContent).toBe('Runtime: Checking');
+      expect(checkingPill?.className).toContain('pill-runtime-checking');
+      expect(checkingPill?.textContent).not.toContain('Verified');
+      render1.unmount();
+
+      // 2. Readiness failure (503 / not_ready)
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        json: () => Promise.resolve({ detail: { reason: 'Checkpoint absent' } }),
+      } as Response);
+
+      const render2 = render(<App />);
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      const unavailablePill = document.getElementById('detector-runtime-pill');
+      expect(unavailablePill?.textContent).toBe('Runtime: Unavailable');
+      expect(unavailablePill?.className).toContain('pill-runtime-unavailable');
+      expect(unavailablePill?.textContent).not.toContain('Verified');
+      render2.unmount();
+
+      // 3. Mock ready
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ is_mock_detector: true, status: 'ready' }),
+      } as Response);
+
+      const render3 = render(<App />);
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      const mockPill = document.getElementById('detector-runtime-pill');
+      expect(mockPill?.textContent).toBe('Runtime: Mock Detector (Demo)');
+      expect(mockPill?.className).toContain('pill-runtime-mock');
+      expect(mockPill?.textContent).not.toContain('Verified');
+      render3.unmount();
+
+      // 4. Non-mock ready
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ is_mock_detector: false, status: 'ready' }),
+      } as Response);
+
+      const render4 = render(<App />);
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      const nonMockPill = document.getElementById('detector-runtime-pill');
+      expect(nonMockPill?.textContent).toBe('Runtime: Non-Mock Detector');
+      expect(nonMockPill?.className).toContain('pill-runtime-non-mock');
+      expect(nonMockPill?.textContent).not.toContain('Verified');
+      render4.unmount();
+    });
+
+    it('B2-4: LIMITED, INSUFFICIENT, and ERROR states show no LOW/HIGH verdict or action directive', async () => {
+      await act(async () => {
+        render(<App />);
+      });
+
+      // Initial state is insufficient speech
+      expect(document.getElementById('current-status-box')?.textContent).toContain('[... INSUFFICIENT SPEECH]');
+      expect(document.getElementById('stream-verdict-permission-status')?.textContent).toContain('Withheld');
+      expect(document.getElementById('high-status-action-banner')).toBeNull();
+      expect(screen.queryByText('[✓ LOW ANOMALY]')).toBeNull();
+      expect(screen.queryByText('[! HIGH ANOMALY]')).toBeNull();
+
+      // Trigger a limited reliability window
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /Start Microphone Stream/i }));
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      const ws = MockWebSocket.instances[0];
+
+      await act(async () => {
+        ws.simulateServerMessage(
+          createValidServerWindowResult({
+            is_eligible: false,
+            synthetic_score: null,
+            raw_score: null,
+            input_reliability: {
+              state: 'limited',
+              reasons: ['severe_clipping'],
+              explanation: 'Severe clipping distortion detected.',
+              origin_verdict_allowed: false,
+            },
+            quality_status: {
+              peak_level: 1.0,
+              rms: 0.4,
+              clipping_fraction: 0.08,
+              is_clipped: true,
+              is_silent: false,
+              snr_db_estimate: 15.0,
+              quality_status: 'clipped',
+            },
+            abstain_reason: 'severe_clipping',
+            decision: {
+              state: 'insufficient_evidence',
+              synthetic_score: null,
+              smoothed_score: 0.0,
+              reason: 'signal_quality_degraded',
+              reason_details: 'Input quality degraded by clipping.',
+              history_scores: [],
+            },
+          })
+        );
+      });
+
+      expect(document.getElementById('current-status-box')?.textContent).toContain('[~ LIMITED RELIABILITY]');
+      expect(document.getElementById('stream-verdict-permission-status')?.textContent).toContain('Withheld');
+      expect(document.getElementById('high-status-action-banner')).toBeNull();
+      expect(screen.queryByText('[✓ LOW ANOMALY]')).toBeNull();
+      expect(screen.queryByText('[! HIGH ANOMALY]')).toBeNull();
+    });
+
+    it('B2-5: permitted HIGH still displays existing action directive', async () => {
+      await act(async () => {
+        render(<App />);
+      });
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /Start Microphone Stream/i }));
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      const ws = MockWebSocket.instances[0];
+
+      await act(async () => {
+        ws.simulateServerMessage(
+          createValidServerWindowResult({
+            is_eligible: true,
+            synthetic_score: 0.88,
+            raw_score: 0.88,
+            uncalibrated_synthetic_score: 0.88,
+            input_reliability: {
+              state: 'reliable',
+              reasons: [],
+              explanation: 'Window meets all criteria.',
+              origin_verdict_allowed: true,
+            },
+            quality_status: {
+              peak_level: 0.5,
+              rms: 0.15,
+              clipping_fraction: 0.0,
+              is_clipped: false,
+              is_silent: false,
+              snr_db_estimate: 25.0,
+              quality_status: 'clean',
+            },
+            decision: {
+              state: 'high',
+              synthetic_score: 0.88,
+              smoothed_score: 0.85,
+              reason: 'sustained_anomaly_elevation',
+              reason_details: 'Elevated anomaly detected.',
+              history_scores: [0.85, 0.88],
+            },
+          })
+        );
+      });
+
+      expect(document.getElementById('current-status-box')?.textContent).toContain('[! HIGH ANOMALY]');
+      expect(document.getElementById('stream-verdict-permission-status')?.textContent).toContain('Permitted');
+      const actionBanner = document.getElementById('high-status-action-banner');
+      expect(actionBanner).not.toBeNull();
+      expect(actionBanner?.textContent).toContain('Pause and verify through a known independent channel.');
+    });
+
+    it('B2-6: mode switching does not create a LOW fallback or stale HIGH directive', async () => {
+      await act(async () => {
+        render(<App />);
+      });
+
+      // Start stream and emit HIGH
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /Start Microphone Stream/i }));
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      const ws = MockWebSocket.instances[0];
+
+      await act(async () => {
+        ws.simulateServerMessage(
+          createValidServerWindowResult({
+            is_eligible: true,
+            synthetic_score: 0.88,
+            raw_score: 0.88,
+            uncalibrated_synthetic_score: 0.88,
+            input_reliability: {
+              state: 'reliable',
+              reasons: [],
+              explanation: 'Window meets all criteria.',
+              origin_verdict_allowed: true,
+            },
+            quality_status: {
+              peak_level: 0.5,
+              rms: 0.15,
+              clipping_fraction: 0.0,
+              is_clipped: false,
+              is_silent: false,
+              snr_db_estimate: 25.0,
+              quality_status: 'clean',
+            },
+            decision: {
+              state: 'high',
+              synthetic_score: 0.88,
+              smoothed_score: 0.85,
+              reason: 'sustained_anomaly_elevation',
+              reason_details: 'Elevated anomaly detected.',
+              history_scores: [0.85, 0.88],
+            },
+          })
+        );
+      });
+
+      expect(document.getElementById('high-status-action-banner')).not.toBeNull();
+
+      // Switch to File Tab
+      await act(async () => {
+        fireEvent.click(screen.getByRole('tab', { name: /File Audio Analysis/i }));
+      });
+
+      // In File Tab, file result is null, no action directive and no LOW fallback
+      expect(document.getElementById('high-status-action-banner')).toBeNull();
+      expect(screen.queryByText('[✓ LOW ANOMALY]')).toBeNull();
+      expect(screen.queryByText('[! HIGH ANOMALY]')).toBeNull();
+
+      // Switch back to Stream Tab
+      await act(async () => {
+        fireEvent.click(screen.getByRole('tab', { name: /Live Microphone Stream/i }));
+      });
+
+      // Stream tab maintains its valid state
+      expect(document.getElementById('high-status-action-banner')).not.toBeNull();
+      expect(document.getElementById('current-status-box')?.textContent).toContain('[! HIGH ANOMALY]');
+    });
+
+    it('B2-7: heading hierarchy includes one h1 and panel-level h2 before card h3s', async () => {
+      let renderResult: any;
+      await act(async () => {
+        renderResult = render(<App />);
+      });
+
+      // Exactly one h1 on page
+      const h1List = screen.getAllByRole('heading', { level: 1 });
+      expect(h1List).toHaveLength(1);
+      expect(h1List[0].textContent).toContain('VoiceShield');
+
+      // Stream tab active initially: has h2 for Live Stream
+      const streamH2 = screen.getByRole('heading', { level: 2 });
+      expect(streamH2.textContent).toBe('Live Microphone Stream Analysis');
+      expect(streamH2.className).toContain('sr-only');
+
+      // Check h3s exist in active stream panel
+      const h3List = screen.getAllByRole('heading', { level: 3 });
+      expect(h3List.length).toBeGreaterThanOrEqual(3);
+      expect(h3List.map((h) => h.textContent)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('Assessment Status'),
+          expect.stringContaining('Audio Quality & Speech Gating'),
+          expect.stringContaining('Rolling Window Assessment Timeline'),
+        ])
+      );
+
+      // Switch to File Analysis tab
+      await act(async () => {
+        fireEvent.click(screen.getByRole('tab', { name: /File Audio Analysis/i }));
+      });
+
+      // Still exactly one h1
+      expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+
+      // File tab active: has h2 for Offline File
+      const fileH2 = screen.getByRole('heading', { level: 2 });
+      expect(fileH2.textContent).toBe('Offline Audio File Analysis');
+      expect(fileH2.className).toContain('sr-only');
+
+      renderResult.unmount();
     });
   });
 });

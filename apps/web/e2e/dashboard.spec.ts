@@ -263,4 +263,277 @@ test.describe('VoiceShield Real-Time Microphone Dashboard', () => {
     await expect(page.locator('#recording-state-pill')).toContainText('stopping');
     await expect(page.locator('#connection-state-pill')).toContainText('connected');
   });
+
+  const responsiveViewports = [
+    { label: 'mobile', width: 360, height: 800 },
+    { label: 'tablet', width: 768, height: 1024 },
+    { label: 'desktop', width: 1440, height: 900 },
+  ] as const;
+
+  for (const viewport of responsiveViewports) {
+    test(`prevents document overflow at ${viewport.width}x${viewport.height} in stream and file modes`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto('/');
+
+      const streamTab = page.getByRole('tab', {
+        name: 'Live Microphone Stream',
+        exact: true,
+      });
+      const fileTab = page.getByRole('tab', {
+        name: 'File Audio Analysis',
+        exact: true,
+      });
+
+      await expect(streamTab).toBeVisible();
+      await expect(fileTab).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'File Audio Analysis', exact: true })
+      ).toHaveCount(0);
+
+      const modes = [
+        { name: 'stream', tab: streamTab, panel: page.locator('#panel-stream') },
+        { name: 'file', tab: fileTab, panel: page.locator('#panel-file') },
+      ] as const;
+
+      for (const mode of modes) {
+        await mode.tab.click();
+        await expect(mode.panel).toBeVisible();
+
+        const layout = await page.evaluate(() => {
+          const html = document.documentElement;
+          const body = document.body;
+          const container = document.querySelector<HTMLElement>('.app-container');
+          const containerRect = container?.getBoundingClientRect();
+
+          return {
+            documentScrollWidth: Math.max(html.scrollWidth, body.scrollWidth),
+            viewportWidth: html.clientWidth,
+            htmlOverflowX: window.getComputedStyle(html).overflowX,
+            bodyOverflowX: window.getComputedStyle(body).overflowX,
+            containerOverflowX: container ? window.getComputedStyle(container).overflowX : '',
+            containerLeft: containerRect?.left ?? 0,
+            containerRight: containerRect?.right ?? 0,
+            innerWidth: window.innerWidth,
+          };
+        });
+
+        expect(layout.documentScrollWidth, `${viewport.label} ${mode.name} document overflow`).toBeLessThanOrEqual(
+          layout.viewportWidth
+        );
+        expect(['hidden', 'clip'], `${viewport.label} ${mode.name} html overflow masking`).not.toContain(
+          layout.htmlOverflowX
+        );
+        expect(['hidden', 'clip'], `${viewport.label} ${mode.name} body overflow masking`).not.toContain(
+          layout.bodyOverflowX
+        );
+        expect(['hidden', 'clip'], `${viewport.label} ${mode.name} app overflow masking`).not.toContain(
+          layout.containerOverflowX
+        );
+        expect(layout.containerLeft).toBeGreaterThanOrEqual(0);
+        expect(layout.containerRight).toBeLessThanOrEqual(layout.innerWidth);
+      }
+
+      await streamTab.click();
+      const startButton = page.locator('#start-mic-button');
+      await expect(startButton).toBeVisible();
+      const buttonBox = await startButton.boundingBox();
+      expect(buttonBox).not.toBeNull();
+      expect(buttonBox!.height).toBeGreaterThanOrEqual(44);
+
+      await fileTab.click();
+      const dropzone = page.locator('.file-dropzone');
+      await expect(dropzone).toBeVisible();
+      const dropzoneBox = await dropzone.boundingBox();
+      expect(dropzoneBox).not.toBeNull();
+      expect(dropzoneBox!.height).toBeGreaterThanOrEqual(44);
+    });
+  }
+
+  test('contains wide window table inside horizontally scrollable .window-table-container without document overflow', async ({
+    page,
+  }) => {
+    // Intercept analyze/file request with a valid multi-column file result
+    await page.route('**/api/v1/analyze/file*', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          file_path: 'e2e_table_test.wav',
+          status: 'success',
+          error_message: null,
+          error_code: null,
+          abstain_reason: null,
+          duration_seconds: 4.0,
+          active_speech_duration_seconds: 3.5,
+          original_sample_rate: 16000,
+          original_channels: 1,
+          total_windows: 1,
+          eligible_windows: 1,
+          reliable_window_count: 1,
+          limited_reliability_window_count: 0,
+          insufficient_reliability_window_count: 0,
+          degraded_quality_window_count: 0,
+          quality_origin_verdict_allowed: true,
+          raw_high_window_count: 0,
+          uncertain_window_count: 0,
+          high_window_count: 0,
+          mean_synthetic_score: 0.1,
+          max_synthetic_score: 0.1,
+          mean_synthetic_likelihood: 0.1,
+          max_synthetic_likelihood: 0.1,
+          score_is_calibrated: false,
+          effective_threshold: 0.65,
+          operating_threshold_source: 'heuristic',
+          is_synthetic_suspected: false,
+          final_decision_state: 'low',
+          temporal_rule_explanation: 'Low anomaly score across windows.',
+          is_mock_detector: false,
+          config_hash: null,
+          metadata: { client: 'voiceshield' },
+          disclaimers: {
+            identity_proof: 'Not proof of identity',
+            fraud_probability: 'Not fraud probability',
+            advisory_action: 'Advisory only',
+            capture_boundary: 'Boundary',
+          },
+          windows: [
+            {
+              window_index: 0,
+              start_seconds: 0.0,
+              end_seconds: 4.0,
+              raw_spoof_logit: -2.0,
+              raw_bonafide_logit: 2.0,
+              raw_bonafide_score: 0.9,
+              synthetic_score: 0.1,
+              uncalibrated_synthetic_score: 0.1,
+              score_is_calibrated: false,
+              calibrated_synthetic_likelihood: null,
+              synthetic_likelihood: 0.1,
+              effective_threshold: 0.65,
+              is_synthetic_suspected: false,
+              active_speech_seconds: 3.5,
+              is_eligible: true,
+              is_partial: false,
+              abstain_reason: null,
+              quality_status: {
+                peak_level: 0.5,
+                rms: 0.15,
+                clipping_fraction: 0.0,
+                is_clipped: false,
+                is_silent: false,
+                snr_db_estimate: 24.5,
+                quality_status: 'clean',
+              },
+              input_reliability: {
+                state: 'reliable',
+                reasons: [],
+                explanation: 'Window meets all criteria.',
+                origin_verdict_allowed: true,
+              },
+              decision: {
+                state: 'low',
+                synthetic_score: 0.1,
+                score_is_calibrated: false,
+                calibrated_score: null,
+                smoothed_score: 0.1,
+                reason: 'normal_acoustics',
+                reason_details: 'Low anomaly',
+                window_index: 0,
+                window_start_sec: 0.0,
+                window_end_sec: 4.0,
+                speech_seconds: 3.5,
+                history_scores: [0.1],
+              },
+              decision_state: 'low',
+              decision_reason: 'normal_acoustics',
+              decision_reason_details: 'Low anomaly',
+              smoothed_score: 0.1,
+              history_scores: [0.1],
+            },
+          ],
+        }),
+      });
+    });
+
+    await page.setViewportSize({ width: 360, height: 800 });
+    await page.goto('/');
+
+    // Switch to file tab
+    await page.locator('#tab-file-btn').click();
+    await expect(page.locator('#panel-file')).toBeVisible();
+
+    // Select audio file
+    await page.locator('#audio-file-input').setInputFiles({
+      name: 'sample.wav',
+      mimeType: 'audio/wav',
+      buffer: Buffer.from('RIFF....WAVEfmt ....data....'),
+    });
+
+    // Click Analyze button
+    const submitBtn = page.locator('#submit-file-analysis-button');
+    await expect(submitBtn).toBeEnabled();
+    await submitBtn.click();
+
+    // Wait for the window breakdown table container
+    const tableContainer = page.locator('.window-table-container');
+    await expect(tableContainer).toBeVisible();
+
+    // Verify .window-table-container is horizontally scrollable when content overflows
+    const tableMetrics = await page.evaluate(() => {
+      const el = document.querySelector('.window-table-container');
+      if (!el) return null;
+      const style = window.getComputedStyle(el);
+      return {
+        tableScrollWidth: el.scrollWidth,
+        tableClientWidth: el.clientWidth,
+        containerOverflowX: style.overflowX,
+        docScrollWidth: document.documentElement.scrollWidth,
+        docClientWidth: document.documentElement.clientWidth,
+      };
+    });
+
+    expect(tableMetrics).not.toBeNull();
+    // Table is wider than container on 360px viewport:
+    expect(tableMetrics!.tableScrollWidth).toBeGreaterThan(tableMetrics!.tableClientWidth);
+    // Table container has scroll capability:
+    expect(['auto', 'scroll']).toContain(tableMetrics!.containerOverflowX);
+    // Document does NOT overflow:
+    expect(tableMetrics!.docScrollWidth).toBeLessThanOrEqual(tableMetrics!.docClientWidth);
+  });
+
+  test('supports keyboard navigation across mode tabs using Arrow keys, Home, and End', async ({
+    page,
+  }) => {
+    await page.goto('/');
+
+    const streamTab = page.locator('#tab-stream-btn');
+    const fileTab = page.locator('#tab-file-btn');
+
+    // Focus stream tab
+    await streamTab.focus();
+    await expect(streamTab).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('#panel-stream')).toBeVisible();
+
+    // ArrowRight moves to file tab
+    await page.keyboard.press('ArrowRight');
+    await expect(fileTab).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('#panel-file')).toBeVisible();
+
+    // ArrowLeft moves back to stream tab
+    await page.keyboard.press('ArrowLeft');
+    await expect(streamTab).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('#panel-stream')).toBeVisible();
+
+    // End key moves to last tab (file)
+    await page.keyboard.press('End');
+    await expect(fileTab).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('#panel-file')).toBeVisible();
+
+    // Home key moves to first tab (stream)
+    await page.keyboard.press('Home');
+    await expect(streamTab).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('#panel-stream')).toBeVisible();
+  });
 });
