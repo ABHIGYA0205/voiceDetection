@@ -1,0 +1,99 @@
+# VoiceShield Rights-Aware Corpus Registry
+# Schema Version 1.0.0
+#
+# This registry governs external speech corpora evaluated or considered for
+# research, calibration, training, product use, and redistribution.
+#
+# Governance Lifecycle:
+# 1. Registration and explicit rights review happen before acquisition.
+# 2. Once rights review permits acquisition, acquire and immediately hash the exact archive.
+# 3. Convert and hash the canonical manifest.
+# 4. Mark the snapshot verified only after integrity metadata is complete.
+# 5. Evaluation, calibration, training, product use, and redistribution require
+#    successful purpose-specific authorization of a verified snapshot.
+#
+# Unreviewed/pending candidate corpora remain planned with conservative metadata
+# (attribution_required: null, raw_redistribution_status: unknown, allowed_purposes: []).
+
+schema_version: "1.0.0"
+
+corpora:
+  - corpus_id: "asvspoof5"
+    display_name: "ASVspoof 5"
+    version_ref: null
+    data_state: "planned"
+    content_type: "mixed"
+    source_url: "https://zenodo.org/records/14498691"
+    documentation_url: "https://zenodo.org/records/14498691"
+    declared_license_spdx: "ODC-By-1.0"
+    license_url: "https://opendatacommons.org/licenses/by/1-0/"
+    rights_decision: "pending"
+    allowed_purposes: []
+    rights_reviewed_at: null
+    rights_reviewed_by: null
+    attribution_required: null
+    raw_redistribution_status: "unknown"
+    archive_sha256: null
+    manifest_sha256: null
+    sample_count: null
+    notes: "Candidate corpus for research evaluation. Rights review pending formal governance clearance."
+
+  - corpus_id: "mlaad_v9"
+    display_name: "MLAAD v9"
+    version_ref: null
+    data_state: "planned"
+    content_type: "spoof"
+    source_url: "https://deepfake-total.com/mlaad"
+    documentation_url: "https://deepfake-total.com/mlaad"
+    declared_license_spdx: "CC-BY-NC-4.0"
+    license_url: "https://creativecommons.org/licenses/by-nc/4.0/"
+    rights_decision: "pending"
+    allowed_purposes: []
+    rights_reviewed_at: null
+    rights_reviewed_by: null
+    attribution_required: null
+    raw_redistribution_status: "unknown"
+    archive_sha256: null
+    manifest_sha256: null
+    sample_count: null
+    notes: "Candidate corpus for multi-lingual synthetic speech research. Rights review pending formal governance clearance."
+
+  - corpus_id: "common_voice_18"
+    display_name: "Mozilla Common Voice 18"
+    version_ref: null
+    data_state: "planned"
+    content_type: "bonafide"
+    source_url: "https://commonvoice.mozilla.org"
+    documentation_url: "https://www.mozillafoundation.org/en/blog/common-voice-18-dataset-release/"
+    declared_license_spdx: "CC0-1.0"
+    license_url: "https://creativecommons.org/publicdomain/zero/1.0/"
+    rights_decision: "pending"
+    allowed_purposes: []
+    rights_reviewed_at: null
+    rights_reviewed_by: null
+    attribution_required: null
+    raw_redistribution_status: "unknown"
+    archive_sha256: null
+    manifest_sha256: null
+    sample_count: null
+    notes: "Candidate corpus for bona fide human speech diversity evaluation across accents and languages."
+
+  - corpus_id: "indicvoices"
+    display_name: "AI4Bharat IndicVoices"
+    version_ref: null
+    data_state: "planned"
+    content_type: "bonafide"
+    source_url: "https://huggingface.co/datasets/ai4bharat/IndicVoices"
+    documentation_url: "https://huggingface.co/datasets/ai4bharat/IndicVoices"
+    declared_license_spdx: "CC-BY-4.0"
+    license_url: "https://creativecommons.org/licenses/by/4.0/"
+    rights_decision: "pending"
+    allowed_purposes: []
+    rights_reviewed_at: null
+    rights_reviewed_by: null
+    attribution_required: null
+    raw_redistribution_status: "unknown"
+    archive_sha256: null
+    manifest_sha256: null
+    sample_count: null
+    notes: "Candidate corpus for Indian language and dialect diversity evaluation."
