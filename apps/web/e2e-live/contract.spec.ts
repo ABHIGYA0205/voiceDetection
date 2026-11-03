@@ -130,11 +130,50 @@ test.describe('VoiceShield live browser/API contract', () => {
     expect(result.disclaimers.fraud_probability).toMatch(/not/i);
     expect(result.disclaimers.identity_proof).toMatch(/not/i);
     expect(result.disclaimers.capture_boundary).toMatch(/browser/i);
+
+    // Stage B1: assert file-level reliability counters & flags
+    expect(typeof result.reliable_window_count).toBe('number');
+    expect(typeof result.limited_reliability_window_count).toBe('number');
+    expect(typeof result.insufficient_reliability_window_count).toBe('number');
+    expect(typeof result.degraded_quality_window_count).toBe('number');
+    expect(typeof result.quality_origin_verdict_allowed).toBe('boolean');
+    expect(
+      result.reliable_window_count +
+        result.limited_reliability_window_count +
+        result.insufficient_reliability_window_count
+    ).toBe(result.total_windows);
+    expect(result.degraded_quality_window_count).toBeGreaterThanOrEqual(
+      result.limited_reliability_window_count
+    );
+
+    expect(Array.isArray(result.windows)).toBe(true);
+    expect(result.windows.length).toBe(result.total_windows);
+    for (const win of result.windows) {
+      expect(win.input_reliability).toBeDefined();
+      expect(['reliable', 'limited', 'insufficient']).toContain(win.input_reliability.state);
+      expect(typeof win.input_reliability.origin_verdict_allowed).toBe('boolean');
+      expect(Array.isArray(win.input_reliability.reasons)).toBe(true);
+      expect(win.quality_status).toBeDefined();
+      expect(typeof win.quality_status.peak_level).toBe('number');
+      expect(typeof win.quality_status.rms).toBe('number');
+      expect(typeof win.quality_status.clipping_fraction).toBe('number');
+      expect(typeof win.quality_status.is_clipped).toBe('boolean');
+      expect(typeof win.quality_status.is_silent).toBe('boolean');
+      expect(typeof win.quality_status.snr_db_estimate).toBe('number');
+      expect(['empty', 'silent', 'clipped', 'low_energy', 'marginal_snr', 'clean']).toContain(
+        win.quality_status.quality_status
+      );
+      expect((win.quality_status as Record<string, unknown>).rms_level).toBeUndefined();
+      expect((win.quality_status as Record<string, unknown>).clipping_ratio).toBeUndefined();
+    }
+
     await expect(page.locator('.file-results-card')).toBeVisible();
     await expect(page.locator('.threshold-provenance-banner')).toContainText(
       'Uncalibrated model output'
     );
     await expect(page.locator('.file-results-card')).toContainText('Advisory Verdict');
+    await expect(page.locator('.reliability-summary-card')).toBeVisible();
+    await expect(page.locator('.badge-quality').first()).toBeVisible();
   });
 
   test('drives the real React microphone path through native proxied WebSocket traffic', async ({
@@ -218,24 +257,59 @@ test.describe('VoiceShield live browser/API contract', () => {
       () => socket.received.some((frame) => JSON.parse(frame).type === 'window_result'),
       { timeout: 30000 }
     ).toBe(true);
-    await expect.poll(() => {
-      const receivedCount = socket.received.filter(
-        (frame) => JSON.parse(frame).type === 'window_result'
-      ).length;
-      return page.locator('.timeline-card').count().then((cardCount) =>
-        cardCount === receivedCount && receivedCount > 0 ? receivedCount : 0
+    await expect.poll(async () => {
+      const currentReceivedWindows = socket.received
+        .map((frame) => {
+          try {
+            return JSON.parse(frame);
+          } catch {
+            return null;
+          }
+        })
+        .filter((frame): frame is Record<string, any> => frame !== null && frame.type === 'window_result');
+      const currentReceivedIndices = currentReceivedWindows.map((frame) => frame.window_index);
+      const currentDisplayedIndices = await page.locator('.timeline-idx').evaluateAll((nodes) =>
+        nodes.map((node) => Number(node.textContent?.match(/\d+/)?.[0]))
       );
-    }).toBeGreaterThan(0);
+      if (currentDisplayedIndices.length === 0 || currentReceivedIndices.length === 0) {
+        return false;
+      }
+      if (currentDisplayedIndices.length !== currentReceivedIndices.length) {
+        return false;
+      }
+      const sortedDisplayed = [...currentDisplayedIndices].sort((a, b) => a - b);
+      const sortedReceived = [...currentReceivedIndices].sort((a, b) => a - b);
+      return (
+        new Set(sortedDisplayed).size === sortedDisplayed.length &&
+        sortedDisplayed.every((val, idx) => val === sortedReceived[idx])
+      );
+    }, { timeout: 15000 }).toBe(true);
+
     const receivedWindows = socket.received
       .map((frame) => JSON.parse(frame))
       .filter((frame) => frame.type === 'window_result');
-    const receivedIndices = receivedWindows.map((frame) => frame.window_index);
-    expect(new Set(receivedIndices).size).toBe(receivedIndices.length);
-    const displayedIndices = await page.locator('.timeline-idx').evaluateAll((nodes) =>
-      nodes.map((node) => Number(node.textContent?.match(/\d+/)?.[0]))
+
+    // Stage B1: assert per-window input_reliability from live backend
+    const firstLiveWin = receivedWindows[0];
+    expect(firstLiveWin.input_reliability).toBeDefined();
+    expect(['reliable', 'limited', 'insufficient']).toContain(firstLiveWin.input_reliability.state);
+    expect(typeof firstLiveWin.input_reliability.origin_verdict_allowed).toBe('boolean');
+    expect(Array.isArray(firstLiveWin.input_reliability.reasons)).toBe(true);
+
+    expect(firstLiveWin.quality_status).toBeDefined();
+    expect(typeof firstLiveWin.quality_status.peak_level).toBe('number');
+    expect(typeof firstLiveWin.quality_status.rms).toBe('number');
+    expect(typeof firstLiveWin.quality_status.clipping_fraction).toBe('number');
+    expect(typeof firstLiveWin.quality_status.is_clipped).toBe('boolean');
+    expect(typeof firstLiveWin.quality_status.is_silent).toBe('boolean');
+    expect(typeof firstLiveWin.quality_status.snr_db_estimate).toBe('number');
+    expect(['empty', 'silent', 'clipped', 'low_energy', 'marginal_snr', 'clean']).toContain(
+      firstLiveWin.quality_status.quality_status
     );
-    expect(new Set(displayedIndices).size).toBe(displayedIndices.length);
-    expect(displayedIndices.sort((a, b) => a - b)).toEqual([...receivedIndices].sort((a, b) => a - b));
+    expect((firstLiveWin.quality_status as Record<string, unknown>).rms_level).toBeUndefined();
+    expect((firstLiveWin.quality_status as Record<string, unknown>).clipping_ratio).toBeUndefined();
+
+    await expect(page.locator('.timeline-card .badge-quality').first()).toBeVisible();
     await expect(page.locator('#status-heading')).not.toContainText('Calibrated');
 
     await page.getByRole('button', { name: /Stop Stream/i }).click();
@@ -247,6 +321,34 @@ test.describe('VoiceShield live browser/API contract', () => {
       () => socket.received.some((frame) => JSON.parse(frame).type === 'session_stopped'),
       { timeout: 15000 }
     ).toBe(true);
+
+    // Stage B1: assert final WebSocket stop status and counters
+    const sessionStopped = JSON.parse(
+      socket.received.find((frame) => JSON.parse(frame).type === 'session_stopped') as string
+    );
+    expect(sessionStopped.status).toBeDefined();
+    expect(['success', 'limited_reliability', 'insufficient_evidence', 'error']).toContain(sessionStopped.status);
+    expect(['low', 'uncertain', 'high', 'insufficient_evidence']).toContain(sessionStopped.final_decision_state);
+    expect(typeof sessionStopped.total_windows_generated).toBe('number');
+    expect(typeof sessionStopped.total_windows_evaluated).toBe('number');
+    expect(typeof sessionStopped.total_windows_dropped).toBe('number');
+    expect(sessionStopped.total_windows_evaluated + sessionStopped.total_windows_dropped).toBe(
+      sessionStopped.total_windows_generated
+    );
+    expect(typeof sessionStopped.reliable_window_count).toBe('number');
+    expect(typeof sessionStopped.limited_reliability_window_count).toBe('number');
+    expect(typeof sessionStopped.insufficient_reliability_window_count).toBe('number');
+    expect(typeof sessionStopped.degraded_quality_window_count).toBe('number');
+    expect(typeof sessionStopped.quality_origin_verdict_allowed).toBe('boolean');
+    expect(
+      sessionStopped.reliable_window_count +
+        sessionStopped.limited_reliability_window_count +
+        sessionStopped.insufficient_reliability_window_count
+    ).toBe(sessionStopped.total_windows_generated);
+    expect(sessionStopped.degraded_quality_window_count).toBeGreaterThanOrEqual(
+      sessionStopped.limited_reliability_window_count
+    );
+
     await expect.poll(() => socket.closed, { timeout: 15000 }).toBe(true);
     expect(socket.sequence.indexOf('received:session_stopped')).toBeLessThan(
       socket.sequence.indexOf('close')

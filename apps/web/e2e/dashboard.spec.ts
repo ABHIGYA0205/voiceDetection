@@ -79,6 +79,16 @@ test.describe('VoiceShield Real-Time Microphone Dashboard', () => {
                   session_id: 'mock-session-e2e',
                   total_duration_seconds: 5.2,
                   total_windows_evaluated: 1,
+                  total_windows_generated: 1,
+                  total_windows_dropped: 0,
+                  status: 'success',
+                  final_reason: 'Client stop requested.',
+                  reliable_window_count: 1,
+                  limited_reliability_window_count: 0,
+                  insufficient_reliability_window_count: 0,
+                  degraded_quality_window_count: 0,
+                  quality_origin_verdict_allowed: true,
+                  final_decision_state: 'high',
                 });
                 this.close();
               }, 50);
@@ -114,9 +124,28 @@ test.describe('VoiceShield Real-Time Microphone Dashboard', () => {
                   synthetic_score: 0.87,
                   uncalibrated_synthetic_score: 0.87,
                   score_is_calibrated: false,
+                  raw_score: 0.87,
                   calibrated_score: null,
                   operating_threshold: 0.65,
+                  threshold_low: 0.35,
+                  threshold_high: 0.65,
                   operating_threshold_source: 'unvalidated_heuristic',
+                  input_reliability: {
+                    state: 'reliable',
+                    reasons: [],
+                    explanation: 'Window meets all quality and speech criteria.',
+                    origin_verdict_allowed: true,
+                  },
+                  quality_status: {
+                    peak_level: 0.5,
+                    rms: 0.15,
+                    clipping_fraction: 0.0,
+                    is_clipped: false,
+                    is_silent: false,
+                    snr_db_estimate: 24.5,
+                    quality_status: 'clean',
+                  },
+                  abstain_reason: null,
                   decision: {
                     state: 'high',
                     synthetic_score: 0.87,
@@ -127,6 +156,9 @@ test.describe('VoiceShield Real-Time Microphone Dashboard', () => {
                     reason_details:
                       'Elevated acoustic anomaly detected: 3 of last 3 windows exceeded 0.65 threshold.',
                     window_index: 0,
+                    window_start_sec: 0.0,
+                    window_end_sec: 4.0,
+                    speech_seconds: 3.8,
                     history_scores: [0.82, 0.85, 0.87],
                   },
                 });
@@ -209,6 +241,13 @@ test.describe('VoiceShield Real-Time Microphone Dashboard', () => {
     await expect(timelineCard.locator('.timeline-idx')).toHaveText('Window #0');
     await expect(timelineCard.locator('.timeline-score').nth(0)).toContainText('Raw: 0.870');
     await expect(timelineCard.locator('.timeline-score').nth(1)).toContainText('Smoothed: 0.850');
+    await expect(timelineCard.locator('.badge-quality')).toContainText('CLEAN');
+
+    // Verify Compact Reliability Summary
+    await expect(page.locator('#stream-total-windows')).toHaveText('1');
+    await expect(page.locator('#stream-reliable-windows')).toHaveText('1');
+    await expect(page.locator('#stream-degraded-windows')).toHaveText('0');
+    await expect(page.locator('#stream-verdict-permitted')).toContainText('Yes (Permitted)');
 
     // 7. Verify Compliance: forbidden claims are NEVER present
     const content = await page.content();
