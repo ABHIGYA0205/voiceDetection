@@ -1,0 +1,109 @@
+# VoiceShield Stage C3 — Research-Evaluation Rights Recommendations
+# Schema Version 1.0.0
+#
+# This packet contains conservative operational recommendations only. It is not
+# legal advice, a project rights decision, permission to change the registry, or
+# authorization to create accounts, accept terms, acquire data, evaluate,
+# calibrate, train, use data in a product, or redistribute data.
+
+schema_version: "1.0.0"
+base_source_commit: "76124adfde57b4624667ee632cd0908a01a1991f"
+recommendation_as_of: 2026-11-06
+scoped_purpose: "research_evaluation"
+evidence_sha256: "5017f75d282b71ec6b05e589af08b02e541cbc3c27953363a03601fb78993197"
+registry_sha256: "686ad25c1f0e390f67d59d6b8da817d0f7009c82d7a08d8f0d9a75aeaa87ce85"
+registry_changes_authorized: false
+acquisition_authorized: false
+account_creation_authorized: false
+terms_acceptance_authorized: false
+
+recommendations:
+  - corpus_id: "asvspoof5"
+    review_priority: 1
+    disposition: "defer_pending_conditions"
+    rationale: "ASVspoof 5 is the highest-priority modern spoof benchmark candidate and is directly accessible without account authentication, but ODC-By-1.0 Section 2.4 does not independently license rights in individual audio Contents other than Database Rights or contract rights. The C2 evidence does not establish complete content-level copyright, privacy, or consent clearance. Research evaluation therefore remains deferred pending qualified human review and authoritative component-level clarification."
+    evidence_source_ids:
+      - "zenodo_record_14498691"
+      - "odc_by_1_0_license_text"
+    required_preconditions:
+      - "Obtain authoritative maintainer or release documentation clarifying the rights basis for the underlying bona fide and spoof audio Contents, including component-specific terms."
+      - "Perform qualified human review of ODC-By-1.0 Sections 2.2, 2.4, 4.2, and 4.3 for the exact research-evaluation workflow."
+      - "Immutably capture and hash every mutable official source used for the eventual decision, without downloading corpus data."
+      - "Confirm that all selected partitions and audio components use compatible terms and that no separate participation agreement controls evaluation use."
+    restrictions_if_later_approved:
+      - "Limit use to non-product research evaluation; do not authorize calibration, training, product use, or raw redistribution."
+      - "Retain all notices required by ODC-By-1.0 and separately preserve the requested scholarly citation."
+      - "Ingest only required audio, anonymous trial keys, labels, and minimal evaluation metadata."
+      - "Do not acquire bytes until a named human reviewer records a purpose-specific registry decision."
+    next_review_action: "Seek public maintainer clarification or already-published component-rights documentation for the underlying audio Contents, then submit the exact materials to a qualified human reviewer; do not download the corpus."
+    is_not_project_rights_decision: true
+
+  - corpus_id: "mlaad_v9"
+    review_priority: 2
+    disposition: "defer_pending_conditions"
+    rationale: "MLAAD v9 is valuable for multilingual synthetic-speech evaluation and its declared CC-BY-NC-4.0 terms may be compatible with a genuinely non-commercial research benchmark. However, the evaluation design also depends on external M-AILABS bona fide audio with component-specific provenance and terms, including a documented Ukrainian machine-learning-only exception. The project has not established its own NonCommercial status for this use or completed the dependency review."
+    evidence_source_ids:
+      - "mlaad_project_website"
+      - "mlaad_huggingface_card"
+      - "cc_by_nc_4_0_license_text"
+    required_preconditions:
+      - "Complete a separate component-level rights review for every M-AILABS language subset proposed as bona fide reference data."
+      - "Document why the exact VoiceShield research-evaluation activity qualifies as NonCommercial under CC-BY-NC-4.0 Section 1(i)."
+      - "Resolve whether any institutional, sponsorship, hosted-service, or future product connection changes the NonCommercial analysis."
+      - "Immutably capture and hash the mutable MLAAD project page and CC-BY-NC-4.0 legal text used for the eventual decision."
+      - "Review public account and platform obligations without creating an account, accepting terms, or downloading data during this stage."
+    restrictions_if_later_approved:
+      - "Limit MLAAD-derived use to a segregated non-commercial research-evaluation track."
+      - "Do not use MLAAD or M-AILABS data for product evaluation, calibration, training, product artifacts, or raw redistribution."
+      - "Track MLAAD synthetic components and M-AILABS bona fide components separately with their own provenance and notices."
+      - "Retain required CC-BY-NC-4.0 attribution, licence references, supplied notices, and modification indications."
+      - "Do not acquire bytes until a named human reviewer records a purpose-specific registry decision."
+    next_review_action: "Prepare a component-by-component M-AILABS terms matrix and request maintainer clarification where a language subset or intended benchmark use remains ambiguous; do not authenticate or download MLAAD."
+    is_not_project_rights_decision: true
+
+  - corpus_id: "common_voice_18"
+    review_priority: 3
+    disposition: "defer_pending_conditions"
+    rationale: "Common Voice 18 could supply broad bona fide language coverage, but CC0 operates only to the extent of rights held by the affirmer and does not itself establish privacy, consent, or third-party clearance. Access is mediated by Mozilla Data Collective terms, including a binding anti-re-identification covenant and redistribution constraints. The exact Data Consumer License and terms applicable at future access have not been immutably captured or accepted."
+    evidence_source_ids:
+      - "cv18_release_blog_post"
+      - "common_voice_terms_of_use"
+      - "mdc_consumer_terms_of_service"
+      - "cc0_1_0_legal_code"
+    required_preconditions:
+      - "Obtain and immutably capture the exact Common Voice 18 Data Consumer License and all platform terms that would apply at the time of access, without accepting them during this stage."
+      - "Perform qualified human review reconciling CC0 with the Common Voice and Mozilla Data Collective contractual access conditions."
+      - "Define and test technical controls enforcing the Section 2(b)(viii) prohibition on contributor or source re-identification."
+      - "Define a field-level minimization policy excluding optional demographic data and any metadata unnecessary for research evaluation."
+      - "Confirm the exact versioned snapshot and language subsets before any later acquisition decision."
+    restrictions_if_later_approved:
+      - "Limit use to research evaluation as bona fide reference audio; do not authorize calibration, training, product use, or raw redistribution."
+      - "Prohibit speaker identification, contributor matching, source tracing, voiceprint search, and any re-identification attempt."
+      - "Ingest only audio, anonymous client tokens needed for leakage control, language or locale labels, and essential integrity metadata."
+      - "Do not mirror or redistribute raw Common Voice data."
+      - "Do not acquire bytes until a named human reviewer records a purpose-specific registry decision."
+    next_review_action: "Request or locate a publicly reviewable copy of the exact Common Voice 18 Data Consumer License and prepare an anti-re-identification control specification; do not create an MDC account or accept terms."
+    is_not_project_rights_decision: true
+
+  - corpus_id: "indicvoices"
+    review_priority: 4
+    disposition: "defer_pending_conditions"
+    rationale: "IndicVoices could improve Indian-language and regional coverage and is declared CC-BY-4.0, but repository access is gated and the complete conditions presented during approval are not part of the frozen public evidence. Published schema fields include transcripts, demographic and geographic data, and verification-related metadata that require strict minimization and privacy review. Public evidence does not establish that every distributed field is free of incidental personal data."
+    evidence_source_ids:
+      - "indicvoices_huggingface_card"
+      - "indicvoices_arxiv_paper"
+      - "cc_by_4_0_license_text"
+    required_preconditions:
+      - "Obtain a reviewable copy of every gated repository condition from the maintainer or another authoritative public source without requesting access or accepting terms."
+      - "Perform qualified human review of the gated conditions, consent scope, CC-BY-4.0 attribution obligations, and intended research-evaluation workflow."
+      - "Create and test a default-deny field allowlist limited to audio, anonymous speaker tokens, language labels, and essential integrity metadata."
+      - "Explicitly exclude transcripts, demographic fields, geographic fields, verification reports, names, phone numbers, consent-form material, and incidental personal data."
+      - "Define retention, access-control, deletion, and incident-response requirements before any later acquisition decision."
+    restrictions_if_later_approved:
+      - "Limit use to research evaluation; do not authorize calibration, training, product use, or raw redistribution."
+      - "Apply the default-deny field allowlist before data enters any VoiceShield processing workspace."
+      - "Retain required CC-BY-4.0 attribution, licence references, supplied notices, and modification indications."
+      - "Do not conduct demographic, geographic, identity, or speaker-recognition analysis."
+      - "Do not request gated access or acquire bytes until a named human reviewer records a purpose-specific registry decision."
+    next_review_action: "Ask the dataset maintainers for a public, non-acceptance copy of the complete gated conditions and prepare the field-level minimization control for independent review; do not request repository access."
+    is_not_project_rights_decision: true
