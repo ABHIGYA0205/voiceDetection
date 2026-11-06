@@ -1,4 +1,4 @@
-.PHONY: help setup lint format-check format typecheck test test-python test-web api api-mock web benchmark benchmark-quick check-all audit-license audit-python audit-npm package-check clean
+.PHONY: help setup lint format-check format typecheck test test-python test-web api api-mock web benchmark benchmark-quick validate-asvspoof5-rights check-all audit-license audit-python audit-npm package-check clean
 
 UV ?= $(shell which uv 2>/dev/null || echo "$$HOME/.local/bin/uv")
 PYTHON ?= $(shell command -v python3.11 2>/dev/null || echo "/opt/homebrew/bin/python3.11")
@@ -18,6 +18,7 @@ help:
 	@echo "  make web         - Start React Vite frontend dev server"
 	@echo "  make benchmark   - Run full M3 benchmark suite including 10-minute soak test"
 	@echo "  make benchmark-quick - Run quick M3 benchmark suite (10s soak test)"
+	@echo "  make validate-asvspoof5-rights - Validate non-authorizing C4-A packet"
 	@echo "  make check-all   - Run the complete local quality and supply-chain gate"
 	@echo "  make clean       - Remove caches, build artifacts, and test reports"
 
@@ -32,16 +33,16 @@ setup:
 	fi
 
 lint:
-	$(UV) run --frozen ruff check src services tests
+	$(UV) run --frozen ruff check src services tests scripts/validate_asvspoof5_rights_clarification.py
 
 format:
-	$(UV) run ruff format src services tests
+	$(UV) run ruff format src services tests scripts/validate_asvspoof5_rights_clarification.py
 
 format-check:
-	$(UV) run --frozen ruff format --check src services tests
+	$(UV) run --frozen ruff format --check src services tests scripts/validate_asvspoof5_rights_clarification.py
 
 typecheck:
-	$(UV) run --frozen mypy src services tests
+	$(UV) run --frozen mypy src services tests scripts/validate_asvspoof5_rights_clarification.py
 
 test-python:
 	$(UV) run --frozen pytest tests \
@@ -73,6 +74,9 @@ benchmark:
 benchmark-quick:
 	$(UV) run python -m voiceshield.benchmark.cli --soak-duration 10 --iterations 20 --warmup 3
 
+validate-asvspoof5-rights:
+	$(UV) run --frozen python scripts/validate_asvspoof5_rights_clarification.py
+
 audit-python:
 	$(UV) export --frozen --all-extras --all-groups --no-emit-project --output-file "$${TMPDIR:-/tmp}/voiceshield-requirements.txt"
 	$(UV) run --frozen pip-audit --disable-pip --require-hashes --requirement "$${TMPDIR:-/tmp}/voiceshield-requirements.txt"
@@ -88,7 +92,7 @@ package-check:
 	$(UV) build
 	$(UV) run --frozen python scripts/check_package_metadata.py
 
-check-all: setup lint format-check typecheck test-python audit-python audit-npm audit-license package-check
+check-all: setup lint format-check typecheck validate-asvspoof5-rights test-python audit-python audit-npm audit-license package-check
 	cd apps/web && npm run build && npm test -- --run && npx playwright install chromium --with-deps && npm run test:e2e && npm run test:e2e:live
 	@echo "All checks passed successfully."
 

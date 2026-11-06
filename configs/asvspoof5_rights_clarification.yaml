@@ -1,0 +1,689 @@
+# VoiceShield Stage C4-A — ASVspoof 5 Public Rights Clarification
+# Schema Version 1.0.0
+#
+# This packet records public evidence and unresolved questions only. It is not
+# legal advice, a rights decision, permission to contact maintainers, or
+# authorization to create accounts, accept terms, acquire data, evaluate,
+# train, calibrate, use data in a product, or redistribute data.
+
+schema_version: 1.0.0
+corpus_id: asvspoof5
+clarification_as_of: '2026-11-07'
+base_source_commit: 4d4af273acb16e28569c0573f68fa65272e013ec
+scoped_purpose: research_evaluation
+packet_status: non_authorizing_clarification
+capture_manifest_path: evidence/asvspoof5/CAPTURE-MANIFEST.json
+capture_manifest_sha256: 382b2ae9646a287e84110f6dcf92c6e17358a05bb003572e7255cd473a0da845
+capture_manifest_source_count: 19
+capture_manifest_source_bytes: 9477682
+linked_integrity:
+  c2_evidence_sha256: 5017f75d282b71ec6b05e589af08b02e541cbc3c27953363a03601fb78993197
+  c3_recommendations_sha256: d80ed9ab61d4e97ff5bca9201179e281e725c875f03399704b1986cd6a1cebb3
+  registry_sha256: 686ad25c1f0e390f67d59d6b8da817d0f7009c82d7a08d8f0d9a75aeaa87ce85
+authorization_boundary:
+  registry_changes_authorized: false
+  acquisition_authorized: false
+  account_creation_authorized: false
+  terms_acceptance_authorized: false
+  outbound_contact_authorized: false
+  evaluation_authorized: false
+  training_authorized: false
+  product_use_authorized: false
+  redistribution_authorized: false
+capture_boundary:
+  corpus_archives_downloaded: false
+  protocol_archive_downloaded: false
+  audio_downloaded: false
+  model_weights_downloaded: false
+  accounts_created: false
+  terms_accepted: false
+  captured_material: Public legal text, release metadata, README files, research papers, challenge plans, source-corpus
+    pages, and model-license metadata only.
+source_captures:
+- source_id: asvspoof5_design_paper_arxiv_v4
+  source_authority: arXiv
+  category: design_paper
+  url: https://arxiv.org/html/2502.08857v4
+  revision_ref: 2502.08857v4
+  retrieved_at_utc: '2026-11-06T19:05:17.676883Z'
+  byte_size: 482850
+  sha256: 6f35661cafc78b88886d9f659451b62ac8cceb56d4888819f15987ed192b73a4
+  capture_filename: asvspoof5-database-paper-arxiv-v4.html
+  source_state: versioned
+  corpus_payload: false
+- source_id: asvspoof5_design_paper_hal_v1
+  source_authority: HAL
+  category: design_paper
+  url: https://hal.science/hal-05303353v1/document
+  revision_ref: hal-05303353v1
+  retrieved_at_utc: '2026-11-06T19:05:20.164883Z'
+  byte_size: 8035724
+  sha256: 7c3896c72b498ae643f3a9dc59686133e1ef1c4e9b4558740505957eae3fdeda
+  capture_filename: asvspoof5-database-paper-hal-v1.pdf
+  source_state: versioned
+  corpus_payload: false
+- source_id: asvspoof5_evaluation_plan_phase1_v0_2
+  source_authority: ASVspoof consortium
+  category: challenge_documentation
+  url: https://www.asvspoof.org/file/ASVspoof5___Evaluation_Plan.pdf
+  revision_ref: document version 0.2, 2024-01-09
+  retrieved_at_utc: '2026-11-06T19:05:21.772883Z'
+  byte_size: 281986
+  sha256: b831a10264f2e54e50b06d6cf2cecb22ea45060feef4721eaec40bcde364043c
+  capture_filename: asvspoof5-evaluation-plan-v0.2.pdf
+  source_state: mutable_url
+  corpus_payload: false
+- source_id: asvspoof5_evaluation_plan_phase2_v0_6
+  source_authority: ASVspoof consortium
+  category: challenge_documentation
+  url: https://www.asvspoof.org/file/ASVspoof5___Evaluation_Plan_Phase2.pdf
+  revision_ref: document version 0.6, 2024-06-28
+  retrieved_at_utc: '2026-11-06T19:07:35.948883Z'
+  byte_size: 357793
+  sha256: e08b004d919cc2708cb913f657fbeb19fe4abac193a09ab3d8c204636f792dd8
+  capture_filename: asvspoof5-evaluation-plan-phase2-v0.6.pdf
+  source_state: mutable_url
+  corpus_payload: false
+- source_id: cc0_1_0_legal_code
+  source_authority: Creative Commons
+  category: license_text
+  url: https://creativecommons.org/publicdomain/zero/1.0/legalcode.en
+  revision_ref: 1.0 Universal English legal code
+  retrieved_at_utc: '2026-11-06T19:08:37.016883Z'
+  byte_size: 32223
+  sha256: b43732f4c1463b087cf10d4daf8d8766514b2bf8f21bc5ef50905f95be227726
+  capture_filename: cc0-1.0-legalcode.en.html
+  source_state: versioned_license
+  corpus_payload: false
+- source_id: cc_by_4_0_legal_code
+  source_authority: Creative Commons
+  category: license_text
+  url: https://creativecommons.org/licenses/by/4.0/legalcode.en
+  revision_ref: 4.0 International English legal code
+  retrieved_at_utc: '2026-11-06T19:05:23.176883Z'
+  byte_size: 48742
+  sha256: 58230517b7895aa219ff46a6ed63e67057a1582fb9ea054b16728a8c13525650
+  capture_filename: cc-by-4.0-legalcode.en.html
+  source_state: versioned_license
+  corpus_payload: false
+- source_id: common_voice_privacy_2022_capture
+  source_authority: Mozilla legal-docs GitHub repository
+  category: source_corpus_terms
+  url: https://raw.githubusercontent.com/mozilla/legal-docs/1976adb1c55f4bc761eb80df8e67ff078d75d449/en/common_voice_privacy_notice.md
+  revision_ref: commit 1976adb1c55f4bc761eb80df8e67ff078d75d449; effective 2019-08-15; public at Common Voice 11
+    release
+  retrieved_at_utc: '2026-11-06T19:08:36.768883Z'
+  byte_size: 3098
+  sha256: 74cfbfb2498728d309ba46b4d471ea53b0c64dbe2f13511724ac07a6e832da40
+  capture_filename: common-voice-privacy-1976adb1.md
+  source_state: commit_pinned
+  corpus_payload: false
+- source_id: common_voice_terms_2022_capture
+  source_authority: Mozilla legal-docs GitHub repository
+  category: source_corpus_terms
+  url: https://raw.githubusercontent.com/mozilla/legal-docs/1976adb1c55f4bc761eb80df8e67ff078d75d449/en/common_voice_terms.md
+  revision_ref: commit 1976adb1c55f4bc761eb80df8e67ff078d75d449; effective 2018-11-30; public at Common Voice 11
+    release
+  retrieved_at_utc: '2026-11-06T19:08:36.564883Z'
+  byte_size: 5285
+  sha256: 060049bd9170c5da2cadf8619deeee22a9223a0e97a4d0d7393e6b73937acbbf
+  capture_filename: common-voice-terms-1976adb1.md
+  source_state: commit_pinned
+  corpus_payload: false
+- source_id: coqui_tts_model_index
+  source_authority: Coqui TTS GitHub repository
+  category: model_documentation
+  url: https://raw.githubusercontent.com/coqui-ai/TTS/dbf1a08a0d4e47fdad6172e433eeb34bc6b13b4e/TTS/.models.json
+  revision_ref: commit dbf1a08a0d4e47fdad6172e433eeb34bc6b13b4e
+  retrieved_at_utc: '2026-11-06T19:08:36.432883Z'
+  byte_size: 44041
+  sha256: 622e77830b5d0447beacd9359ae069b79dc70777414da55619e9f9c4e4c32d31
+  capture_filename: coqui-TTS-model-index-dbf1a08a.json
+  source_state: commit_pinned
+  corpus_payload: false
+- source_id: coqui_xtts_v2_api_metadata
+  source_authority: Hugging Face model repository metadata
+  category: model_documentation
+  url: https://huggingface.co/api/models/coqui/XTTS-v2
+  revision_ref: model repository head 6c2b0d75eae4b7047358e3b6bd9325f857d43f77
+  retrieved_at_utc: '2026-11-06T19:08:36.264883Z'
+  byte_size: 4141
+  sha256: e64dd7f5a26544c5cc284aefc5d7559b2d6598ff18a03f04172678874ae8ebf5
+  capture_filename: coqui-XTTS-v2-api-metadata.json
+  source_state: mutable_api_record
+  corpus_payload: false
+- source_id: coqui_xtts_v2_license
+  source_authority: Coqui / Hugging Face
+  category: model_license
+  url: https://huggingface.co/coqui/XTTS-v2/raw/6c2b0d75eae4b7047358e3b6bd9325f857d43f77/LICENSE.txt
+  revision_ref: repository commit 6c2b0d75eae4b7047358e3b6bd9325f857d43f77
+  retrieved_at_utc: '2026-11-06T19:08:36.024883Z'
+  byte_size: 4014
+  sha256: 190f6d7c19b8984f91b97712b94ce92d2b2e640fc677dacab966e955ece9d043
+  capture_filename: coqui-XTTS-v2-LICENSE-6c2b0d75.txt
+  source_state: commit_pinned
+  corpus_payload: false
+- source_id: coqui_xtts_v2_model_card
+  source_authority: Coqui / Hugging Face
+  category: model_documentation
+  url: https://huggingface.co/coqui/XTTS-v2/raw/6c2b0d75eae4b7047358e3b6bd9325f857d43f77/README.md
+  revision_ref: repository commit 6c2b0d75eae4b7047358e3b6bd9325f857d43f77
+  retrieved_at_utc: '2026-11-06T19:08:36.152883Z'
+  byte_size: 4263
+  sha256: 1cfa85b3293f685b3a6537f8da3d94820fd111270e553589073885dea3facfb7
+  capture_filename: coqui-XTTS-v2-README-6c2b0d75.md
+  source_state: commit_pinned
+  corpus_payload: false
+- source_id: librivox_about_recording
+  source_authority: LibriVox
+  category: source_corpus_documentation
+  url: https://librivox.org/pages/about-recording/
+  revision_ref: unversioned
+  retrieved_at_utc: '2026-11-06T19:05:22.904883Z'
+  byte_size: 35739
+  sha256: 66bf13d9106aea8138bb2af7c3e9f7aa7a04cdda3846e1430c50ae8ea4a5c2be
+  capture_filename: librivox-about-recording.html
+  source_state: mutable_url
+  corpus_payload: false
+- source_id: librivox_public_domain
+  source_authority: LibriVox
+  category: source_corpus_documentation
+  url: https://librivox.org/pages/public-domain/
+  revision_ref: unversioned
+  retrieved_at_utc: '2026-11-06T19:07:47.764883Z'
+  byte_size: 36128
+  sha256: 814aaee55d6652b51b5b75eefe4ad2edfb6a99fd6d79da0aad4bb40347c48564
+  capture_filename: librivox-public-domain.html
+  source_state: mutable_url
+  corpus_payload: false
+- source_id: odc_by_1_0_legal_code
+  source_authority: Open Knowledge Foundation / Open Data Commons
+  category: license_text
+  url: https://opendatacommons.org/licenses/by/1-0/
+  revision_ref: ODC-By 1.0
+  retrieved_at_utc: '2026-11-06T19:05:23.368883Z'
+  byte_size: 45921
+  sha256: 7d7e622bbb4b5f21b1c5cb2dd7ce8b1b747ee2c3ab9fc8309c19082e12d13b2d
+  capture_filename: odc-by-1.0.html
+  source_state: versioned_license
+  corpus_payload: false
+- source_id: openslr_mls_slr94
+  source_authority: OpenSLR
+  category: source_corpus_documentation
+  url: https://www.openslr.org/94/
+  revision_ref: SLR94
+  retrieved_at_utc: '2026-11-06T19:05:22.244883Z'
+  byte_size: 9521
+  sha256: d19576a2e4bb9d1fc3e0f92bae6bef328180db237cfb94131e5f6af51681c7aa
+  capture_filename: openslr-SLR94.html
+  source_state: mutable_url
+  corpus_payload: false
+- source_id: zenodo_license_14498691
+  source_authority: ASVspoof 5 organizing committee / Zenodo
+  category: license_text
+  url: https://zenodo.org/api/records/14498691/files/LICENSE.txt/content
+  revision_ref: file id c455a236-0f2d-43dd-ac41-2cbd15f21f5f; md5:9cbefc63251e8cbc8eb22e62cd6fe584
+  retrieved_at_utc: '2026-11-06T19:05:17.592883Z'
+  byte_size: 19940
+  sha256: 78f1b27ae45ca0f0648d98cc8e492b3defce4ecab171018184126e959ceb6758
+  capture_filename: zenodo-LICENSE.txt
+  source_state: record_file
+  corpus_payload: false
+- source_id: zenodo_readme_14498691
+  source_authority: ASVspoof 5 organizing committee / Zenodo
+  category: release_documentation
+  url: https://zenodo.org/api/records/14498691/files/README.txt/content
+  revision_ref: file id c74646ef-913a-48fc-8cd3-b85f0e3a4291; md5:784002b8449ba1eeecc042bfad285de7
+  retrieved_at_utc: '2026-11-06T19:05:17.004883Z'
+  byte_size: 12131
+  sha256: c673310a05bd5673e8f4bd5d66045dc030d2a6b92cc10142de1b5db6ba42debd
+  capture_filename: zenodo-README.txt
+  source_state: record_file
+  corpus_payload: false
+- source_id: zenodo_record_14498691_api
+  source_authority: Zenodo
+  category: release_metadata
+  url: https://zenodo.org/api/records/14498691
+  revision_ref: 14498691 revision 6
+  retrieved_at_utc: '2026-11-06T19:05:16.456883Z'
+  byte_size: 14142
+  sha256: 2e3078c325648fe8729d2cd3850efe755599397d10a88f8e8f47b78daa27ffaa
+  capture_filename: zenodo-record-14498691.json
+  source_state: mutable_record
+  corpus_payload: false
+verified_facts:
+- statement_id: vf_release_record
+  statement: Zenodo record 14498691 identifies ASVspoof 5 release v0.1 as a dataset, published 2024-12-18 under
+    the declared ODC-By licence. The captured API record was revision 6, updated 2025-02-14, and exposes direct
+    public file links.
+  source_ids:
+  - zenodo_record_14498691_api
+- statement_id: vf_database_and_bonafide_terms
+  statement: The official README states that the database may be used under ODC-By and separately states that the
+    bona fide data is distributed under CC BY 4.0.
+  source_ids:
+  - zenodo_readme_14498691
+  - zenodo_license_14498691
+  - cc_by_4_0_legal_code
+  - odc_by_1_0_legal_code
+- statement_id: vf_odc_contents_carveout
+  statement: ODC-By 1.0 states that it governs rights over the Database and not copyright or other independent rights
+    in individual Contents; Section 2.4 specifically identifies copyright, data-protection, privacy, and personality
+    rights as examples that may apply to individual Contents.
+  source_ids:
+  - odc_by_1_0_legal_code
+  - zenodo_license_14498691
+- statement_id: vf_odc_notices
+  statement: ODC-By Sections 4.2 and 4.3 impose different notice paths for public conveyance of a database and public
+    use of a Produced Work; Section 4.3 supplies an example database-origin notice.
+  source_ids:
+  - odc_by_1_0_legal_code
+  - zenodo_license_14498691
+- statement_id: vf_bonafide_provenance
+  statement: The ASVspoof 5 design paper says the database is generated from MLS English; bona fide utterances are
+    sourced directly from MLS English. OpenSLR identifies MLS as derived from LibriVox audiobooks and labels SLR94
+    CC BY 4.0.
+  source_ids:
+  - asvspoof5_design_paper_arxiv_v4
+  - asvspoof5_design_paper_hal_v1
+  - openslr_mls_slr94
+- statement_id: vf_librivox_source_policy
+  statement: LibriVox states that volunteer recordings are donated to the public domain and may be reused, but its
+    public-domain page limits certainty to the United States and warns users elsewhere to verify local status.
+  source_ids:
+  - librivox_about_recording
+  - librivox_public_domain
+- statement_id: vf_spoof_generation
+  statement: The design paper says spoof utterances are generated by external contributors using distinct TTS and
+    VC systems, with adversarial attacks in the evaluation set. The official README credits many contributors for
+    creating spoofed data but does not state a separate content licence for spoofed audio.
+  source_ids:
+  - asvspoof5_design_paper_arxiv_v4
+  - asvspoof5_design_paper_hal_v1
+  - zenodo_readme_14498691
+- statement_id: vf_external_attack_dependencies
+  statement: The design paper says A17, A28, and A29 use off-the-shelf systems pre-trained on external datasets;
+    it identifies A28 as a pre-trained Coqui YourTTS system and A29 as a pre-trained Coqui XTTS system. It also
+    documents optional Common Voice 11 use for speaker-encoder training.
+  source_ids:
+  - asvspoof5_design_paper_arxiv_v4
+  - asvspoof5_design_paper_hal_v1
+  - asvspoof5_evaluation_plan_phase1_v0_2
+- statement_id: vf_coqui_public_metadata
+  statement: Pinned Coqui public metadata labels XTTS v1.1 and v2 as CPML and labels the YourTTS model as CC BY-NC-ND
+    4.0. The pinned XTTS v2 CPML text expressly limits both the model and its outputs to non-commercial purposes
+    and requires downstream recipients of output to receive the terms or their URL. These captures do not establish
+    which exact versions, checkpoints, or separate licences the ASVspoof contributors used.
+  source_ids:
+  - coqui_tts_model_index
+  - coqui_xtts_v2_license
+  - coqui_xtts_v2_model_card
+  - coqui_xtts_v2_api_metadata
+- statement_id: vf_common_voice_2022_terms
+  statement: The Mozilla legal documents in force by the Common Voice 11 release required contributors to dedicate
+    contributions to CC0, assert that contributions were their own and non-infringing, and stated that voice recordings
+    and optional demographics may be publicly available under CC0.
+  source_ids:
+  - common_voice_terms_2022_capture
+  - common_voice_privacy_2022_capture
+  - cc0_1_0_legal_code
+- statement_id: vf_challenge_rules
+  statement: The Phase 2 v0.6 plan defines challenge conditions and rules, including data-use restrictions, no pooling
+    of training and development data, independent scoring of test samples, system-description duties, and ethics
+    language. The Zenodo record recommends following the plan for comparability, but the public sources do not expressly
+    classify every rule as binding on independent post-challenge research.
+  source_ids:
+  - asvspoof5_evaluation_plan_phase2_v0_6
+  - zenodo_record_14498691_api
+- statement_id: vf_public_attack_protocol_boundary
+  statement: The design paper says attack-generation protocols are withheld for ethical reasons and are available
+    only on request for detection research or other beneficial and harmless applications.
+  source_ids:
+  - asvspoof5_design_paper_arxiv_v4
+  - asvspoof5_design_paper_hal_v1
+  - zenodo_record_14498691_api
+- statement_id: vf_privacy_and_ethics_notice
+  statement: The official README directs users to comply with local data-protection law, act responsibly, disclose
+    vulnerabilities responsibly, and avoid malicious use. The corpus metadata described in the README includes speaker
+    identifiers and gender fields.
+  source_ids:
+  - zenodo_readme_14498691
+  - asvspoof5_evaluation_plan_phase2_v0_6
+component_assessments:
+- component_id: database_structure
+  role: Database arrangement, protocol metadata, and database rights
+  status: partially_clarified
+  evidence_summary: ODC-By is authoritatively attached to release v0.1 and its database-level terms and notice requirements
+    are captured.
+  unresolved_items: Qualified review must determine how ODC-By contract rights and Produced Work notices apply to
+    the exact offline evaluation and publication workflow.
+  source_ids:
+  - zenodo_record_14498691_api
+  - zenodo_readme_14498691
+  - zenodo_license_14498691
+  - odc_by_1_0_legal_code
+- component_id: bonafide_audio
+  role: Bona fide recordings in train, development, evaluation, and enrolment components
+  status: partially_clarified
+  evidence_summary: The release README expressly distributes bona fide data under CC BY 4.0. Public provenance traces
+    it to MLS English (CC BY 4.0), derived from LibriVox recordings.
+  unresolved_items: Qualified review must address licensor authority, attribution supplied with the material, LibriVox
+    jurisdictional caveats, and privacy/personality/voice considerations not granted by CC BY. Maintainers should
+    confirm that every bona fide and enrolment file is covered.
+  source_ids:
+  - zenodo_readme_14498691
+  - cc_by_4_0_legal_code
+  - openslr_mls_slr94
+  - librivox_public_domain
+  - asvspoof5_design_paper_arxiv_v4
+- component_id: spoof_tts_vc_audio
+  role: TTS and voice-conversion spoof audio
+  status: unresolved
+  evidence_summary: The design paper documents contributor-created spoof audio and source/adaptation flows, but
+    the README grants a separate CC BY content licence only to bona fide data.
+  unresolved_items: The public evidence does not identify a content-level licence, contributor assignment, or other
+    rights basis for every spoof output. Exact contributor agreements and output rights require maintainer clarification.
+  source_ids:
+  - zenodo_readme_14498691
+  - asvspoof5_design_paper_arxiv_v4
+  - asvspoof5_design_paper_hal_v1
+  - odc_by_1_0_legal_code
+- component_id: adversarial_spoof_audio
+  role: Adversarially filtered spoof audio
+  status: unresolved
+  evidence_summary: The paper describes adversarial filters applied to base spoof attacks in the evaluation set.
+  unresolved_items: Rights in the base spoof outputs, adversarial transformations, contributor grants, and any model-output
+    conditions are not publicly resolved.
+  source_ids:
+  - asvspoof5_design_paper_arxiv_v4
+  - asvspoof5_design_paper_hal_v1
+- component_id: mls_attack_inputs
+  role: MLS training, adaptation, source-speech, target-speaker, and input-text components used for attack generation
+  status: partially_clarified
+  evidence_summary: The paper describes MLS English as the principal source, and OpenSLR labels MLS CC BY 4.0.
+  unresolved_items: The exact attribution chain and whether all attack inputs were covered by the same MLS terms
+    require confirmation, especially for attacks using external pre-trained systems.
+  source_ids:
+  - asvspoof5_design_paper_arxiv_v4
+  - openslr_mls_slr94
+  - cc_by_4_0_legal_code
+- component_id: common_voice_dependency
+  role: Optional Common Voice 11 data used to train speaker encoders
+  status: partially_clarified
+  evidence_summary: Historical Mozilla terms and privacy documentation support CC0 treatment and contributor assurances.
+    Common Voice is documented as an optional indirect attack-model dependency, not a published ASVspoof audio component.
+  unresolved_items: Public sources do not identify which attacks used Common Voice, the exact subset, or whether
+    any access-time covenant or notice was intended to flow to generated outputs.
+  source_ids:
+  - asvspoof5_design_paper_arxiv_v4
+  - asvspoof5_evaluation_plan_phase1_v0_2
+  - common_voice_terms_2022_capture
+  - common_voice_privacy_2022_capture
+  - cc0_1_0_legal_code
+- component_id: pretrained_attack_models
+  role: Pre-trained attack models and their outputs, especially A28 YourTTS and A29 XTTS
+  status: unresolved
+  evidence_summary: Current pinned Coqui metadata documents restrictive model terms, and the XTTS v2 CPML expressly
+    addresses outputs.
+  unresolved_items: The exact versions, checkpoints, terms in force at generation, possible separate licences, notice
+    compliance, and downstream status of included outputs are not public. A17 training datasets are also not exhaustively
+    identified.
+  source_ids:
+  - asvspoof5_design_paper_arxiv_v4
+  - coqui_tts_model_index
+  - coqui_xtts_v2_license
+  - coqui_xtts_v2_model_card
+- component_id: challenge_and_access_layer
+  role: Challenge participation rules versus current public post-challenge access
+  status: unresolved
+  evidence_summary: Current Zenodo access is direct and the record recommends the Phase 2 plan for comparable results.
+    The plan also contains participant rules and historic registration/submission requirements.
+  unresolved_items: Maintainers should distinguish rules that remain conditions of dataset use from rules that applied
+    only to ranked 2024 participation or are now methodological recommendations.
+  source_ids:
+  - zenodo_record_14498691_api
+  - asvspoof5_evaluation_plan_phase2_v0_6
+- component_id: privacy_voice_personality
+  role: Privacy, personality, publicity, voice, and data-protection interests
+  status: unresolved
+  evidence_summary: The README expressly calls for compliance with local data-protection law. CC BY and ODC-By do
+    not generally grant third-party privacy/personality rights. LibriVox describes volunteer public-domain contribution,
+    with jurisdictional cautions.
+  unresolved_items: A qualified reviewer must assess the exact jurisdictions and workflow, including cloned target
+    voices, speaker identifiers, voice embeddings, and whether research evaluation triggers biometric or sensitive-data
+    obligations.
+  source_ids:
+  - zenodo_readme_14498691
+  - zenodo_license_14498691
+  - cc_by_4_0_legal_code
+  - librivox_about_recording
+  - librivox_public_domain
+- component_id: notices_and_citation
+  role: ODC-By notices, CC BY attribution, and scholarly citation
+  status: partially_clarified
+  evidence_summary: The legal texts define baseline notice obligations; the README requests citation of the database
+    paper but retains a placeholder line as well as a complete 2024 workshop citation.
+  unresolved_items: Maintainers should supply the preferred current attribution string and confirm whether public
+    aggregate reports or detector artifacts are treated as ODC-By Produced Works. Qualified review must separate
+    required legal notices from requested scholarly citation.
+  source_ids:
+  - zenodo_readme_14498691
+  - odc_by_1_0_legal_code
+  - cc_by_4_0_legal_code
+  - asvspoof5_design_paper_hal_v1
+c3_precondition_assessments:
+- precondition_id: c3_p1
+  c3_precondition: Obtain authoritative maintainer or release documentation clarifying the rights basis for the
+    underlying bona fide and spoof audio Contents, including component-specific terms.
+  status: partially_satisfied
+  evidence_update: Official release documentation now expressly assigns CC BY 4.0 to bona fide data and authoritative
+    papers trace bona fide and attack provenance.
+  remaining_work: Spoof content rights, contributor grants, external model-output terms, and exact versioned component
+    terms remain unresolved; maintainer clarification is still required.
+  source_ids:
+  - zenodo_readme_14498691
+  - asvspoof5_design_paper_arxiv_v4
+  - openslr_mls_slr94
+  - coqui_xtts_v2_license
+- precondition_id: c3_p2
+  c3_precondition: Perform qualified human review of ODC-By-1.0 Sections 2.2, 2.4, 4.2, and 4.3 for the exact research-evaluation
+    workflow.
+  status: unresolved
+  evidence_update: The exact legal text and relevant sections are captured and mapped to the proposed workflow.
+  remaining_work: No qualified human review has occurred, and this packet does not substitute for it.
+  source_ids:
+  - odc_by_1_0_legal_code
+  - zenodo_license_14498691
+- precondition_id: c3_p3
+  c3_precondition: Immutably capture and hash every mutable official source used for the eventual decision, without
+    downloading corpus data.
+  status: satisfied_for_current_public_packet
+  evidence_update: Nineteen public legal or documentation artifacts were captured with exact URLs, UTC retrieval
+    times, byte sizes, SHA-256 values, and revision identities where available. No corpus, protocol archive, audio,
+    or model weights were downloaded.
+  remaining_work: A future decision must verify these exact captures and add any later maintainer response or changed
+    source on which the decision relies.
+  source_ids:
+  - zenodo_record_14498691_api
+  - zenodo_readme_14498691
+  - zenodo_license_14498691
+  - odc_by_1_0_legal_code
+  - asvspoof5_design_paper_arxiv_v4
+- precondition_id: c3_p4
+  c3_precondition: Confirm that all selected partitions and audio components use compatible terms and that no separate
+    participation agreement controls evaluation use.
+  status: unresolved
+  evidence_update: Public documents support one database-level licence and a separate bona fide content licence
+    across the release, while current Zenodo access is direct.
+  remaining_work: The public packet does not establish spoof content terms, external model-output compatibility,
+    exact partition uniformity, or which historic challenge rules continue to control independent use.
+  source_ids:
+  - zenodo_readme_14498691
+  - asvspoof5_evaluation_plan_phase2_v0_6
+  - coqui_tts_model_index
+  - coqui_xtts_v2_license
+qualified_review_items:
+- item_id: qr_odc_contract
+  statement: Determine whether and how ODC-By contract rights in individual Contents affect private evaluation,
+    public aggregate reporting, detector checkpoints, and any Produced Work notice.
+  source_ids:
+  - odc_by_1_0_legal_code
+  - zenodo_license_14498691
+- item_id: qr_bonafide_chain
+  statement: Assess the authority and international effect of the ASVspoof and MLS CC BY grants in light of LibriVox
+    public-domain jurisdiction caveats and the exact intended jurisdiction.
+  source_ids:
+  - zenodo_readme_14498691
+  - openslr_mls_slr94
+  - librivox_public_domain
+  - cc_by_4_0_legal_code
+- item_id: qr_spoof_ownership
+  statement: Assess authorship, neighbouring rights, adaptation rights, and contributor assignments for TTS, VC,
+    and adversarial output files once maintainers supply the missing instruments or confirmation.
+  source_ids:
+  - asvspoof5_design_paper_hal_v1
+  - zenodo_readme_14498691
+- item_id: qr_model_output_terms
+  statement: Determine whether the exact A28/A29 model licences governed generated outputs, whether separate licences
+    were used, and whether downstream research evaluation and publication can comply.
+  source_ids:
+  - coqui_tts_model_index
+  - coqui_xtts_v2_license
+  - asvspoof5_design_paper_arxiv_v4
+- item_id: qr_privacy_biometrics
+  statement: Assess privacy, voice/personality, data-protection, and possible biometric-processing obligations for
+    the exact minimized Track 1 workflow and applicable jurisdictions.
+  source_ids:
+  - zenodo_readme_14498691
+  - cc_by_4_0_legal_code
+  - odc_by_1_0_legal_code
+  - librivox_about_recording
+- item_id: qr_challenge_rules
+  statement: Determine the contractual or methodological status of Phase 2 challenge rules for post-challenge direct
+    Zenodo use.
+  source_ids:
+  - zenodo_record_14498691_api
+  - asvspoof5_evaluation_plan_phase2_v0_6
+- item_id: qr_noncommercial_if_cpml
+  statement: If CPML-governed outputs are confirmed, assess whether the exact VoiceShield activity meets its no-direct-or-indirect-payment
+    conditions, including sponsorship, grants, institutional work, hosted services, and future product separation.
+  source_ids:
+  - coqui_xtts_v2_license
+maintainer_questions:
+- question_id: mq_spoof_content_terms
+  topic: Spoof content rights
+  question: What exact content-level licence or permission applies to every TTS, VC, and adversarial spoof audio
+    file in the public v0.1 release, distinct from ODC-By database rights?
+  reason: The README expressly names CC BY 4.0 only for bona fide data, while ODC-By Section 2.4 does not independently
+    license individual audio Contents.
+  source_ids:
+  - zenodo_readme_14498691
+  - odc_by_1_0_legal_code
+- question_id: mq_contributor_grants
+  topic: Contributor authority
+  question: Did every spoof-data contributor assign or license sufficient rights to the organising committee to
+    publish, permit research evaluation of, and where applicable redistribute the generated outputs? Can the governing
+    contributor terms or a public summary be provided?
+  reason: The paper and README identify many contributors but the public sources do not state the grant covering
+    their output files.
+  source_ids:
+  - zenodo_readme_14498691
+  - asvspoof5_design_paper_hal_v1
+- question_id: mq_model_versions
+  topic: Pre-trained attack models
+  question: Which exact versions and checkpoints generated A17, A28, and A29; what model and output terms applied
+    at generation; and were any separate commercial or research licences obtained?
+  reason: Public Coqui terms can restrict model outputs, but the paper does not identify exact versions or separate
+    licences.
+  source_ids:
+  - asvspoof5_design_paper_arxiv_v4
+  - coqui_tts_model_index
+  - coqui_xtts_v2_license
+- question_id: mq_external_training_data
+  topic: External training data
+  question: Which attack IDs used Common Voice 11 or other external training datasets, and do any access covenants,
+    attribution duties, or output restrictions flow to the released spoof files?
+  reason: The paper identifies optional Common Voice and external pre-training without a complete attack-by-attack
+    rights matrix.
+  source_ids:
+  - asvspoof5_design_paper_arxiv_v4
+  - common_voice_terms_2022_capture
+  - common_voice_privacy_2022_capture
+- question_id: mq_partition_uniformity
+  topic: Partition and component uniformity
+  question: Do the same database-level and content-level terms cover all train, development, evaluation, enrolment,
+    codec-processed, and adversarial components? If not, please provide a component-by-component terms table.
+  reason: A purpose-specific review needs to know whether selecting only Track 1 files avoids differently governed
+    components.
+  source_ids:
+  - zenodo_readme_14498691
+  - asvspoof5_evaluation_plan_phase2_v0_6
+- question_id: mq_bonafide_scope
+  topic: Bona fide scope and attribution
+  question: Does the README statement that bona fide data is CC BY 4.0 cover every bona fide and enrolment file,
+    and what exact creator identification, copyright notice, source URI, and attribution wording should downstream
+    users retain?
+  reason: CC BY attribution depends on information supplied by the licensor, and the current README does not provide
+    a complete machine-readable attribution record.
+  source_ids:
+  - zenodo_readme_14498691
+  - cc_by_4_0_legal_code
+  - openslr_mls_slr94
+- question_id: mq_post_challenge_rules
+  topic: Post-challenge rules
+  question: For independent research using the current direct Zenodo release, which Phase 2 rules remain binding
+    conditions of use, which apply only to ranked 2024 participation, and which are recommendations solely for comparability?
+  reason: The Zenodo record recommends the plan, while the plan uses mandatory participant language and historic
+    registration requirements.
+  source_ids:
+  - zenodo_record_14498691_api
+  - asvspoof5_evaluation_plan_phase2_v0_6
+- question_id: mq_research_reporting
+  topic: Research evaluation and reporting
+  question: Assuming no audio redistribution, is offline Track 1 evaluation and publication of aggregate metrics
+    permitted, and what ODC-By Produced Work notice and scholarly citation do the maintainers require?
+  reason: This clarifies the narrow intended workflow without asking for acquisition or product permission.
+  source_ids:
+  - zenodo_readme_14498691
+  - odc_by_1_0_legal_code
+- question_id: mq_voice_privacy
+  topic: Voice and privacy basis
+  question: What consent, notice, or other rights basis supports using LibriVox-derived speaker recordings as target
+    voices for cloning and distributing those cloned outputs, and are there jurisdictional, withdrawal, identity,
+    or biometric-processing restrictions downstream users must follow?
+  reason: Copyright licences do not by themselves settle privacy, personality, voice, or data-protection obligations.
+  source_ids:
+  - librivox_public_domain
+  - zenodo_readme_14498691
+  - cc_by_4_0_legal_code
+remaining_blockers:
+- No public content-level licence or equivalent authoritative permission has been established for all spoof and
+  adversarial audio files.
+- The exact A17, A28, and A29 versions, checkpoint terms, output restrictions, and any separate licences are unknown.
+- Qualified review of ODC-By, CC BY, model-output terms, jurisdiction, privacy, personality, voice, and possible
+  biometric obligations has not occurred.
+- It is not confirmed which historic Phase 2 rules remain binding for direct post-challenge research.
+- Partition-wide term compatibility and the exact required attribution and Produced Work notice are not confirmed.
+recommended_disposition: defer_pending_conditions
+proposed_restrictions_if_later_approved:
+- Authorize only a segregated, non-product Track 1 research-evaluation workflow for an existing detector; do not
+  infer authorization for Track 2 speaker verification.
+- Do not authorize training, fine-tuning, calibration, threshold freezing, product evaluation, product use, hosted-service
+  use, or raw redistribution under this decision.
+- Ingest only required audio, trial keys, bona fide/spoof labels, attack and codec tags needed for stratified error
+  analysis, and integrity metadata.
+- Hash or remap speaker identifiers solely for leakage prevention; exclude gender and any metadata not required
+  for the approved evaluation.
+- Prohibit identity inference, speaker search, contributor matching, voiceprint enrolment, demographic analysis,
+  target-speaker analysis, and retention of reusable speaker embeddings.
+- Keep raw bytes in access-controlled research storage; publish only aggregate metrics and approved notices, never
+  clips, transcripts, protocols, or row-level scores that enable linkage.
+- Preserve exact ODC-By, CC BY, source, attribution, citation, and any model-output notices required by the qualified
+  decision.
+- Require deletion and incident-response controls and a fresh rights review before any purpose, partition, artifact,
+  jurisdiction, or distribution boundary changes.
+next_review_action: Have a qualified human reviewer assess this packet and approve or revise the maintainer-question
+  draft before any contact. If a response is later obtained, capture it immutably and re-run the non-authorizing
+  review. Do not acquire data or change the registry.
+is_not_legal_advice: true
+is_not_project_rights_decision: true

@@ -309,3 +309,18 @@ Key capabilities and scientific guardrails:
 - **Latency Profiling**: Median (p50), 95th percentile (p95), mean latency, and Real-Time Factor (RTF).
 - **Publication-Quality Artifacts**: Auto-generates Markdown summary tables, machine-readable `metrics.csv`, and figures (`roc_curve.png`, `score_distributions.png`).
 
+---
+
+## 10. Rights-Governed Corpus Planning
+
+Corpus use fails closed through the reviewed registry, evidence, and recommendation layers. Stage C4-A adds a strictly non-authorizing ASVspoof 5 public-source clarification packet. It records 19 small legal, metadata, and documentation captures without including or acquiring corpus audio, protocol archives, checkpoints, or model weights.
+
+ASVspoof 5 remains `planned` / `pending`, with no allowed purpose. The packet clarifies the official ODC-By database layer and the public CC BY 4.0 statement for bona fide audio while keeping spoof-content rights, exact attack-model/output terms, privacy and voice rights, partition uniformity, qualified review, and continuing challenge-rule scope unresolved. Its disposition is still `defer_pending_conditions`.
+
+Validate the packet, capture manifest, frozen C2/C3 inputs, and unchanged registry offline:
+
+```bash
+make validate-asvspoof5-rights
+```
+
+The full findings and unsent maintainer-question draft are in [`docs/asvspoof5_rights_clarification.md`](docs/asvspoof5_rights_clarification.md). Do not contact maintainers, accept terms, acquire data, or infer evaluation permission from the clarification packet without explicit human approval.
