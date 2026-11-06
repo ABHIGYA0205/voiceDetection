@@ -1,0 +1,388 @@
+# VoiceShield Rights-Evidence Dossiers
+# Schema Version 1.0.0
+#
+# Factual source disclosures and rights-evidence signals for candidate speech corpora.
+# In accordance with Stage C2 governance policy, these dossiers document source claims,
+# platform access conditions, and licensing disclosures strictly as evidence.
+#
+# DISCLAIMER: This document and its associated records contain factual evidence captures
+# and technical risk assessments only. They do NOT constitute legal advice, formal legal
+# conclusions, or project rights authorizations. All candidate datasets remain in
+# 'pending' review and 'planned' state with empty allowed purposes.
+
+schema_version: "1.0.0"
+
+dossiers:
+  - corpus_id: "asvspoof5"
+    evidence_as_of: 2026-11-03
+    declared_license_spdx: "ODC-By-1.0"
+    official_release_label: "v0.1"
+    access_mode: "public_direct"
+    source_revision: "14498691"
+    official_sources:
+      - source_id: "zenodo_record_14498691"
+        url: "https://zenodo.org/records/14498691"
+        title: "ASVspoof 5: Design, Collection and Validation of Resources for Spoofing, Deepfake, and Adversarial Attack Detection Using Crowdsourced Speech"
+        revision_ref: "14498691"
+        effective_date: 2024-12-18
+        content_sha256: null
+        immutable_capture_required: false
+        notes: "Official Zenodo publication record 14498691 for release v0.1 under ODC-By-1.0, published on 2024-12-18. Pinned to Zenodo deposit record."
+      - source_id: "odc_by_1_0_license_text"
+        url: "https://opendatacommons.org/licenses/by/1-0/"
+        title: "Open Data Commons Attribution License (ODC-By) v1.0"
+        revision_ref: null
+        effective_date: null
+        content_sha256: null
+        immutable_capture_required: true
+        notes: "Official ODC-By-1.0 legal text. Section 2.2 covers copyright and neighbouring rights in the defined Database, Database Rights, and contract. Section 2.4 states that the license does not cover rights in individual Contents other than Database Rights or rights arising in contract, leaving underlying audio copyright, privacy, and consent unaddressed."
+
+    research_evaluation:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "ODC-By Section 2.2 covers rights in the defined Database, Database Rights, and contract, but Section 2.4 states that the license does not cover rights in individual Contents other than Database Rights or rights arising in contract. Underlying speech audio content rights, privacy, and consent have not undergone formal human review."
+      evidence_source_ids:
+        - "zenodo_record_14498691"
+        - "odc_by_1_0_license_text"
+      is_not_project_rights_decision: true
+
+    research_training:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "Model training on database extracts implicates the ODC-By Database terms, but Section 2.4 does not grant independent rights in individual speech audio Contents other than Database Rights or rights arising in contract; content-level rights remain unreviewed."
+      evidence_source_ids:
+        - "zenodo_record_14498691"
+        - "odc_by_1_0_license_text"
+      is_not_project_rights_decision: true
+
+    product_evaluation:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "ODC-By Section 3.1 expressly includes commercial Use of the Database, subject to its conditions, but commercial readiness cannot be established because Section 2.4 does not grant independent rights in individual speech audio Contents other than Database Rights or rights arising in contract."
+      evidence_source_ids:
+        - "zenodo_record_14498691"
+        - "odc_by_1_0_license_text"
+      is_not_project_rights_decision: true
+
+    product_training:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "Commercial model derivation requires resolving whether a trained model qualifies as a Produced Work under Section 4.3 and separately clearing content-level audio rights that Section 2.4 does not grant."
+      evidence_source_ids:
+        - "zenodo_record_14498691"
+        - "odc_by_1_0_license_text"
+      is_not_project_rights_decision: true
+
+    raw_redistribution:
+      signal: "unclear"
+      rationale: "ODC-By-1.0 permits public conveyance of the Database subject to Section 4.2 conditions, but Section 2.4 does not grant independent rights in underlying audio Contents other than Database Rights or rights arising in contract; those content-level rights remain unresolved."
+      evidence_source_ids:
+        - "zenodo_record_14498691"
+        - "odc_by_1_0_license_text"
+      is_not_project_rights_decision: true
+
+    attribution:
+      signal: "source_declares_restricted"
+      rationale: "ODC-By-1.0 Section 4.2 requires specified license and rights notices when Publicly Conveying the Database, a Derivative Database, or a Collective Database; Section 4.3 separately requires a database-origin notice when Publicly Using a Produced Work. These legal notices are distinct from scholarly citation requests."
+      evidence_source_ids:
+        - "odc_by_1_0_license_text"
+      is_not_project_rights_decision: true
+
+    access_and_account_obligations: "The official Zenodo record presents direct public file-download links without requiring account authentication. No platform or dataset terms have been accepted by the project."
+    data_subject_privacy_considerations: "Corpus contains human vocal recordings across bona fide speakers and speech synthesis attacks. Raw speech raises data-protection, privacy, and consent considerations without asserting definitive biometric classifications; ODC-By-1.0 explicitly disclaims patent, trademark, and privacy/publicity grants."
+    data_minimization_requirements: "Ingest only audio clips, anonymous speaker identifier hashes, and evaluation trial keys. Strictly avoid ingesting extraneous participant demographic or metadata fields."
+    unresolved_questions:
+      - "Database vs. Contents rights: Under ODC-By-1.0 Section 2.2, rights cover the defined Database, Database Rights, and contract, while Section 2.4 does not cover rights in individual Contents other than Database Rights or rights arising in contract. Do dataset creators hold explicit copyright clearance or licenses for underlying speech audio Contents?"
+      - "Legal notices vs citation requests: What exact Section 4.2 notices apply to public conveyance, what Section 4.3 database-origin notice applies to a Publicly Used Produced Work, and what separate scholarly citation is merely requested by the publication record?"
+      - "Produced Work treatment: Does downstream detector artifact evaluation or inference scoring constitute a 'Produced Work' under Section 4.3 of ODC-By-1.0?"
+      - "Component term uniformity: Do all subset partitions (train, dev, eval) and audio files share identical licensing terms, or do certain subsets carry separate constraints?"
+    research_product_segregation_notes: "Both research and product tracks remain unreviewed and pending formal legal clearance. No corpus bytes have been downloaded or ingested."
+    conservative_summary: "ASVspoof 5 is released under ODC-By-1.0. Section 2.2 covers the defined Database, Database Rights, and contract, while Section 2.4 does not cover rights in individual Contents other than Database Rights or rights arising in contract. Underlying audio copyright, consent, and privacy rights remain unresolved. All usage remains pending."
+
+  - corpus_id: "mlaad_v9"
+    evidence_as_of: 2026-11-03
+    declared_license_spdx: "CC-BY-NC-4.0"
+    official_release_label: "v9"
+    access_mode: "account_required"
+    source_revision: "30c3dec763fa4803f11c2df1557d3b0828395366"
+    official_sources:
+      - source_id: "mlaad_project_website"
+        url: "https://deepfake-total.com/mlaad"
+        title: "Multi-Language Audio Anti-Spoofing Dataset (MLAAD) Official Portal"
+        revision_ref: null
+        effective_date: null
+        content_sha256: null
+        immutable_capture_required: true
+        notes: "Official project page indicating version 9 release and non-commercial terms. Mutable web source requiring immutable capture prior to any future project rights decision."
+      - source_id: "mlaad_huggingface_card"
+        url: "https://huggingface.co/datasets/mueller91/MLAAD"
+        title: "Hugging Face Dataset Card: mueller91/MLAAD"
+        revision_ref: "30c3dec763fa4803f11c2df1557d3b0828395366"
+        effective_date: null
+        content_sha256: null
+        immutable_capture_required: false
+        notes: "Official dataset repository card pinned to commit 30c3dec763fa4803f11c2df1557d3b0828395366. Confirms CC-BY-NC-4.0 license, dependency on M-AILABS bona fide audio, and restriction against commercial use."
+      - source_id: "cc_by_nc_4_0_license_text"
+        url: "https://creativecommons.org/licenses/by-nc/4.0/"
+        title: "Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)"
+        revision_ref: null
+        effective_date: null
+        content_sha256: null
+        immutable_capture_required: true
+        notes: "Official CC BY-NC 4.0 legal code. Section 1(i) defines NonCommercial and Section 2(a)(1) limits the licence grant strictly to NonCommercial purposes."
+
+    research_evaluation:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "Non-commercial academic benchmarking and scientific evaluation appear compatible with CC-BY-NC-4.0 under Section 2(a)(1), but institutional clearance and bona fide dependency review remain pending."
+      evidence_source_ids:
+        - "mlaad_project_website"
+        - "mlaad_huggingface_card"
+        - "cc_by_nc_4_0_license_text"
+      is_not_project_rights_decision: true
+
+    research_training:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "Exploratory non-commercial research model training appears compatible with CC-BY-NC-4.0 Section 2(a)(1), provided weights remain strictly segregated from product artifacts."
+      evidence_source_ids:
+        - "mlaad_huggingface_card"
+        - "cc_by_nc_4_0_license_text"
+      is_not_project_rights_decision: true
+
+    product_evaluation:
+      signal: "source_declares_prohibited"
+      rationale: "Official sources declare CC-BY-NC-4.0. Section 1(i) defines NonCommercial and Section 2(a)(1) limits the license grant strictly to NonCommercial purposes. Product evaluation is excluded under current evidence absent a separate commercial license."
+      evidence_source_ids:
+        - "mlaad_project_website"
+        - "mlaad_huggingface_card"
+        - "cc_by_nc_4_0_license_text"
+      is_not_project_rights_decision: true
+
+    product_training:
+      signal: "source_declares_prohibited"
+      rationale: "Official sources declare CC-BY-NC-4.0. Section 1(i) defines NonCommercial and Section 2(a)(1) limits the license grant strictly to NonCommercial purposes. Training models for commercial products or commercial deployment is excluded under current evidence."
+      evidence_source_ids:
+        - "mlaad_project_website"
+        - "mlaad_huggingface_card"
+        - "cc_by_nc_4_0_license_text"
+      is_not_project_rights_decision: true
+
+    raw_redistribution:
+      signal: "source_declares_restricted"
+      rationale: "CC-BY-NC-4.0 Section 2(a)(1) permits Sharing only for NonCommercial purposes; when material is Shared, Section 3(a) requires retention of supplied creator identification and specified notices, a license reference, and indication of modifications."
+      evidence_source_ids:
+        - "cc_by_nc_4_0_license_text"
+      is_not_project_rights_decision: true
+
+    attribution:
+      signal: "source_declares_restricted"
+      rationale: "CC-BY-NC-4.0 Section 3(a) requires retention of creator identification and other attribution information supplied with the Licensed Material, specified notices, a license reference, and indication of modifications when Shared; this is distinct from a scholarly citation request."
+      evidence_source_ids:
+        - "cc_by_nc_4_0_license_text"
+      is_not_project_rights_decision: true
+
+    access_and_account_obligations: "The pinned dataset card instructs users to authenticate with a Hugging Face account before download. No account has been created and no platform terms have been accepted by the project."
+    data_subject_privacy_considerations: "Synthetic speech generated by multi-language neural TTS and voice conversion models. Bona fide reference audio derives from M-AILABS, an external bona fide dependency requiring separate component-level provenance and rights review."
+    data_minimization_requirements: "Ingest only audio clips, language code, and generator architecture tags. Exclude unnecessary textual transcripts and non-speech metadata."
+    unresolved_questions:
+      - "M-AILABS bona fide dependency: MLAAD relies on M-AILABS for corresponding bona fide human speech audio. What are the separate component-level provenance records, license terms, and rights review requirements for M-AILABS before pairing?"
+      - "Commercial licensing availability: Can a separate commercial license or waiver be acquired from Fraunhofer AISEC for product evaluation or commercial detector validation?"
+      - "Scope of NonCommercial: Does public academic benchmarking conducted by commercial or corporate research affiliates qualify as non-commercial research under CC-BY-NC-4.0 Section 1(i) and Section 2(a)(1)?"
+      - "Platform redistribution obligations: Do Hugging Face dataset hosting terms impose additional downstream warranty, indemnity, or redistribution restrictions?"
+    research_product_segregation_notes: "STRICT TRACK SEGREGATION: MLAAD v9 is excluded from product evaluation and product training under current evidence pending clarification of commercial and redistribution terms. Section 1(i) defines NonCommercial and Section 2(a)(1) limits the license grant to NonCommercial purposes. It may only be considered for non-commercial research evaluation if rights review approves it."
+    conservative_summary: "MLAAD v9 contains synthetic speech under CC-BY-NC-4.0. Commercial product evaluation and training are excluded under current evidence by Section 1(i) and Section 2(a)(1). It depends on external M-AILABS data. All usage remains pending."
+
+  - corpus_id: "common_voice_18"
+    evidence_as_of: 2026-11-03
+    declared_license_spdx: "CC0-1.0"
+    official_release_label: "18.0"
+    access_mode: "account_required"
+    source_revision: null
+    official_sources:
+      - source_id: "cv18_release_blog_post"
+        url: "https://www.mozillafoundation.org/en/blog/common-voice-18-dataset-release/"
+        title: "Mozilla Foundation: Common Voice 18 Dataset Release"
+        revision_ref: null
+        effective_date: null
+        content_sha256: null
+        immutable_capture_required: true
+        notes: "Official announcement detailing Common Voice release 18.0 in June 2024 under CC0-1.0. Mutable web source requiring immutable capture prior to any future project rights decision."
+      - source_id: "common_voice_terms_of_use"
+        url: "https://commonvoice.mozilla.org/en/terms"
+        title: "Mozilla Common Voice Terms of Use"
+        revision_ref: null
+        effective_date: 2025-10-31
+        content_sha256: null
+        immutable_capture_required: true
+        notes: "Terms governing Common Voice platform and dataset access, effective 2025-10-31. Asks users not to post, distribute, or mirror the dataset."
+      - source_id: "mdc_consumer_terms_of_service"
+        url: "https://mozilladatacollective.com/terms/consumers"
+        title: "Mozilla Data Collective Consumer Terms"
+        revision_ref: null
+        effective_date: 2026-10-28
+        content_sha256: null
+        immutable_capture_required: true
+        notes: "Governs dataset access via Mozilla Data Collective (MDC), last updated 2026-10-28. Platform covenants restrict mirroring and redistribution except as expressly permitted under the applicable Data Consumer License. Section 2(b)(viii) separately prohibits attempting to determine, trace, match, or re-identify the individual contributor or source of data contained in a Dataset."
+      - source_id: "cc0_1_0_legal_code"
+        url: "https://creativecommons.org/publicdomain/zero/1.0/legalcode.en"
+        title: "Creative Commons CC0 1.0 Universal Legal Code"
+        revision_ref: null
+        effective_date: null
+        content_sha256: null
+        immutable_capture_required: true
+        notes: "Canonical CC0 1.0 legal code. Its waiver and fallback license operate only to the extent of rights held by the affirmer and permitted by applicable law; CC0 provides no warranty that all third-party, privacy, consent, or contractual issues are cleared."
+
+    research_evaluation:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "CC0 operates only for rights held by the affirmer and to the extent legally waivable or licensable; it does not itself establish contributor consent, privacy clearance, contractual authorization, or clearance of third-party rights. Contractual terms accepted upon download via MDC impose covenants that require legal review."
+      evidence_source_ids:
+        - "cv18_release_blog_post"
+        - "common_voice_terms_of_use"
+        - "mdc_consumer_terms_of_service"
+        - "cc0_1_0_legal_code"
+      is_not_project_rights_decision: true
+
+    research_training:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "Public domain dedication under CC0 operates only to the extent of affirmer rights, while MDC Consumer Terms Section 2(b)(viii) imposes binding anti-re-identification restrictions and platform access covenants that must be formally evaluated."
+      evidence_source_ids:
+        - "common_voice_terms_of_use"
+        - "mdc_consumer_terms_of_service"
+        - "cc0_1_0_legal_code"
+      is_not_project_rights_decision: true
+
+    product_evaluation:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "CC0 does not restrict commercial evaluation, but CC0 does not clear third-party rights or consent, and MDC Consumer Terms accepted at download time require contractual analysis for product use."
+      evidence_source_ids:
+        - "common_voice_terms_of_use"
+        - "mdc_consumer_terms_of_service"
+        - "cc0_1_0_legal_code"
+      is_not_project_rights_decision: true
+
+    product_training:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "Commercial model training is theoretically supported under CC0 to the extent of affirmer rights, but MDC platform terms of service and consent scope require verification."
+      evidence_source_ids:
+        - "common_voice_terms_of_use"
+        - "mdc_consumer_terms_of_service"
+        - "cc0_1_0_legal_code"
+      is_not_project_rights_decision: true
+
+    raw_redistribution:
+      signal: "source_declares_restricted"
+      rationale: "Although CC0 waives copyright to the extent held by the affirmer, Common Voice Terms ask users not to post, distribute, or mirror datasets, and MDC Consumer Terms restrict mirroring and redistribution except as permitted under the applicable Data Consumer License."
+      evidence_source_ids:
+        - "common_voice_terms_of_use"
+        - "mdc_consumer_terms_of_service"
+        - "cc0_1_0_legal_code"
+      is_not_project_rights_decision: true
+
+    attribution:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "CC0-1.0 does not legally mandate copyright attribution, but academic citation and ethical credit conventions remain standard practice."
+      evidence_source_ids:
+        - "cv18_release_blog_post"
+        - "common_voice_terms_of_use"
+        - "cc0_1_0_legal_code"
+      is_not_project_rights_decision: true
+
+    access_and_account_obligations: "Requires creating an authenticated user account and agreeing to the Mozilla Data Collective (MDC) Consumer Terms before download access is granted."
+    data_subject_privacy_considerations: "Voluntary crowd-sourced human speech recordings across diverse global languages. MDC Consumer Terms Section 2(b)(viii) contractually prohibits attempting to determine, trace, match, or re-identify the individual contributor or source of data contained in a Dataset. CC0 dedication does not itself establish privacy or consent clearance."
+    data_minimization_requirements: "Ingest strictly audio clips, anonymized client tokens, and verified language/accent tags. Never ingest optional demographic survey responses or perform voice re-identification."
+    unresolved_questions:
+      - "MDC terms vs CC0 reconciliation: How do MDC Consumer Terms (restricting mirroring except under applicable Data Consumer Licenses) interact with the declared CC0-1.0 dedication, which operates only for rights held by the affirmer?"
+      - "Binding re-identification covenant: How will VoiceShield pipelines strictly enforce the binding anti-re-identification restriction under MDC Consumer Terms Section 2(b)(viii) during acoustic modeling and speaker holdout evaluation?"
+      - "Version-specific terms temporal alignment: Terms in force at future access time (e.g. MDC Consumer Terms updated 2026-10-28 and CV Terms effective 2025-10-31) must be reconciled with terms active at June 2024 release."
+      - "Commercial deployment safety: Does downstream commercial product distribution risk violating platform access covenants despite CC0 dataset copyright status?"
+    research_product_segregation_notes: "While CC0 suggests permissive usage, the contractual access layer via MDC and Section 2(b)(viii) anti-re-identification covenants require formal legal analysis before any research or product use."
+    conservative_summary: "Mozilla Common Voice 18 speech audio is declared CC0-1.0 by the affirmer, but CC0 does not establish contributor consent or third-party clearances. Access requires an MDC account; Common Voice Terms ask users not to mirror datasets, and MDC Consumer Terms restrict redistribution except under the applicable Data Consumer License and Section 2(b)(viii) binds users against re-identification. All usage remains pending."
+
+  - corpus_id: "indicvoices"
+    evidence_as_of: 2026-11-03
+    declared_license_spdx: "CC-BY-4.0"
+    official_release_label: null
+    access_mode: "gated_approval"
+    source_revision: "c96f9088f138cf89d419da7e8e643e1f05c00a87"
+    official_sources:
+      - source_id: "indicvoices_huggingface_card"
+        url: "https://huggingface.co/datasets/ai4bharat/IndicVoices"
+        title: "Hugging Face Dataset Card: ai4bharat/IndicVoices"
+        revision_ref: "c96f9088f138cf89d419da7e8e643e1f05c00a87"
+        effective_date: null
+        content_sha256: null
+        immutable_capture_required: false
+        notes: "Official dataset repository pinned to commit c96f9088f138cf89d419da7e8e643e1f05c00a87. Access is gated, requires authentication, and publicly asks the user to share Hugging Face user information and review and accept repository conditions. Unseen conditions remain unresolved."
+      - source_id: "indicvoices_arxiv_paper"
+        url: "https://arxiv.org/abs/2403.01926"
+        title: "IndicVoices: Towards Building an Inclusive Multilingual Speech Dataset for Indian Languages"
+        revision_ref: "2403.01926v1"
+        effective_date: 2024-03-04
+        content_sha256: null
+        immutable_capture_required: false
+        notes: "Official academic paper (version 2403.01926v1, submitted 2024-03-04) asserting CC-BY-4.0 commercial permissions and describing collection methodology and consent protocols."
+      - source_id: "cc_by_4_0_license_text"
+        url: "https://creativecommons.org/licenses/by/4.0/"
+        title: "Creative Commons Attribution 4.0 International (CC BY 4.0)"
+        revision_ref: null
+        effective_date: null
+        content_sha256: null
+        immutable_capture_required: true
+        notes: "Official CC BY 4.0 legal text granting worldwide rights subject to attribution and indication of changes."
+
+    research_evaluation:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "CC-BY-4.0 allows research evaluation with attribution, but gated repository access conditions and privacy compliance have not been formally reviewed."
+      evidence_source_ids:
+        - "indicvoices_huggingface_card"
+        - "cc_by_4_0_license_text"
+      is_not_project_rights_decision: true
+
+    research_training:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "Model training is permitted under CC-BY-4.0, but demographic attributes in published metadata require default-deny data minimization before use."
+      evidence_source_ids:
+        - "indicvoices_huggingface_card"
+        - "cc_by_4_0_license_text"
+      is_not_project_rights_decision: true
+
+    product_evaluation:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "CC-BY-4.0 permits commercial evaluation as cited in the paper, but gated repository conditions on Hugging Face require legal examination."
+      evidence_source_ids:
+        - "indicvoices_huggingface_card"
+        - "indicvoices_arxiv_paper"
+        - "cc_by_4_0_license_text"
+      is_not_project_rights_decision: true
+
+    product_training:
+      signal: "potentially_compatible_not_reviewed"
+      rationale: "Commercial model fitting is supported by CC-BY-4.0 as claimed in the publication, but gated repository conditions and privacy consent boundaries remain unreviewed."
+      evidence_source_ids:
+        - "indicvoices_huggingface_card"
+        - "indicvoices_arxiv_paper"
+        - "cc_by_4_0_license_text"
+      is_not_project_rights_decision: true
+
+    raw_redistribution:
+      signal: "unclear"
+      rationale: "While CC-BY-4.0 allows redistribution with attribution, gated repository access workflows on Hugging Face may restrict third-party mirroring."
+      evidence_source_ids:
+        - "indicvoices_huggingface_card"
+        - "cc_by_4_0_license_text"
+      is_not_project_rights_decision: true
+
+    attribution:
+      signal: "source_declares_restricted"
+      rationale: "CC-BY-4.0 Section 3(a) requires retention of creator identification and other attribution information supplied with the Licensed Material, specified notices, a license reference, and indication of modifications when Shared; this is distinct from scholarly citation of the arXiv paper."
+      evidence_source_ids:
+        - "indicvoices_huggingface_card"
+        - "indicvoices_arxiv_paper"
+        - "cc_by_4_0_license_text"
+      is_not_project_rights_decision: true
+
+    access_and_account_obligations: "Gated access on Hugging Face: access requires authentication and publicly asks the user to share user information and review/accept repository conditions. No terms have been accepted and unseen conditions remain unresolved."
+    data_subject_privacy_considerations: "Speech recordings span 145 Indian districts in paper version 2403.01926v1. The paper states that registration captured names, phone numbers, and an uploaded signed consent form, while participant instructions state that registration information would not be shared with third parties. It separately states that verification videos could not be downloaded or shared and were deleted after verification. The published dataset card schema contains audio, transcripts, demographic/geographic fields, a verification_report field, and unsanitized transcript fields; no assumption is made that those distributed fields are free of incidental personal data."
+    data_minimization_requirements: "Default-deny data minimization required: ingest strictly audio waveforms, anonymous speaker tokens, and language labels. Demographic and geographic metadata present in the published dataset card are excluded by default. Any demographic or geographic use would require a separate, purpose-specific, human-approved protocol with minimization, access controls, retention limits, and documented review. No such exception is approved in C2."
+    unresolved_questions:
+      - "Gated access conditions: What specific legal terms, restrictions, or covenants are incorporated into the Hugging Face gated access conditions that users must review and accept?"
+      - "Demographic and geographic protocol governance: Because demographic and geographic fields are denied by default, what specific human-approved governance protocol, minimization controls, and retention limits would be required if demographic analysis were ever proposed in the future?"
+      - "Attribution vs citation requirements: What exact legal copyright notice is required under CC-BY-4.0 versus academic citation of the arXiv 2403.01926 paper?"
+      - "Commercial rights under CC-BY with gated access: Does AI4Bharat intend to permit commercial product integration under CC-BY-4.0 despite gating access behind repository conditions?"
+    research_product_segregation_notes: "Both research and product tracks remain strictly pending. Gated access approval has not been sought, and no data has been downloaded."
+    conservative_summary: "IndicVoices provides major dialect and language diversity for Indian speech under CC-BY-4.0. Access is gated on Hugging Face, requiring authentication, sharing user info, and accepting conditions. Verification videos were deleted after verification and are not distributed. Published demographic/geographic fields require default-deny data minimization to audio and language only; any demographic/geographic use would require a separate human-approved protocol (no exception approved in C2). All usage remains pending."
