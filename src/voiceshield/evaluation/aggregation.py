@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from itertools import pairwise
 
 import numpy as np
 from pydantic import BaseModel, Field
@@ -22,7 +23,8 @@ class WindowScoreRecord(BaseModel):
     """An individual evaluated window score belonging to an utterance."""
 
     sample_id: str = Field(description="Parent utterance sample identifier.")
-    window_index: int = Field(description="Zero-indexed window sequence number.")
+    window_index: int = Field(ge=0, description="Zero-indexed window sequence number.")
+    continuity_segment_id: int = Field(default=0, ge=0, description="Audio continuity segment.")
     score: float = Field(description="Window detection score or probability.")
     duration_seconds: float = Field(default=4.0, description="Window duration in seconds.")
     active_speech_seconds: float = Field(
@@ -71,12 +73,13 @@ def aggregate_window_scores(
             top_scores = np.sort(scores)[-k:]
             results[sample_id] = float(np.mean(top_scores))
         elif rule == AggregationRule.TEMPORAL_CONSECUTIVE:
-            # Check for at least 2 consecutive windows >= temporal_threshold
-            has_consecutive = False
-            for i in range(len(scores) - 1):
-                if scores[i] >= temporal_threshold and scores[i + 1] >= temporal_threshold:
-                    has_consecutive = True
-                    break
+            has_consecutive = any(
+                right.window_index == left.window_index + 1
+                and right.continuity_segment_id == left.continuity_segment_id
+                and left.score >= temporal_threshold
+                and right.score >= temporal_threshold
+                for left, right in pairwise(sorted_wins)
+            )
             if has_consecutive:
                 results[sample_id] = float(np.max(scores))
             else:

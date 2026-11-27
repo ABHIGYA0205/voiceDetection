@@ -72,7 +72,7 @@ Windows are emitted strictly along the sample grid:
 - **Window 1**: samples $[16000, 80000)$, timestamps $[1.0\text{s}, 5.0\text{s})$
 - **Window $k$**: samples $[k \times 16000, k \times 16000 + 64000)$, timestamps $[k \times 1.0\text{s}, k \times 1.0\text{s} + 4.0\text{s})$
 
-### 2. Full-Window-Only & End-of-Stream Tail Policy
+### 2. Default Full-Window and End-of-Stream Tail Policy
 - Model inference and temporal decision evaluation require an exact, contiguous $64,000$-sample full window.
 - **No Partial / Padded Model Windows**: The pipeline never manufactures a padded or cyclically looped window from less than $4.0\text{s}$ of audio.
 - **Insufficient Contiguous Audio**: Any file or finalized stream with fewer than $64,000$ canonical contiguous samples skips inference, returns null scores, and reports status `insufficient_evidence` with reason `insufficient_contiguous_audio`.
@@ -83,6 +83,13 @@ Windows are emitted strictly along the sample grid:
   - $4.99\text{s}$: window $[0.0, 4.0]$ only.
   - $5.00\text{s}$: windows $[0.0, 4.0]$ and $[1.0, 5.0]$.
   - $5.01\text{s}$: windows $[0.0, 4.0]$ and $[1.0, 5.0]$.
+
+For file experiments, set `windowing.allow_short_files: true` to evaluate a
+single partial window when the entire upload is shorter than four seconds. The
+speech and signal quality checks use only the original samples. The adapter
+can then pad eligible audio to the model's input length. The result marks the
+window as partial and reports the original duration. Streaming and trailing
+windows still follow the canonical hop grid.
 
 ### 3. Decoupled Inference Backpressure
 - Logical window scheduling is completely decoupled from worker backpressure.

@@ -272,6 +272,7 @@ def load_scores_file(
                             WindowScoreRecord(
                                 sample_id=sid,
                                 window_index=actual_idx,
+                                continuity_segment_id=w.get("continuity_segment_id", 0),
                                 score=w_score,
                                 duration_seconds=max(0.0, end_sec - start_sec),
                             )
@@ -361,6 +362,7 @@ def load_scores_file(
                                 WindowScoreRecord(
                                     sample_id=sid,
                                     window_index=actual_idx,
+                                    continuity_segment_id=w.get("continuity_segment_id", 0),
                                     score=w_score,
                                     duration_seconds=max(0.0, end_sec - start_sec),
                                 )
@@ -472,15 +474,17 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     print(f"\nSuccessfully generated evaluation report in: {target_out_dir}")
+    primary = report.by_split.get("test", report.overall)
+    eer = primary.curves.eer
     print(
-        f"- Overall EER: {report.overall.curves.eer:.2%}"
-        if report.overall.curves.eer is not None
-        else "- Overall EER: N/A"
+        f"- {primary.group_name} EER: {eer:.2%}"
+        if eer is not None
+        else f"- {primary.group_name} EER: N/A"
     )
     print(
-        f"- Overall ROC-AUC: {report.overall.curves.roc_auc:.4f}"
-        if report.overall.curves.roc_auc is not None
-        else "- Overall ROC-AUC: N/A"
+        f"- {primary.group_name} ROC-AUC: {primary.curves.roc_auc:.4f}"
+        if primary.curves.roc_auc is not None
+        else f"- {primary.group_name} ROC-AUC: N/A"
     )
     print(
         f"- Operating Threshold: {report.operating_threshold} ({report.deployment_threshold_source})"

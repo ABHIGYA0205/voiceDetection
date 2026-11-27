@@ -117,6 +117,20 @@ def generate_markdown_summary(report: FullEvaluationReport) -> str:
         "",
     ]
 
+    if test := report.by_split.get("test"):
+        overall_heading = lines.index("## 3. Overall Discrimination & Calibration Performance")
+        lines[overall_heading:overall_heading] = [
+            "## Held-out Test Performance",
+            "",
+            f"- Scored trials: {test.sample_count}",
+            f"- EER: {_fmt(test.curves.eer, pct=True)}",
+            f"- Recall: {_fmt(test.classification.recall, pct=True)}",
+            f"- False positive rate: {_fmt(test.classification.fpr, pct=True)}",
+            "",
+            "The overall metrics below pool all supplied records.",
+            "",
+        ]
+
     # FPR @ target TPRs
     if report.overall.curves.fpr_at_tpr:
         lines.extend(
@@ -225,6 +239,7 @@ def generate_markdown_summary(report: FullEvaluationReport) -> str:
 def export_metrics_csv(report: FullEvaluationReport, output_csv_path: Path) -> None:
     """Export tabular metrics for overall and all slices to CSV."""
     all_groups: list[GroupEvaluationResult] = [report.overall]
+    all_groups.extend(report.by_split.values())
     all_groups.extend(report.by_generator)
     all_groups.extend(report.by_source_dataset)
     all_groups.extend(report.by_language)

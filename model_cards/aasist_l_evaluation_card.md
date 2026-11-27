@@ -3,9 +3,9 @@
 **Card Identifier**: `VoiceShield-EvalCard-AASIST-L-v0.1.1`<br>
 **Associated Model Card**: [`aasist_l_model_card.md`](./aasist_l_model_card.md)
 **Evaluation Standard**: ASVspoof 2019 Logical Access (LA) Protocol & VoiceShield M3 Benchmark Suite  
-**Status**: **PARTIAL — ENGINEERING VALIDATED; SCIENTIFIC BENCHMARK PENDING**
-**Card Version**: `1.0.1` (Truthful Baseline)<br>
-**Date**: October 2026  
+**Status**: **ASVSPOOF 2019 LA EER REPRODUCED**
+**Card Version**: `1.0.2`<br>
+**Date**: November 2026
 
 ---
 
@@ -17,7 +17,7 @@
 > - **Upstream Clova AI Reference**: Published ICASSP 2022 metrics are recorded for architectural baseline reference.  
 > - **Official checkpoint**: Acquisition and integrity verification of the official AASIST-L checkpoint are complete.
 > - **Engineering validation**: The real-checkpoint API, transport, CPU/MPS benchmark, browser, and stress-soak validation are complete.
-> - **Scientific evaluation status**: Official eval prerequisites were validated locally without inference: 71,237 protocol trials (7,355 bona fide and 63,882 spoof), 71,933 FLAC stems, zero missing files, and 696 permitted extras. A full scoring attempt was interrupted because of host memory pressure and is not evidence. Local EER, official min t-DCF, ROC-AUC, balanced accuracy, calibration, FPR/FNR, confidence intervals, and external/telephony performance remain not computed.
+> - **Scientific evaluation status**: The [completed VoiceShield run](../reports/asvspoof2019_la_reproduction.md) recorded **0.99% EER** on 71,237 trials (7,355 bona fide and 63,882 spoof). Modern-generator and telephony accuracy remain unmeasured.
 > - **Hardware profiling**: Real-checkpoint latency measurements are linked to the generated report artifact.
 
 ---
@@ -66,11 +66,11 @@ near-duplicate detection; no stronger leakage claim is made.
 
 | Metric | Upstream Published (Clova AI / ICASSP 2022) | VoiceShield Local Evaluation | Status | Report Artefact & Evidence |
 | :--- | :---: | :---: | :---: | :--- |
-| **Equal Error Rate (EER)** | **0.99%** (0.0099) | **NOT COMPUTED** | Pending full scoring | Upstream value only; no local comparison is claimed. |
+| **Equal Error Rate (EER)** | **0.99%** (0.0099) | **0.99%** | Matched upstream | [Completed run](../reports/asvspoof2019_la_reproduction.md). |
 | **Official min t-DCF** | **0.0309** | **NOT COMPUTED** | Not implemented by this runner | Requires official ASV scores, keys, priors, costs, and t-DCF implementation. |
-| **VoiceShield diagnostic normalized minDCF** | Not comparable | **NOT COMPUTED** | Pending full scoring | Not official min t-DCF and never compared with 0.0309. |
-| **Balanced Accuracy** | Not reported in pinned AASIST-L README | **NOT COMPUTED** | Pending full scoring | No upstream estimate is imputed. |
-| **ROC-AUC** | Not reported in pinned AASIST-L README | **NOT COMPUTED** | Pending full scoring | No upstream estimate is imputed. |
+| **VoiceShield diagnostic normalized minDCF** | Not comparable | **0.2615** | Diagnostic | Not official min t-DCF and never compared with 0.0309. |
+| **Balanced Accuracy** | Not reported in pinned AASIST-L README | **NOT COMPUTED** | Outside the completed run | — |
+| **ROC-AUC** | Not reported in pinned AASIST-L README | **NOT COMPUTED** | Outside the completed run | — |
 | **Brier Score** | Not reported upstream | **NOT COMPUTED** | Uncalibrated | Requires an identified fitted calibrator. |
 | **Expected Calibration Error (ECE)** | Not reported upstream | **NOT COMPUTED** | Uncalibrated | Requires an identified fitted calibrator. |
 

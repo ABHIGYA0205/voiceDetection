@@ -81,6 +81,7 @@ class FullEvaluationReport(BaseModel):
 
     overall: GroupEvaluationResult
     score_coverage: ScoreCoverage
+    by_split: dict[str, GroupEvaluationResult] = Field(default_factory=dict)
     by_generator: list[GroupEvaluationResult] = Field(default_factory=list)
     by_source_dataset: list[GroupEvaluationResult] = Field(default_factory=list)
     by_language: list[GroupEvaluationResult] = Field(default_factory=list)
@@ -505,6 +506,20 @@ def evaluate_deepfake_detector(
         compute_bootstrap=True,
     )
 
+    by_split = {
+        split: evaluate_sample_group(
+            f"{split.title()} split",
+            split_records,
+            scores_dict,
+            direction,
+            operating_threshold,
+            config,
+            compute_bootstrap=split == "test",
+        )
+        for split in ("train", "dev", "test")
+        if (split_records := [record for record in records if record.split == split])
+    }
+
     # 6. Breakdown by Generator
     by_generator: list[GroupEvaluationResult] = []
     generator_groups: dict[str, list[ManifestRecord]] = {}
@@ -704,6 +719,7 @@ def evaluate_deepfake_detector(
     return FullEvaluationReport(
         overall=overall_res,
         score_coverage=score_coverage,
+        by_split=by_split,
         by_generator=by_generator,
         by_source_dataset=by_source,
         by_language=by_language,

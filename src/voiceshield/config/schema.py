@@ -96,6 +96,11 @@ class WindowingConfig(StrictFrozenConfigModel):
         description="Root-mean-square (RMS) energy threshold for speech presence.",
     )
 
+    allow_short_files: bool = Field(
+        default=False,
+        description="Evaluate short uploads with model padding after checking the original speech and audio quality.",
+    )
+
     @field_validator("window_seconds", "hop_seconds", "min_speech_seconds", "energy_threshold")
     @classmethod
     def validate_finite_floats(cls, v: float, info: Any) -> float:

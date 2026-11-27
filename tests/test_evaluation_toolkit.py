@@ -568,3 +568,17 @@ def test_full_evaluation_report_and_export(tmp_path: Path) -> None:
     assert "Breakdown by Synthesis / Voice Conversion Generator" in md_content
     assert "Cross-Condition & Generalization Performance" in md_content
     assert "Real-Time Factor" in md_content
+
+
+@pytest.mark.parametrize(("index", "segment"), [(8, 0), (2, 1)])
+def test_temporal_aggregation_requires_adjacency_and_continuity(index: int, segment: int) -> None:
+    windows = [
+        WindowScoreRecord(sample_id="trial", window_index=0, score=0.1),
+        WindowScoreRecord(sample_id="trial", window_index=1, score=0.8),
+        WindowScoreRecord(
+            sample_id="trial", window_index=index, continuity_segment_id=segment, score=0.9
+        ),
+    ]
+    assert aggregate_window_scores(windows, AggregationRule.TEMPORAL_CONSECUTIVE)[
+        "trial"
+    ] == pytest.approx(0.6)

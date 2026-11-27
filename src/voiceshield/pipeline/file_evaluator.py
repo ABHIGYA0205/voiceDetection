@@ -30,7 +30,7 @@ from voiceshield.dsp.reliability import (
     ReliabilityState,
     assess_input_reliability,
 )
-from voiceshield.dsp.scheduler import CanonicalWindowScheduler
+from voiceshield.dsp.scheduler import CanonicalWindowScheduler, LogicalWindow
 from voiceshield.models.base import BaseDetector, DetectorOutput
 from voiceshield.streaming.policy import (
     DecisionState,
@@ -625,6 +625,19 @@ def evaluate_audio(
     )
     logical_windows = scheduler.push_samples(waveform)
 
+    if not logical_windows and waveform.size and effective_window_cfg.allow_short_files:
+        logical_windows = [
+            LogicalWindow(
+                window_index=0,
+                continuity_segment_id=0,
+                samples=waveform,
+                start_sample=0,
+                end_sample=waveform.size,
+                start_time=0.0,
+                end_time=waveform.size / target_sr,
+            )
+        ]
+
     is_mock = getattr(detector, "is_mock", False)
     res_metadata: dict[str, Any] = {
         "model_id": getattr(detector, "model_id", detector.__class__.__name__),
@@ -744,7 +757,7 @@ def evaluate_audio(
                     is_synthetic_suspected=False,
                     active_speech_seconds=speech_sec,
                     is_eligible=False,
-                    is_partial=False,
+                    is_partial=chunk.size < window_samples,
                     abstain_reason=win_abstain,
                     quality_status=chunk_quality,
                     input_reliability=reliability,
@@ -784,7 +797,7 @@ def evaluate_audio(
                     is_synthetic_suspected=is_suspected,
                     active_speech_seconds=speech_sec,
                     is_eligible=True,
-                    is_partial=False,
+                    is_partial=chunk.size < window_samples,
                     abstain_reason=None,
                     quality_status=chunk_quality,
                     input_reliability=reliability,

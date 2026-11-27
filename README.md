@@ -21,13 +21,13 @@ accuracy.
 | Advisory product engineering | **Released** | Local microphone and authorized file analysis, real-time advisory scoring, mixed-evidence reporting, and fail-closed validation are included in v0.1.1. |
 | Official AASIST-L checkpoint execution | **Validated** | Checkpoint identity and integrity checks passed, and real-checkpoint latency was measured on Apple M3 CPU and MPS. |
 | ASVspoof 2019 LA prerequisites | **Passed** | The official evaluation protocol contains 71,237 unique trials: 7,355 bona fide and 63,882 spoof. All protocol IDs have matching audio; 696 permitted extra FLAC files are ignored. |
-| Full ASVspoof 2019 LA baseline | **Pending** | No complete 71,237-trial score set or locally reproduced EER has been accepted as evidence. |
+| Full ASVspoof 2019 LA baseline | **Reproduced** | **0.99% EER** across 71,237 trials with the official AASIST-L checkpoint at commit `f67383a`. See the [reproduction evidence](reports/asvspoof2019_la_reproduction.md). |
 | Official min t-DCF | **Not computed** | The current reproduction runner does not implement the official ASVspoof min t-DCF calculation. Its generic normalized minDCF is not a substitute. |
 | Calibration and modern-generator accuracy | **Not established** | Scores remain uncalibrated, thresholds remain operating heuristics, and broad reliability across modern TTS, voice cloning, languages, codecs, noise, and replay has not been demonstrated. |
 
 The [upstream AASIST results](https://github.com/clovaai/aasist/blob/a04c9863f63d44471dde8a6abcb3b082b07cd1d1/README.md)
 report **0.99% EER** and **0.0309 min t-DCF** for AASIST-L on ASVspoof 2019 LA.
-Those are upstream reference values, not reproduced VoiceShield results.
+VoiceShield reproduced the EER on the official evaluation split.
 
 ### What changed in v0.1.1
 
@@ -296,11 +296,12 @@ uv run voiceshield-eval \
 ```
 
 Key capabilities and scientific guardrails:
-- **Connected-Component Partitioning**: Dataset splits are atomic connected components across declared `speaker_id`, `source_utterance_id`, and declared exact `sha256` checksum links. Holdout constraints operate on whole components. Split ratios currently apply to atomic component counts rather than exact record counts because components cannot be divided. Declared SHA-256 equality is used for component grouping and duplicate detection; the code does not yet verify audio files against declared checksums and does not perform acoustic near-duplicate detection.
+- **Connected-Component Partitioning**: Dataset splits are atomic connected components across declared `speaker_id`, `source_utterance_id`, and declared exact `sha256` checksum links. Holdout constraints operate on whole components. Split ratios currently apply to atomic component counts rather than exact record counts because components cannot be divided. The splitter groups duplicates by declared SHA-256 and leaves acoustic near-duplicate checks to corpus preparation. The field benchmark verifies audio files against the declared checksums.
 - **Strict Score Ingestion**: Preserves exact `0.0` detection scores without Boolean fallback; strictly rejects duplicate IDs, empty values, Boolean types, non-numeric values, and NaN/Inf scores.
 - **Complete Score Coverage by Default**: Default evaluation requires 100% complete score coverage across all unique manifest sample IDs. Unknown score IDs are refused. Partial evaluation requires explicit opt-in (`--allow-partial-scores`) and is prominently flagged in reports.
 - **Threshold-Selection Isolation**: Decision thresholds are selected on `dev` split only (or on `train` split only when no dev split is present); test splits and unassigned mixtures are never used for threshold optimization.
 - **Fail-Closed Calibration**: Raw/softmax scores are uncalibrated and do not produce Brier scores, Expected Calibration Error (ECE), or reliability diagrams without an identified, fitted calibrator artifact. Calibration metrics and reliability plots are unavailable through the high-level evaluator until an identified calibrator artifact loader is implemented.
+- **Held-out metrics**: Reports include results per manifest split and surface the test split when present.
 - **Discrimination Metrics**: Linear-interpolated Equal Error Rate (EER), ROC-AUC, PR-AUC, minDCF with configurable costs ($C_{\text{miss}}, C_{\text{fa}}$) and prior $P_{\text{target}}$, operating FPR at target TPR levels (90%, 95%, 99%).
 - **Operating Point Metrics**: Confusion matrix (TP, FP, TN, FN), Precision, Recall, Specificity, F1 Score, and Balanced Accuracy.
 - **Clustered Bootstrap Inference**: 95% confidence intervals clustered by speaker ID or source utterance to prevent overconfident standard errors from repeated speakers.
@@ -308,6 +309,9 @@ Key capabilities and scientific guardrails:
 - **Cross-Condition Evaluation**: Matched, unseen-generator, unseen-channel, and external-test generalization tables.
 - **Latency Profiling**: Median (p50), 95th percentile (p95), mean latency, and Real-Time Factor (RTF).
 - **Publication-Quality Artifacts**: Auto-generates Markdown summary tables, machine-readable `metrics.csv`, and figures (`roc_curve.png`, `score_distributions.png`).
+
+The [field benchmark](docs/field_benchmark.md) runs labeled WAV/FLAC audio through
+the upload and streaming cores and compares alert policies on a held-out test set.
 
 ---
 

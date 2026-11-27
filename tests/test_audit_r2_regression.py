@@ -747,6 +747,10 @@ def test_threshold_isolation_dev_ignores_test_scores() -> None:
     rep2 = evaluate_deepfake_detector(records, scores_2)
 
     assert rep1.operating_threshold == rep2.operating_threshold
+    assert rep1.overall.sample_count == 4
+    assert rep1.by_split["test"].sample_count == 2
+    assert rep1.by_split["test"].classification.confusion_matrix.total == 2
+    assert rep1.by_split["dev"].sample_count == 2
     assert "selected_on_dev_eer" in rep1.deployment_threshold_source
 
 

@@ -202,9 +202,7 @@ def smoke_report_replacements(diagnostics: dict[str, Any], *, skipped: bool) -> 
         "{{ smoke_mean_bonafide_score }}": format_optional_float(
             diagnostics.get("mean_bonafide_score")
         ),
-        "{{ smoke_mean_spoof_score }}": format_optional_float(
-            diagnostics.get("mean_spoof_score")
-        ),
+        "{{ smoke_mean_spoof_score }}": format_optional_float(diagnostics.get("mean_spoof_score")),
         "{{ smoke_direction_aligned }}": str(diagnostics.get("direction_aligned", "NOT COMPUTED")),
         "{{ smoke_samples }}": str(samples),
         "{{ smoke_bonafide_count }}": str(diagnostics.get("bonafide_samples", "NOT COMPUTED")),
