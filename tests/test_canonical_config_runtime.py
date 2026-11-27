@@ -915,7 +915,9 @@ def test_12i_custom_window_insufficient_audio_explanation() -> None:
     assert "4.0s" not in (res.temporal_rule_explanation or "")
 
 
-def test_12j_voiceshield_eval_cli_canonical_and_explicit_config(tmp_path: Path) -> None:
+def test_12j_voiceshield_eval_cli_canonical_and_explicit_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """12.J: voiceshield-eval uses canonical config (500 bootstrap iterations) on omission, and explicit config overrides."""
     from voiceshield.evaluation.cli import main as eval_main
 
@@ -943,6 +945,8 @@ def test_12j_voiceshield_eval_cli_canonical_and_explicit_config(tmp_path: Path) 
         patch("voiceshield.evaluation.cli.save_evaluation_report"),
     ):
         dummy_report = MagicMock()
+        dummy_report.by_split = {}
+        dummy_report.overall.group_name = "Overall"
         dummy_report.overall.curves.eer = 0.05
         dummy_report.overall.curves.roc_auc = 0.95
         dummy_report.overall.dcf.min_dcf = 0.05
@@ -962,6 +966,7 @@ def test_12j_voiceshield_eval_cli_canonical_and_explicit_config(tmp_path: Path) 
             ]
         )
         assert ret == 0
+        assert "- Overall EER: 5.00%" in capsys.readouterr().out
         mock_eval.assert_called_once()
         used_cfg = mock_eval.call_args.kwargs["config"]
         assert used_cfg is not None
@@ -974,6 +979,11 @@ def test_12j_voiceshield_eval_cli_canonical_and_explicit_config(tmp_path: Path) 
         dump_config(custom_cfg, custom_cfg_file)
 
         mock_eval.reset_mock()
+        test_group = MagicMock()
+        test_group.group_name = "Test split"
+        test_group.curves.eer = 0.1
+        test_group.curves.roc_auc = 0.9
+        dummy_report.by_split = {"test": test_group}
         ret2 = eval_main(
             [
                 "--manifest",
@@ -987,6 +997,9 @@ def test_12j_voiceshield_eval_cli_canonical_and_explicit_config(tmp_path: Path) 
             ]
         )
         assert ret2 == 0
+        output = capsys.readouterr().out
+        assert "- Test split EER: 10.00%" in output
+        assert "- Test split ROC-AUC: 0.9000" in output
         used_cfg2 = mock_eval.call_args.kwargs["config"]
         assert used_cfg2.evaluation.bootstrap_iterations == 200
         assert used_cfg2.compute_hash() == custom_cfg.compute_hash()
