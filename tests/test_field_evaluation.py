@@ -115,6 +115,7 @@ def test_field_report_replays_both_paths_and_uses_dev_threshold(
     assert field.main(["--manifest", str(manifest), "--target-fpr", "0"]) == 0
     report = json.loads(capsys.readouterr().out)
     policies = report["policies"]
+    assert report["config_hash"] != report["short_file_config_hash"]
     assert report["dev_bonafide_trials"] == 1
     assert report["held_out_generators"] == ["synthetic-3"]
     assert policies["stream_current"]["test"]["false_alerts_per_bonafide_hour"] == 450

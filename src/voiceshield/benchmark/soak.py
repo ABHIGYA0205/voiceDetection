@@ -28,7 +28,7 @@ def _get_current_rss_mb() -> float:
 
 def _get_mps_allocated_mb() -> float | None:
     """Return current allocated Metal memory on Apple Silicon if available."""
-    if hasattr(torch, "mps") and hasattr(torch.mps, "current_allocated_memory"):
+    if torch.backends.mps.is_available():
         try:
             return float(torch.mps.current_allocated_memory()) / (1024.0 * 1024.0)
         except Exception:

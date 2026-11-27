@@ -310,8 +310,14 @@ class VoiceShieldConfig(StrictFrozenConfigModel):
 
     def compute_hash(self) -> str:
         """Compute deterministic SHA-256 hash of this configuration."""
+        # Preserve the recorded identity of configurations that use the original windowing path.
+        config = self.model_dump(
+            exclude=None
+            if self.windowing.allow_short_files
+            else {"windowing": {"allow_short_files"}}
+        )
         canonical_json = json.dumps(
-            self.model_dump(),
+            config,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,

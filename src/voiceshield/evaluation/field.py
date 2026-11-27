@@ -16,7 +16,7 @@ from typing import Any
 
 import soundfile as sf
 
-from voiceshield.config.loader import load_config
+from voiceshield.config.loader import ConfigError, load_config
 from voiceshield.config.schema import VoiceShieldConfig
 from voiceshield.data.io import ManifestIOError, load_manifest
 from voiceshield.data.leakage import check_leakage
@@ -331,12 +331,20 @@ def main(argv: list[str] | None = None) -> int:
         report = {
             "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
             "config_hash": config.compute_hash(),
+            "short_file_config_hash": short_config.compute_hash(),
             "model": detector.provenance.model_dump(mode="json"),
             "held_out_generators": sorted(g for g in held_out if g),
             "stream_replay": "20 ms PCM frames through StreamingSession with synchronous inference",
             **compare(trials, args.target_fpr),
         }
-    except (AudioPreprocessingError, ManifestIOError, OSError, RuntimeError, ValueError) as exc:
+    except (
+        AudioPreprocessingError,
+        ConfigError,
+        ManifestIOError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
         print(f"Field evaluation failed: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(report, indent=2, allow_nan=False))
